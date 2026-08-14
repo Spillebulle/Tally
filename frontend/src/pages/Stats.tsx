@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { compactNumber, formatWatchTime } from '@/lib/utils'
@@ -45,6 +46,7 @@ function ChartCard({
 }
 
 export function Stats() {
+  const navigate = useNavigate()
   const [range, setRange] = useState<Range>('365')
   const [scope, setScope] = useState<'all' | 'anime'>('all')
 
@@ -147,7 +149,11 @@ export function Stats() {
         />
         <StatTile
           label="Average rating"
-          value={data.average_rating != null ? `${(data.average_rating / 2).toFixed(1)} / 5` : '—'}
+          value={
+            data.average_rating != null
+              ? `${data.average_rating.toFixed(1)} / 10`
+              : '—'
+          }
           hint="Across everything you have rated"
           icon={<StarIcon filled />}
         />
@@ -163,18 +169,22 @@ export function Stats() {
       <div className="grid gap-6 lg:grid-cols-2">
         <ChartCard
           title="Most-watched genres"
-          description="Counted per play, so a binged series weighs more than a single film."
+          description="Counted per play, so a binged series weighs more than a single film. Pick one to browse it."
           table={<DataTable caption="Plays by genre" rows={data.top_genres} valueHeader="Plays" />}
         >
-          <BarList data={data.top_genres} emptyMessage="No genre data yet" />
+          <BarList
+            data={data.top_genres}
+            emptyMessage="No genre data yet"
+            onSelect={(genre) => navigate(`/browse?genre=${encodeURIComponent(genre)}`)}
+          />
         </ChartCard>
 
         <ChartCard
           title="How you rate things"
-          description="Your own star ratings, synced both ways with Plex."
+          description="Your own ratings out of 10, synced both ways with Plex. Pick a bar to see those titles."
           table={
             <DataTable
-              caption="Ratings by star value"
+              caption="Titles by rating out of 10"
               rows={data.rating_distribution}
               valueHeader="Titles"
             />
@@ -182,8 +192,14 @@ export function Stats() {
         >
           <ColumnChart
             data={data.rating_distribution}
-            formatLabel={(label) => `${label}★`}
+            formatLabel={(label) => label}
             emptyMessage="You have not rated anything yet"
+            describe={(entry) =>
+              `${entry.value} ${entry.value === 1 ? 'title' : 'titles'} rated ${entry.label}/10`
+            }
+            onSelect={(score) =>
+              navigate(`/browse?min_rating=${score}&max_rating=${score}`)
+            }
           />
         </ChartCard>
       </div>

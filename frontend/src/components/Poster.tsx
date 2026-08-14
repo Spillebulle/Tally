@@ -4,8 +4,8 @@ import {
   cn,
   displaySubtitle,
   displayTitle,
+  formatRating,
   posterFallbackGradient,
-  ratingToStars,
 } from '@/lib/utils'
 import { CheckIcon, SparkIcon, StarIcon } from './Icons'
 import { Spinner } from './ui'
@@ -35,7 +35,6 @@ export function Poster({
 }: PosterProps) {
   const title = displayTitle(card)
   const subtitle = displaySubtitle(card)
-  const stars = ratingToStars(card.rating)
   const progress = card.progress_percent
   const episodeProgress =
     card.watched_episodes != null && card.total_episodes
@@ -113,10 +112,11 @@ export function Poster({
                        transition-opacity duration-300
                        group-hover/poster:opacity-100 group-focus-within/poster:opacity-100"
           >
-            {stars > 0 ? (
+            {card.rating != null && card.rating > 0 ? (
               <span className="flex items-center gap-0.5 text-[11px] text-white/90">
                 <StarIcon filled className="text-warn" />
-                {stars.toFixed(1)}
+                {formatRating(card.rating)}
+                <span className="text-white/60">/10</span>
               </span>
             ) : (
               <span />

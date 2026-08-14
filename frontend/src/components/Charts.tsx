@@ -44,9 +44,18 @@ interface BarListProps {
   data: StatCount[]
   unit?: string
   emptyMessage?: string
+  /** Makes each row a button. Given the row's label. */
+  onSelect?: (label: string) => void
+  activeLabel?: string | null
 }
 
-export function BarList({ data, unit = '', emptyMessage = 'No data yet' }: BarListProps) {
+export function BarList({
+  data,
+  unit = '',
+  emptyMessage = 'No data yet',
+  onSelect,
+  activeLabel = null,
+}: BarListProps) {
   if (data.length === 0) {
     return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
   }
@@ -54,25 +63,56 @@ export function BarList({ data, unit = '', emptyMessage = 'No data yet' }: BarLi
 
   return (
     <ul className="space-y-2.5">
-      {data.map((entry) => (
-        <li key={entry.label} className="grid grid-cols-[7.5rem_1fr_3rem] items-center gap-3">
-          <span className="truncate text-sm text-subtle" title={entry.label}>
-            {entry.label}
-          </span>
-          {/* Track is a lighter step of the same hue, so state reads across the bar. */}
-          <div className="h-3 overflow-hidden rounded-r-[4px] bg-accent/10">
-            <div
-              className="h-full rounded-r-[4px] bg-series-1 transition-[width] duration-700 ease-spring"
-              style={{ width: `${Math.max(2, (entry.value / max) * 100)}%` }}
-            />
-          </div>
-          {/* Direct label at the data end. */}
-          <span className="text-right text-sm font-medium tabular-nums text-ink">
-            {compactNumber(entry.value)}
-            {unit}
-          </span>
-        </li>
-      ))}
+      {data.map((entry) => {
+        const active = activeLabel === entry.label
+        const row = (
+          <>
+            <span className="truncate text-left text-sm text-subtle" title={entry.label}>
+              {entry.label}
+            </span>
+            {/* Track is a lighter step of the same hue, so state reads across the bar. */}
+            <div className="h-3 overflow-hidden rounded-r-[4px] bg-accent/10">
+              <div
+                className={cn(
+                  'h-full rounded-r-[4px] transition-[width,background-color]',
+                  'duration-700 ease-spring',
+                  active ? 'bg-accent' : 'bg-series-1',
+                  onSelect && !active && 'group-hover/bar:bg-accent',
+                )}
+                style={{ width: `${Math.max(2, (entry.value / max) * 100)}%` }}
+              />
+            </div>
+            {/* Direct label at the data end. */}
+            <span className="text-right text-sm font-medium tabular-nums text-ink">
+              {compactNumber(entry.value)}
+              {unit}
+            </span>
+          </>
+        )
+
+        const layout = 'grid w-full grid-cols-[7.5rem_1fr_3rem] items-center gap-3'
+        return (
+          <li key={entry.label}>
+            {onSelect ? (
+              <button
+                type="button"
+                onClick={() => onSelect(entry.label)}
+                aria-pressed={active}
+                aria-label={`${entry.label}: ${entry.value}${unit}`}
+                className={cn(
+                  layout,
+                  'group/bar cursor-pointer rounded-lg py-0.5 focus-visible:outline-none',
+                  'focus-visible:ring-2 focus-visible:ring-accent',
+                )}
+              >
+                {row}
+              </button>
+            ) : (
+              <div className={layout}>{row}</div>
+            )}
+          </li>
+        )
+      })}
     </ul>
   )
 }
@@ -85,12 +125,21 @@ interface ColumnChartProps {
   data: StatCount[]
   formatLabel?: (label: string) => string
   emptyMessage?: string
+  /** Makes each column a button. Given the bar's label. */
+  onSelect?: (label: string) => void
+  /** Tooltip/aria text for a column; falls back to "<label>: <value>". */
+  describe?: (entry: StatCount) => string
+  /** Label of the column currently reflected elsewhere, e.g. an active filter. */
+  activeLabel?: string | null
 }
 
 export function ColumnChart({
   data,
   formatLabel = (label) => label,
   emptyMessage = 'No ratings yet',
+  onSelect,
+  describe,
+  activeLabel = null,
 }: ColumnChartProps) {
   const total = data.reduce((sum, d) => sum + d.value, 0)
   if (total === 0) {
@@ -99,11 +148,15 @@ export function ColumnChart({
   const max = Math.max(...data.map((d) => d.value), 1)
 
   return (
-    <div className="flex h-44 items-end gap-2">
+    // Tighter gap on narrow screens: the rating chart went from five columns to
+    // ten, and a fixed 8px gutter ate most of the width on a phone.
+    <div className="flex h-44 items-end gap-1 sm:gap-2">
       {data.map((entry) => {
         const height = (entry.value / max) * 100
-        return (
-          <div key={entry.label} className="flex flex-1 flex-col items-center gap-2">
+        const active = activeLabel === entry.label
+        const text = describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`
+        const bar = (
+          <>
             {/* Value on the cap. */}
             <span className="text-xs font-medium tabular-nums text-ink">
               {entry.value || ''}
@@ -111,13 +164,49 @@ export function ColumnChart({
             <div className="flex w-full flex-1 items-end justify-center">
               <div
                 // ≤24px thick; rounded at the data end, square at the baseline.
-                className="w-full max-w-[24px] rounded-t-[4px] bg-series-1
-                           transition-[height] duration-700 ease-spring"
+                className={cn(
+                  'w-full max-w-[24px] rounded-t-[4px] transition-[height,background-color]',
+                  'duration-700 ease-spring',
+                  active ? 'bg-accent' : 'bg-series-1',
+                  onSelect && !active && 'group-hover/col:bg-accent',
+                )}
                 style={{ height: `${Math.max(entry.value ? 4 : 0, height)}%` }}
               />
             </div>
-            <span className="text-xs text-muted">{formatLabel(entry.label)}</span>
-          </div>
+            <span className={cn('text-xs', active ? 'text-ink' : 'text-muted')}>
+              {formatLabel(entry.label)}
+            </span>
+          </>
+        )
+
+        if (!onSelect) {
+          return (
+            <div
+              key={entry.label}
+              className="flex flex-1 flex-col items-center gap-2"
+              title={text}
+            >
+              {bar}
+            </div>
+          )
+        }
+
+        return (
+          <button
+            key={entry.label}
+            type="button"
+            // The whole column is the hit target, not just the drawn bar — a
+            // short bar is only a few pixels tall and would be unclickable.
+            className="group/col flex flex-1 cursor-pointer flex-col items-center gap-2
+                       rounded-lg focus-visible:outline-none focus-visible:ring-2
+                       focus-visible:ring-accent"
+            onClick={() => onSelect(entry.label)}
+            title={text}
+            aria-label={text}
+            aria-pressed={active}
+          >
+            {bar}
+          </button>
         )
       })}
     </div>

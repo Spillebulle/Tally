@@ -200,7 +200,8 @@ class HistoryPage(BaseModel):
 
 
 class RatingRequest(BaseModel):
-    # Plex's 0-10 scale (its UI renders 5 stars at half-star granularity).
+    # Plex's 0-10 scale, which Tally now also shows directly. Plex's own UI
+    # renders it as five stars at half-star granularity; the number is the same.
     rating: float | None = Field(default=None, ge=0, le=10)
     push_to_plex: bool = True
 

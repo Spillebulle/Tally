@@ -97,11 +97,18 @@ export const STATUS_DOT: Record<WatchStatus, string> = {
   dropped: 'bg-danger',
 }
 
-/** Plex stores 0–10; the UI shows 5 stars at half-star granularity. */
-export const ratingToStars = (rating: number | null): number =>
-  rating === null ? 0 : Math.round((rating / 2) * 2) / 2
+/**
+ * Ratings are 0–10 everywhere: that is what Plex stores, what MyAnimeList uses,
+ * and now what Tally shows. There is deliberately no conversion step — the old
+ * five-star display meant every rating was divided on the way out and doubled on
+ * the way back, and a value like 7 could only ever render as "3.5 stars".
+ */
+export const RATING_MAX = 10
+export const RATING_SCALE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const
 
-export const starsToRating = (stars: number): number => stars * 2
+/** Trim the decimal when a rating is whole: "8" rather than "8.0". */
+export const formatRating = (rating: number | null): string =>
+  rating === null ? '—' : Number.isInteger(rating) ? String(rating) : rating.toFixed(1)
 
 export function episodeCode(card: MediaCard): string | null {
   if (card.media_type !== 'episode') return null
