@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -57,6 +58,20 @@ def _ts(value: Any) -> datetime | None:
         return None
 
 
+# Failure state lives at module level on purpose: SyncService builds a fresh
+# PlexServerClient for every run, so anything stored on the instance is
+# forgotten between polls — which is exactly how a server that is down ends up
+# being re-probed at full rate forever.
+_COOLDOWN_BASE_SECONDS = 30.0
+_COOLDOWN_MAX_SECONDS = 300.0
+_failures: dict[str, tuple[int, float]] = {}
+
+
+def reset_failure_state() -> None:
+    """Forget every recorded failure. For tests and for an explicit retry."""
+    _failures.clear()
+
+
 class PlexServerClient:
     def __init__(
         self,
@@ -81,6 +96,22 @@ class PlexServerClient:
         self, method: str, path: str, *, params: dict | None = None, retries: int = 1
     ) -> httpx.Response | None:
         params = {**(params or {})}
+
+        # A server advertises one URI per address it can see, and a Plex install
+        # that is itself in Docker advertises every bridge gateway on its host —
+        # seven or eight candidates is normal. Walking all of them costs a DNS
+        # lookup each (two, counting the AAAA), so probing a server that is down
+        # is expensive. Once a full walk has failed, wait before doing it again
+        # instead of repeating it on every poll.
+        key = self.candidates[0] if self.candidates else self.base_url
+        count, retry_after = _failures.get(key, (0, 0.0))
+        now = time.monotonic()
+        if now < retry_after:
+            raise PlexUnreachable(
+                f"Plex server unreachable; not retrying for another "
+                f"{retry_after - now:.0f}s ({count} consecutive failures)"
+            )
+
         urls = [self.working_url] if self.working_url else list(self.candidates)
         if self.working_url and self.working_url in self.candidates:
             # Keep the rest as fallbacks in case the cached URI has gone away.
@@ -125,8 +156,22 @@ class PlexServerClient:
                         break  # try the next URI rather than hammering a sick server
 
                     self.working_url = url
+                    _failures.pop(key, None)
                     return resp
 
+        # Every candidate failed. Back off before the next full walk, doubling
+        # each time, so a server that stays down costs one probe per cooldown
+        # rather than one per poll.
+        count += 1
+        delay = min(_COOLDOWN_MAX_SECONDS, _COOLDOWN_BASE_SECONDS * 2 ** (count - 1))
+        _failures[key] = (count, time.monotonic() + delay)
+        log.warning(
+            "Plex server unreachable after trying %s connection URI(s); "
+            "backing off for %.0fs. Last error: %s",
+            len(urls),
+            delay,
+            last_error,
+        )
         raise PlexUnreachable(
             f"No reachable connection for Plex server (tried {len(urls)}): {last_error}"
         )

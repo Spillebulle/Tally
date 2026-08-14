@@ -244,6 +244,8 @@ async def test_a_failing_request_opens_only_one_connection(monkeypatch):
 
     from app.services import plex_server as ps
 
+    # Failure state is module level, so it outlives a test unless cleared.
+    ps.reset_failure_state()
     built = 0
 
     class CountingClient:
@@ -281,6 +283,72 @@ async def test_a_failing_request_opens_only_one_connection(monkeypatch):
     # Three candidates with one retry each is six attempts — but they must all
     # share a single pooled client rather than opening six connections.
     assert built == 1
+
+
+async def test_an_unreachable_server_is_not_re_probed_every_poll(monkeypatch):
+    """Regression: a downed server must back off, not re-walk every candidate.
+
+    Plex advertises one connection URI per address it can see, and a Plex
+    install running in Docker advertises every bridge gateway on its host — so
+    a full walk is seven or eight hostnames, each costing an A and a AAAA
+    lookup. Repeating that on a one-second poll is thousands of DNS queries a
+    minute, which is enough to get a filtering resolver to throttle the whole
+    container and keep the failure alive.
+    """
+    import httpx
+
+    from app.services import plex_server as ps
+
+    ps.reset_failure_state()
+    requests = 0
+
+    class DeadClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> bool:
+            return False
+
+        async def request(self, *args, **kwargs):
+            nonlocal requests
+            requests += 1
+            raise httpx.ConnectError("name resolution failed")
+
+    monkeypatch.setattr(ps.httpx, "AsyncClient", DeadClient)
+    monkeypatch.setattr(ps.asyncio, "sleep", lambda _delay: _async(None))
+
+    def build():
+        return ps.PlexServerClient(
+            "https://192-168-0-2.hash.plex.direct:32400",
+            "token",
+            candidate_urls=[
+                "https://192-168-0-2.hash.plex.direct:32400",
+                "https://172-17-0-1.hash.plex.direct:32400",
+                "https://172-18-0-1.hash.plex.direct:32400",
+            ],
+        )
+
+    with pytest.raises(ps.PlexUnreachable):
+        await build()._request("GET", "/status/sessions")
+    after_first_walk = requests
+    assert after_first_walk > 0
+
+    # A fresh client, as the scheduler builds on every poll, must not repeat the
+    # walk while the cooldown is active.
+    for _ in range(5):
+        with pytest.raises(ps.PlexUnreachable):
+            await build()._request("GET", "/status/sessions")
+
+    assert requests == after_first_walk
+
+    # Once the cooldown lapses, it tries again rather than giving up forever.
+    ps._failures.clear()
+    with pytest.raises(ps.PlexUnreachable):
+        await build()._request("GET", "/status/sessions")
+    assert requests > after_first_walk
 
 
 def _async(value):
