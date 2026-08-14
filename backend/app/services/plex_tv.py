@@ -13,6 +13,8 @@ Plex Media Server):
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -48,8 +50,21 @@ def plex_headers(token: str | None = None) -> dict[str, str]:
     return headers
 
 
-class PlexAuthError(RuntimeError):
-    pass
+class PlexTVError(RuntimeError):
+    """Anything that went wrong talking to plex.tv."""
+
+
+class PlexAuthError(PlexTVError):
+    """Plex rejected the credentials."""
+
+
+class PlexUnreachableError(PlexTVError):
+    """plex.tv could not be reached at all.
+
+    Distinct from an auth failure: the request never got an answer. In a
+    container this is almost always DNS or blocked egress rather than anything
+    to do with the user's account, and the fix is completely different.
+    """
 
 
 @dataclass(slots=True)
@@ -109,11 +124,30 @@ class PlexTVClient:
     def __init__(self, timeout: float = 20.0) -> None:
         self._timeout = timeout
 
+    @asynccontextmanager
+    async def _http(self) -> AsyncIterator[httpx.AsyncClient]:
+        """An httpx client whose transport failures become PlexUnreachableError.
+
+        Every call in this module leaves the machine, so a container with no
+        egress or broken DNS fails on all of them. Left raw, httpx's ConnectError
+        escapes to the catch-all handler and the user gets "Something went
+        wrong" plus a wall of traceback that never mentions the network.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as raw:
+                yield raw
+        except httpx.RequestError as exc:
+            # Covers DNS failure, refused connections, TLS errors and timeouts.
+            raise PlexUnreachableError(
+                f"Could not reach {PLEX_TV} ({exc.__class__.__name__}: {exc}). "
+                "Check that the container has internet access and working DNS."
+            ) from exc
+
     # -- OAuth PIN flow ---------------------------------------------------
 
     async def create_pin(self, state: str, forward_url: str) -> PlexPinResponse:
         """Ask Plex for a PIN and build the URL to send the browser to."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             resp = await client.post(
                 f"{PLEX_TV}/api/v2/pins",
                 headers=plex_headers(),
@@ -140,7 +174,7 @@ class PlexTVClient:
 
     async def check_pin(self, pin_id: str) -> str | None:
         """Poll a PIN. Returns the auth token once the user has approved it."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             resp = await client.get(
                 f"{PLEX_TV}/api/v2/pins/{pin_id}",
                 headers=plex_headers(),
@@ -154,7 +188,7 @@ class PlexTVClient:
     # -- Account ----------------------------------------------------------
 
     async def get_account(self, token: str) -> PlexAccount:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             resp = await client.get(f"{PLEX_TV}/api/v2/user", headers=plex_headers(token))
         if resp.status_code == 401:
             raise PlexAuthError("Plex token is no longer valid")
@@ -171,7 +205,7 @@ class PlexTVClient:
 
     async def get_home_users(self, token: str) -> list[dict[str, Any]]:
         """Managed/home users on the account — used for multi-user setups."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             resp = await client.get(
                 f"{PLEX_TV}/api/v2/home/users", headers=plex_headers(token)
             )
@@ -183,7 +217,7 @@ class PlexTVClient:
     # -- Servers ----------------------------------------------------------
 
     async def get_resources(self, token: str) -> list[PlexResource]:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             resp = await client.get(
                 f"{PLEX_TV}/api/v2/resources",
                 headers=plex_headers(token),
@@ -230,7 +264,7 @@ class PlexTVClient:
         items: list[dict[str, Any]] = []
         offset, page_size = 0, 100
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             while True:
                 resp = await client.get(
                     f"{DISCOVER}/library/sections/watchlist/all",
@@ -269,7 +303,7 @@ class PlexTVClient:
         rating_key = plex_guid.rsplit("/", 1)[-1] if plex_guid else ""
         if not rating_key:
             return False
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             resp = await client.put(
                 f"{DISCOVER}/actions/{action}",
                 headers=plex_headers(token),
@@ -284,7 +318,7 @@ class PlexTVClient:
         self, token: str, query: str, limit: int = 20
     ) -> list[dict[str, Any]]:
         """Search Plex's global catalogue — lets users watchlist things they don't own."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with self._http() as client:
             resp = await client.get(
                 f"{DISCOVER}/library/search",
                 headers=plex_headers(token),

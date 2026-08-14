@@ -17,6 +17,13 @@ settings = get_settings()
 
 _scheduler: AsyncIOScheduler | None = None
 
+# One poll queries every linked server over the network, so it takes a second or
+# more in practice. Scheduling them closer together than this cannot work: with
+# max_instances=1 the extra runs are skipped, and APScheduler logs a warning for
+# every skip, which floods the log while polling no more often than it manages
+# anyway.
+MIN_SESSIONS_POLL_SECONDS = 5
+
 
 async def _periodic_sync() -> None:
     log.info("Starting scheduled sync")
@@ -50,6 +57,18 @@ def start_scheduler() -> AsyncIOScheduler:
     if _scheduler is not None:
         return _scheduler
 
+    poll_seconds = settings.sessions_poll_seconds
+    if poll_seconds < MIN_SESSIONS_POLL_SECONDS:
+        log.warning(
+            "SESSIONS_POLL_SECONDS=%s is below the %s second minimum — using %s. "
+            "A poll takes about a second per linked server, so a shorter "
+            "interval only produces skipped runs and load on Plex.",
+            poll_seconds,
+            MIN_SESSIONS_POLL_SECONDS,
+            MIN_SESSIONS_POLL_SECONDS,
+        )
+        poll_seconds = MIN_SESSIONS_POLL_SECONDS
+
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         _periodic_sync,
@@ -62,7 +81,7 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     scheduler.add_job(
         _poll_sessions,
-        IntervalTrigger(seconds=settings.sessions_poll_seconds),
+        IntervalTrigger(seconds=poll_seconds),
         id="poll_sessions",
         max_instances=1,
         coalesce=True,
@@ -73,7 +92,7 @@ def start_scheduler() -> AsyncIOScheduler:
     log.info(
         "Scheduler started (sync every %s min, sessions every %s s)",
         settings.sync_interval_minutes,
-        settings.sessions_poll_seconds,
+        poll_seconds,
     )
     return scheduler
 
