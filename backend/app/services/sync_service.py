@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -65,6 +65,10 @@ settings = get_settings()
 COMPLETION_THRESHOLD = 0.9
 
 
+class SyncCancelled(Exception):
+    """Raised at a checkpoint when the user asked for the run to stop."""
+
+
 @dataclass
 class SyncStats:
     servers: int = 0
@@ -106,6 +110,46 @@ class SyncService:
         self.db = db
         self.plex_tv = PlexTVClient()
         self._clients: dict[tuple[int, int], PlexServerClient] = {}
+        # Set for the duration of full_sync so the steps below can report where
+        # they are and notice a cancel request. None when a step is called on
+        # its own, e.g. the session poller.
+        self._run: SyncRun | None = None
+
+    # ------------------------------------------------------------------
+    # Progress and cancellation
+    # ------------------------------------------------------------------
+
+    async def _set_phase(
+        self, phase: str, *, current: int = 0, total: int = 0
+    ) -> None:
+        """Record what the run is doing, for the progress UI."""
+        if self._run is None:
+            return
+        self._run.phase = phase
+        self._run.progress_current = current
+        self._run.progress_total = total
+        await self.db.commit()
+
+    async def _progress(self, current: int, total: int = 0) -> None:
+        """Update the counter within the current phase."""
+        if self._run is None:
+            return
+        self._run.progress_current = current
+        if total:
+            self._run.progress_total = total
+        await self.db.commit()
+
+    async def _checkpoint(self) -> None:
+        """Stop here if the user pressed cancel.
+
+        Called between units of work rather than inside them, so a cancelled run
+        leaves committed, consistent data instead of a half-written page.
+        """
+        if self._run is None:
+            return
+        await self.db.refresh(self._run, ["cancel_requested"])
+        if self._run.cancel_requested:
+            raise SyncCancelled
 
     # ------------------------------------------------------------------
     # Server discovery
@@ -347,6 +391,7 @@ class SyncService:
             types.append(TYPE_EPISODE)
 
         count = 0
+        shows_touched: set[int] = set()
         for item_type in types:
             try:
                 async for page in client.iter_section_items(library.section_key, item_type):
@@ -362,12 +407,41 @@ class SyncService:
                             continue
                         if item is not None:
                             count += 1
+                            # Carry Plex's own watched flag across, not just the
+                            # history events — see apply_plex_watch_state.
+                            try:
+                                if (
+                                    await self.apply_plex_watch_state(user, item, meta)
+                                    and item.media_type == MediaType.EPISODE
+                                    and item.show_id
+                                ):
+                                    shows_touched.add(item.show_id)
+                            except Exception as exc:
+                                log.warning(
+                                    "Failed to apply watch state for %r: %s",
+                                    meta.get("title"),
+                                    exc,
+                                )
                     # Commit per page so a long scan makes visible progress and a
                     # mid-scan failure doesn't discard everything.
                     await self.db.commit()
+                    await self._progress(count)
+                    # Between pages, never mid-page: a cancel should leave the
+                    # pages already committed intact.
+                    await self._checkpoint()
             except PlexServerError as exc:
                 stats.errors.append(f"{library.title}: {exc}")
                 break
+
+        # A show's status is derived from its episodes, so refresh any show that
+        # just gained watched episodes from Plex.
+        for show_id in shows_touched:
+            try:
+                await self.recompute_show_state(user, show_id)
+            except Exception as exc:
+                log.warning("Failed to recompute show %s: %s", show_id, exc)
+        if shows_touched:
+            await self.db.commit()
 
         library.item_count = count
         library.last_synced_at = utcnow()
@@ -499,6 +573,51 @@ class SyncService:
         if item.media_type == MediaType.EPISODE and item.show_id:
             await self.recompute_show_state(user, item.show_id, watched_at)
         return state
+
+    async def apply_plex_watch_state(
+        self, user: User, item: MediaItem, meta: dict[str, Any]
+    ) -> bool:
+        """Mirror Plex's own watched flag and resume position onto an item.
+
+        History alone is not enough. Plex only keeps a finite history, it does
+        not record anything for an item marked watched by hand, and a user who
+        stops an episode a minute from the end never generates a "watched"
+        event — but Plex still shows it as watched, because it scrobbles at
+        roughly 90% of runtime. Reading viewCount and viewOffset off the item
+        itself is what makes Tally agree with what Plex displays.
+
+        Returns True when the item counts as watched.
+        """
+        view_count = int(meta.get("viewCount") or 0)
+        offset_ms = int(meta.get("viewOffset") or 0)
+        duration_ms = int(meta.get("duration") or 0)
+
+        progressed = bool(duration_ms) and offset_ms / duration_ms >= COMPLETION_THRESHOLD
+        watched = view_count > 0 or progressed
+        if not watched and offset_ms <= 0:
+            # Untouched on Plex. Leave any local state alone — the user may have
+            # marked it watched in Tally and that is not Plex's to undo here.
+            return False
+
+        state = await self.get_or_create_state(user.id, item.id)
+        if duration_ms:
+            state.duration_ms = duration_ms
+
+        if watched:
+            # Plex counts a 90%-complete item as watched but keeps the offset,
+            # so clear the resume position rather than leaving it half-finished.
+            state.view_count = max(state.view_count, view_count or 1)
+            state.progress_ms = None
+            state.status = WatchStatus.COMPLETED
+            if last_viewed := meta.get("lastViewedAt"):
+                seen_at = datetime.fromtimestamp(int(last_viewed), tz=UTC)
+                if state.last_watched_at is None or state.last_watched_at < seen_at:
+                    state.last_watched_at = seen_at
+        else:
+            state.progress_ms = offset_ms
+            if state.status is None:
+                state.status = WatchStatus.WATCHING
+        return watched
 
     async def get_or_create_state(self, user_id: int, item_id: int) -> UserMediaState:
         result = await self.db.execute(
@@ -936,28 +1055,58 @@ class SyncService:
         run = SyncRun(user_id=user.id, kind="full" if full_history else "incremental")
         self.db.add(run)
         await self.db.commit()
+        self._run = run
 
         stats = SyncStats()
         try:
+            await self._set_phase("Looking for Plex servers")
             servers = await self.discover_servers(user)
             if not servers:
                 servers = await self.servers_for(user)
             stats.servers = len(servers)
 
-            for server in servers:
+            for index, server in enumerate(servers, start=1):
+                await self._checkpoint()
+                await self._set_phase(
+                    f"Reading libraries on {server.name}",
+                    current=index,
+                    total=len(servers),
+                )
                 libraries = await self.sync_libraries(user, server, stats)
+
                 if scan_libraries:
-                    for library in libraries:
-                        if library.enabled:
-                            await self.sync_library_items(user, server, library, stats)
+                    enabled = [library for library in libraries if library.enabled]
+                    for position, library in enumerate(enabled, start=1):
+                        await self._checkpoint()
+                        await self._set_phase(
+                            f"Scanning {library.title} on {server.name}",
+                            current=position,
+                            total=len(enabled),
+                        )
+                        await self.sync_library_items(user, server, library, stats)
+
+                await self._checkpoint()
+                await self._set_phase(f"Importing history from {server.name}")
                 await self.sync_history(user, server, stats, full=full_history)
+
+                await self._checkpoint()
+                await self._set_phase(f"Syncing ratings on {server.name}")
                 await self.sync_ratings(user, server, stats)
 
+            await self._checkpoint()
+            await self._set_phase("Syncing your watchlist")
             await self.sync_watchlist(user, stats)
+
+            await self._set_phase("Checking what is playing now")
             await self.poll_sessions(user)
 
             user.last_full_sync_at = utcnow()
             run.status = SyncStatus.PARTIAL if stats.errors else SyncStatus.SUCCESS
+        except SyncCancelled:
+            log.info("Sync cancelled for %s", user.username)
+            run.status = SyncStatus.CANCELLED
+            # Not an error: everything committed before the checkpoint stands.
+            run.phase = "Cancelled"
         except Exception as exc:
             log.exception("Sync failed for %s", user.username)
             run.status = SyncStatus.FAILED
@@ -966,7 +1115,12 @@ class SyncService:
         finally:
             run.finished_at = utcnow()
             run.stats = stats.as_dict()
+            if run.status != SyncStatus.CANCELLED:
+                run.phase = None
+            run.progress_current = 0
+            run.progress_total = 0
             await self.db.commit()
+            self._run = None
         return run
 
 

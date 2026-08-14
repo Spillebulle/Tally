@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, useTheme, useToast } from '@/lib/app-context'
+import type { SyncStatus } from '@/lib/types'
 import { cn, initials } from '@/lib/utils'
 import {
   BookmarkIcon,
@@ -71,19 +72,100 @@ function SyncButton() {
     onError: (error: Error) => notify(error.message, 'error'),
   })
 
+  const cancel = useMutation({
+    mutationFn: api.sync.cancel,
+    onSuccess: () => {
+      notify('Stopping after the current step', 'info')
+      queryClient.invalidateQueries({ queryKey: ['sync-status'] })
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
   const busy = mutation.isPending || status?.running
+  const label = syncLabel(status, mutation.isPending)
 
   return (
-    <button
-      type="button"
-      onClick={() => mutation.mutate()}
-      disabled={busy}
-      className="btn-ghost h-9 w-9 rounded-xl p-0"
-      title={busy ? 'Sync in progress' : 'Sync with Plex now'}
-      aria-label={busy ? 'Sync in progress' : 'Sync with Plex now'}
-    >
-      <RefreshIcon className={cn('text-lg', busy && 'animate-spin')} />
-    </button>
+    <div className="group relative">
+      <button
+        type="button"
+        onClick={() => mutation.mutate()}
+        disabled={busy}
+        className="btn-ghost h-9 w-9 rounded-xl p-0"
+        title={label}
+        aria-label={label}
+      >
+        <RefreshIcon className={cn('text-lg', busy && 'animate-spin')} />
+      </button>
+
+      {status?.running && (
+        // Hover/focus only, and the same text is already on the button's title
+        // and aria-label, so nothing here is the only way to reach it.
+        <div
+          role="status"
+          className="pointer-events-none absolute right-0 top-full z-30 mt-2 hidden w-64 rounded-xl border border-line bg-surface p-3 shadow-lg group-hover:block group-focus-within:block"
+        >
+          <p className="text-xs font-medium text-ink">{status.phase ?? 'Syncing'}</p>
+          <SyncProgress status={status} />
+          <button
+            type="button"
+            onClick={() => cancel.mutate()}
+            disabled={cancel.isPending || status.cancel_requested}
+            className="btn-ghost pointer-events-auto mt-2 h-7 w-full px-2 text-xs"
+          >
+            {status.cancel_requested ? 'Stopping…' : 'Cancel sync'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** One line describing the running sync, for tooltips and screen readers. */
+export function syncLabel(status: SyncStatus | undefined, starting = false): string {
+  if (starting) return 'Starting sync'
+  if (!status?.running) return 'Sync with Plex now'
+  if (status.cancel_requested) return 'Cancelling after the current step'
+  if (!status.phase) return 'Sync in progress'
+  return status.progress_total > 1
+    ? `${status.phase} (${status.progress_current} of ${status.progress_total})`
+    : status.phase
+}
+
+/**
+ * A bar when the phase knows how much work it has, a sliding indeterminate one
+ * when it doesn't — a sync cannot know its total up front, and inventing a
+ * percentage would be worse than admitting that.
+ */
+export function SyncProgress({ status }: { status: SyncStatus }) {
+  const determinate = status.progress_total > 1
+  const percent = determinate
+    ? Math.min(100, Math.round((status.progress_current / status.progress_total) * 100))
+    : null
+
+  return (
+    <div className="mt-2">
+      <div
+        className="h-1 w-full overflow-hidden rounded-full bg-line"
+        role="progressbar"
+        aria-valuenow={percent ?? undefined}
+        aria-valuemin={determinate ? 0 : undefined}
+        aria-valuemax={determinate ? 100 : undefined}
+        aria-label={status.phase ?? 'Sync progress'}
+      >
+        <div
+          className={cn(
+            'h-full rounded-full bg-accent',
+            !determinate && 'w-1/3 animate-pulse',
+          )}
+          style={determinate ? { width: `${percent}%` } : undefined}
+        />
+      </div>
+      {determinate && (
+        <p className="mt-1 text-[11px] text-muted">
+          {status.progress_current} of {status.progress_total}
+        </p>
+      )}
+    </div>
   )
 }
 

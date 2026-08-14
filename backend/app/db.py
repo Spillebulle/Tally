@@ -53,6 +53,10 @@ async def _run_light_migrations() -> None:
     additions: list[tuple[str, str, str]] = [
         # (table, column, DDL type + default)
         ("plex_servers", "manual_url", "TEXT"),
+        ("sync_runs", "phase", "VARCHAR(255)"),
+        ("sync_runs", "progress_current", "INTEGER NOT NULL DEFAULT 0"),
+        ("sync_runs", "progress_total", "INTEGER NOT NULL DEFAULT 0"),
+        ("sync_runs", "cancel_requested", "BOOLEAN NOT NULL DEFAULT 0"),
     ]
     if not additions:
         return

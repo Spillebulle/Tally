@@ -182,6 +182,13 @@ export interface SyncStatus {
   running: boolean
   last_run: SyncRun | null
   last_full_sync_at: string | null
+  run_id: number | null
+  /** What the run is doing right now, e.g. "Scanning Films on Basement". */
+  phase: string | null
+  /** Progress within the current phase. total of 0 means indeterminate. */
+  progress_current: number
+  progress_total: number
+  cancel_requested: boolean
 }
 
 export interface AppSettings {

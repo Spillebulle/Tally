@@ -388,6 +388,82 @@ async def test_unreachable_plex_is_a_503_not_a_500(authed_client, monkeypatch):
     assert "DNS" in response.json()["detail"]
 
 
+async def _library_with_access(db, *, anime_override=None):
+    user = (
+        await db.execute(select(User).where(User.username == "tester"))
+    ).scalar_one()
+    server = PlexServer(
+        machine_identifier="machine-anime",
+        name="Basement",
+        base_url="https://plex.example:32400",
+        access_token_encrypted="encrypted",
+    )
+    db.add(server)
+    await db.flush()
+    library = PlexLibrary(
+        server_id=server.id,
+        section_key="1",
+        title="Films",
+        section_type="movie",
+        anime_override=anime_override,
+    )
+    db.add_all(
+        [
+            library,
+            UserServerAccess(
+                user_id=user.id,
+                server_id=server.id,
+                access_token_encrypted="encrypted",
+            ),
+        ]
+    )
+    await db.commit()
+    return library
+
+
+async def test_anime_override_can_be_set_back_to_auto(authed_client, db):
+    """Regression: null means "auto-detect", not "field omitted".
+
+    The override is tri-state. Treating null as unset made cycling the chip to
+    auto silently do nothing, so the UI snapped back to the previous value.
+    """
+    library = await _library_with_access(db, anime_override=False)
+
+    response = await authed_client.patch(
+        f"/api/libraries/{library.id}", json={"anime_override": None}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["anime_override"] is None
+
+    await db.refresh(library)
+    assert library.anime_override is None
+
+
+async def test_anime_override_set_to_yes_and_no(authed_client, db):
+    library = await _library_with_access(db)
+
+    yes = await authed_client.patch(
+        f"/api/libraries/{library.id}", json={"anime_override": True}
+    )
+    assert yes.json()["anime_override"] is True
+
+    no = await authed_client.patch(
+        f"/api/libraries/{library.id}", json={"anime_override": False}
+    )
+    assert no.json()["anime_override"] is False
+
+    # Omitting the field entirely must leave it alone.
+    untouched = await authed_client.patch(
+        f"/api/libraries/{library.id}", json={"enabled": True}
+    )
+    assert untouched.json()["anime_override"] is False
+
+
+async def test_cancelling_without_a_running_sync_is_a_409(authed_client):
+    response = await authed_client.post("/api/sync/cancel")
+    assert response.status_code == 409
+
+
 async def test_genres_endpoint_deduplicates(authed_client, db):
     db.add_all(
         [

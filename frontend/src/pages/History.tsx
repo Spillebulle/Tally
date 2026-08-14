@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import type { WatchEvent } from '@/lib/types'
+import type { HistoryPage, WatchEvent } from '@/lib/types'
 import {
   cn,
   compactNumber,
@@ -75,13 +75,34 @@ export function History() {
 
   const remove = useMutation({
     mutationFn: (eventId: number) => api.history.remove(eventId),
-    onSuccess: () => {
-      notify('Removed from history', 'info')
+    // Take the row out immediately; waiting for the round trip made the button
+    // look inert. Restored from the snapshot if the delete fails.
+    onMutate: async (eventId: number) => {
+      await queryClient.cancelQueries({ queryKey: ['history', query] })
+      const previous = queryClient.getQueryData<HistoryPage>(['history', query])
+      queryClient.setQueryData<HistoryPage>(['history', query], (old) =>
+        old
+          ? {
+              ...old,
+              events: old.events.filter((event) => event.id !== eventId),
+              total: Math.max(0, old.total - 1),
+            }
+          : old,
+      )
+      return { previous }
+    },
+    onSuccess: () => notify('Removed from history', 'info'),
+    onError: (error: Error, _eventId, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(['history', query], context.previous)
+      }
+      notify(error.message, 'error')
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['history'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
     },
-    onError: (error: Error) => notify(error.message, 'error'),
   })
 
   const total = data?.total ?? 0

@@ -351,6 +351,29 @@ async def test_an_unreachable_server_is_not_re_probed_every_poll(monkeypatch):
     assert requests > after_first_walk
 
 
+async def test_trailers_and_extras_are_not_real_playback():
+    """Regression: a trailer must not count as watching the film.
+
+    Plex reports extras with the parent film's title and artwork, so anything
+    that trusts a session or history row without checking the type will mark
+    the whole film watched off a two-minute trailer.
+    """
+    from app.services.plex_server import is_real_playback
+
+    assert is_real_playback({"type": "movie"})
+    assert is_real_playback({"type": "episode"})
+
+    # Extras come back as clips...
+    assert not is_real_playback({"type": "clip"})
+    assert not is_real_playback({"type": "clip", "subtype": "trailer"})
+    # ...and sometimes as a library type carrying an extra marker.
+    assert not is_real_playback({"type": "movie", "extraType": 1})
+    assert not is_real_playback({"type": "movie", "subtype": "behindTheScenes"})
+    # Music and unknown types are not watch events either.
+    assert not is_real_playback({"type": "track"})
+    assert not is_real_playback({})
+
+
 def _async(value):
     """Wrap a value in an awaitable so it can stand in for an async method."""
     async def _inner(*_args, **_kwargs):
