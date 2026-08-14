@@ -304,6 +304,6 @@ frontend/src/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).
 
 Tally is not affiliated with Plex, TMDB, TheTVDB or MyAnimeList.

@@ -99,7 +99,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=Tally
             org.opencontainers.image.description=Self-hosted watch tracker with two-way Plex sync
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push
         uses: docker/build-push-action@v6
