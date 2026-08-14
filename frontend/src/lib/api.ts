@@ -206,6 +206,8 @@ export const api = {
     discover: () => post<Server[]>('/api/servers/discover'),
     test: (id: number) =>
       post<{ reachable: boolean; url: string | null }>(`/api/servers/${id}/test`),
+    update: (id: number, body: { manual_url?: string | null; enabled?: boolean }) =>
+      patch<Server>(`/api/servers/${id}`, body),
     updateLibrary: (
       id: number,
       body: { enabled?: boolean; anime_override?: boolean | null },

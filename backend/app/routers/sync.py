@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import __version__
 from ..config import get_settings
@@ -24,12 +25,14 @@ from ..schemas import (
     LibraryUpdate,
     ProvidersStatus,
     ServerOut,
+    ServerUpdate,
     SettingsOut,
     SyncRequest,
     SyncRunOut,
 )
 from ..services.metadata import get_metadata_service
 from ..services.metadata.anime import library_looks_like_anime
+from ..services.plex_server import reset_failure_state
 from ..services.sync_service import SyncService
 
 log = logging.getLogger(__name__)
@@ -123,6 +126,47 @@ async def discover_servers(db: DbSession, user: CurrentUser) -> list[ServerOut]:
     return await list_servers(db, user)
 
 
+@router.patch("/servers/{server_id}", response_model=ServerOut)
+async def update_server(
+    server_id: int, payload: ServerUpdate, db: DbSession, user: CurrentUser
+) -> ServerOut:
+    """Pin a connection address, or clear it to resume auto-detection."""
+    server = await db.get(PlexServer, server_id)
+    if server is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+
+    access = await db.execute(
+        select(UserServerAccess).where(
+            UserServerAccess.user_id == user.id,
+            UserServerAccess.server_id == server_id,
+        )
+    )
+    if access.scalar_one_or_none() is None and server.owner_user_id != user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this server")
+
+    fields = payload.model_dump(exclude_unset=True)
+    if "manual_url" in fields:
+        url = (fields["manual_url"] or "").strip().rstrip("/")
+        if url and not url.startswith(("http://", "https://")):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "The address must start with http:// or https://",
+            )
+        server.manual_url = url or None
+        # Point the server at the new address immediately rather than waiting
+        # for a probe, and drop any cooldown recorded against the old one so
+        # the user's next test is not answered from the backoff.
+        if url:
+            server.base_url = url
+        reset_failure_state()
+    if "enabled" in fields and fields["enabled"] is not None:
+        server.enabled = fields["enabled"]
+
+    await db.commit()
+    await db.refresh(server, ["libraries"])
+    return ServerOut.model_validate(server)
+
+
 @router.post("/servers/{server_id}/test", response_model=dict)
 async def test_server(server_id: int, db: DbSession, user: CurrentUser) -> dict:
     server = await db.get(PlexServer, server_id)
@@ -133,6 +177,10 @@ async def test_server(server_id: int, db: DbSession, user: CurrentUser) -> dict:
     if client is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No access token for this server")
 
+    # Pressing Test is an explicit "try again now", so clear any backoff first.
+    # Answering a deliberate user action out of the cooldown cache would report
+    # a stale failure and look like the button is broken.
+    reset_failure_state()
     reachable = await client.ping()
     if reachable and client.working_url:
         server.base_url = client.working_url
@@ -142,7 +190,11 @@ async def test_server(server_id: int, db: DbSession, user: CurrentUser) -> dict:
 
 @router.patch("/libraries/{library_id}", response_model=LibraryOut)
 async def update_library(
-    library_id: int, payload: LibraryUpdate, db: DbSession, user: CurrentUser
+    library_id: int,
+    payload: LibraryUpdate,
+    background: BackgroundTasks,
+    db: DbSession,
+    user: CurrentUser,
 ) -> LibraryOut:
     library = await db.get(PlexLibrary, library_id)
     if library is None:
@@ -169,38 +221,45 @@ async def update_library(
     await db.commit()
 
     if anime_changed:
-        await _reclassify_library(db, library)
+        # Reclassification rewrites every item in the library, so it must not
+        # block the response: the override itself is already saved, and holding
+        # the request open for it made the UI look frozen for seconds with no
+        # indication anything was happening.
+        background.add_task(_reclassify_library_task, library_id)
     await db.refresh(library)
     return LibraryOut.model_validate(library)
 
 
-async def _reclassify_library(db: DbSession, library: PlexLibrary) -> None:
+async def _reclassify_library_task(library_id: int) -> None:
+    """Background wrapper — the request's session is gone by the time this runs."""
+    async with session_scope() as scoped:
+        library = await scoped.get(PlexLibrary, library_id)
+        if library is not None:
+            await _reclassify_library(scoped, library)
+
+
+async def _reclassify_library(db: AsyncSession, library: PlexLibrary) -> None:
     """Re-apply the anime flag to everything in a library after an override change."""
     from ..models import PlexMapping
 
-    result = await db.execute(
-        select(MediaItem)
-        .join(PlexMapping, PlexMapping.media_item_id == MediaItem.id)
-        .where(PlexMapping.library_id == library.id)
-    )
-    shows_changed: list[int] = []
     target = library.anime_override
     if target is None:
         target = library_looks_like_anime(library.title)
+    values = {"is_anime": bool(target), "anime_source": "library_override"}
 
-    for item in result.scalars().unique():
-        item.is_anime = bool(target)
-        item.anime_source = "library_override"
-        if item.media_type == MediaType.SHOW:
-            shows_changed.append(item.id)
-    await db.flush()
+    # Kept as a subquery rather than a list of ids: a large library would blow
+    # past SQLite's bound-parameter limit, and this avoids loading every row
+    # into memory just to write it straight back.
+    mapped_items = select(PlexMapping.media_item_id).where(
+        PlexMapping.library_id == library.id
+    )
 
-    # Children inherit from their show.
-    for show_id in shows_changed:
-        children = await db.execute(select(MediaItem).where(MediaItem.show_id == show_id))
-        for child in children.scalars():
-            child.is_anime = bool(target)
-            child.anime_source = "library_override"
+    await db.execute(update(MediaItem).where(MediaItem.id.in_(mapped_items)).values(**values))
+    # Seasons and episodes inherit from their show. One statement, where this
+    # used to run a separate query for every single show in the library.
+    await db.execute(
+        update(MediaItem).where(MediaItem.show_id.in_(mapped_items)).values(**values)
+    )
     await db.commit()
 
 

@@ -336,9 +336,13 @@ export function Settings() {
   )
 }
 
+type LibraryPatch = { enabled?: boolean; anime_override?: boolean | null }
+
 function ServerCard({ server }: { server: Server }) {
   const queryClient = useQueryClient()
   const { notify } = useToast()
+
+  const [urlDraft, setUrlDraft] = useState(server.manual_url ?? '')
 
   const test = useMutation({
     mutationFn: () => api.servers.test(server.id),
@@ -350,11 +354,52 @@ function ServerCard({ server }: { server: Server }) {
     onError: (error: Error) => notify(error.message, 'error'),
   })
 
-  const updateLibrary = useMutation({
-    mutationFn: ({ id, body }: { id: number; body: { enabled?: boolean; anime_override?: boolean | null } }) =>
-      api.servers.updateLibrary(id, body),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
+  const saveUrl = useMutation({
+    mutationFn: (manual_url: string | null) => api.servers.update(server.id, { manual_url }),
+    onSuccess: (updated) => {
+      notify(
+        updated.manual_url
+          ? `Using ${updated.manual_url}`
+          : 'Back to auto-detecting the address',
+        'success',
+      )
+      // The previous result describes the old address, so drop it rather than
+      // leaving a stale green or red tick next to a URL that just changed.
+      test.reset()
+      queryClient.invalidateQueries({ queryKey: ['servers'] })
+    },
     onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  // null until tested, then the outcome of the most recent test.
+  const reachable = test.data?.reachable ?? null
+
+  const updateLibrary = useMutation({
+    mutationFn: ({ id, body }: { id: number; body: LibraryPatch }) =>
+      api.servers.updateLibrary(id, body),
+    // Apply the change to the cache before the request goes out. Toggling an
+    // override kicks off a reclassification of the whole library, and waiting
+    // for the round trip left the chip showing its old value with no feedback,
+    // so it read as an unresponsive button.
+    onMutate: async ({ id, body }: { id: number; body: LibraryPatch }) => {
+      await queryClient.cancelQueries({ queryKey: ['servers'] })
+      const previous = queryClient.getQueryData<Server[]>(['servers'])
+      queryClient.setQueryData<Server[]>(['servers'], (old) =>
+        old?.map((entry) => ({
+          ...entry,
+          libraries: entry.libraries.map((library) =>
+            library.id === id ? { ...library, ...body } : library,
+          ),
+        })),
+      )
+      return { previous }
+    },
+    onError: (error: Error, _variables, context) => {
+      // Put the real value back; the optimistic one was a guess that lost.
+      if (context?.previous) queryClient.setQueryData(['servers'], context.previous)
+      notify(error.message, 'error')
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
   })
 
   const scan = useMutation({
@@ -378,17 +423,87 @@ function ServerCard({ server }: { server: Server }) {
           <p className="truncate text-xs text-muted">
             {server.platform ?? 'Plex Media Server'}
             {server.version ? ` · ${server.version}` : ''} · {server.base_url}
+            {server.manual_url ? ' · set manually' : ''}
           </p>
         </div>
         <button
           type="button"
           onClick={() => test.mutate()}
           disabled={test.isPending}
-          className="btn-ghost h-8 px-2.5 text-xs"
+          className={cn(
+            'btn-ghost h-8 gap-1.5 px-2.5 text-xs',
+            // Never colour alone: the label and the dot carry the result too,
+            // so it still reads for anyone who cannot separate the two hues.
+            reachable === true && 'border-good text-good',
+            reachable === false && 'border-danger text-danger',
+          )}
         >
-          {test.isPending ? <Spinner /> : null}
-          Test connection
+          {test.isPending ? (
+            <Spinner />
+          ) : reachable === null ? null : (
+            <span
+              aria-hidden="true"
+              className={cn(
+                'h-1.5 w-1.5 rounded-full',
+                reachable ? 'bg-good' : 'bg-danger',
+              )}
+            />
+          )}
+          {test.isPending
+            ? 'Testing'
+            : reachable === null
+              ? 'Test connection'
+              : reachable
+                ? 'Reachable'
+                : 'Not responding'}
         </button>
+      </div>
+
+      <div className="mt-3 border-t border-line pt-3">
+        <label
+          htmlFor={`server-url-${server.id}`}
+          className="text-xs font-medium text-ink"
+        >
+          Server address
+        </label>
+        <p className="mt-0.5 text-xs text-muted">
+          Leave empty to let Plex advertise its own addresses. Set it if
+          auto-detection picks a route that cannot be reached — a Plex server in
+          Docker advertises its host's internal addresses too.
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            id={`server-url-${server.id}`}
+            type="url"
+            inputMode="url"
+            value={urlDraft}
+            onChange={(event) => setUrlDraft(event.target.value)}
+            placeholder={server.base_url}
+            className="input h-8 min-w-0 flex-1 text-xs"
+          />
+          <button
+            type="button"
+            onClick={() => saveUrl.mutate(urlDraft.trim() || null)}
+            disabled={saveUrl.isPending || urlDraft.trim() === (server.manual_url ?? '')}
+            className="btn-ghost h-8 px-2.5 text-xs"
+          >
+            {saveUrl.isPending ? <Spinner /> : null}
+            Save
+          </button>
+          {server.manual_url && (
+            <button
+              type="button"
+              onClick={() => {
+                setUrlDraft('')
+                saveUrl.mutate(null)
+              }}
+              disabled={saveUrl.isPending}
+              className="btn-ghost h-8 px-2.5 text-xs"
+            >
+              Auto-detect
+            </button>
+          )}
+        </div>
       </div>
 
       {server.libraries.length > 0 && (

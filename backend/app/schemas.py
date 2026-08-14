@@ -249,11 +249,23 @@ class LibraryOut(ORMModel):
     last_synced_at: datetime | None
 
 
+class ServerUpdate(BaseModel):
+    """Pin a connection address, or clear it to go back to auto-detection.
+
+    An empty string clears it, so the UI can send the field as the user typed
+    it rather than having to distinguish "" from null.
+    """
+
+    manual_url: str | None = None
+    enabled: bool | None = None
+
+
 class ServerOut(ORMModel):
     id: int
     name: str
     machine_identifier: str
     base_url: str
+    manual_url: str | None = None
     owned: bool
     version: str | None
     platform: str | None
