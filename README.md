@@ -115,7 +115,7 @@ Everything is environment variables. Only `PUBLIC_URL` really matters.
 | `TVDB_API_KEY` | — | Extra series data, and the explicit *Anime* genre TMDB lacks. [Free key](https://thetvdb.com/api-information). |
 | `MAL_CLIENT_ID` | — | Official MyAnimeList API. Leave blank to use Jikan, the free MAL mirror, which needs no credentials. |
 | `SYNC_INTERVAL_MINUTES` | `30` | How often to run a full sync against Plex. |
-| `SESSIONS_POLL_SECONDS` | `30` | How often to check for in-progress playback. |
+| `SESSIONS_POLL_SECONDS` | `30` | How often to check for in-progress playback. Values below `5` are raised to `5`; a poll takes about a second per server, so anything shorter just produces skipped runs. |
 | `SECRET_KEY` | generated | Signs sessions and encrypts stored Plex tokens. Written to `/data/.secret_key` on first boot. Set it explicitly if you rebuild from scratch and want sessions to survive. |
 | `PUID` / `PGID` | `1000` | User and group the app runs as. Set these to the owner of your `./data` directory (`id -u`, `id -g`). |
 | `LOG_LEVEL` | `INFO` | `DEBUG` when something is not syncing and you want to see why. |
@@ -220,6 +220,38 @@ Plex (no history is lost).
 The mounted directory is owned by a different user than the container. Either set
 `PUID`/`PGID` to the owner's ids (`id -u` / `id -g`), or
 `sudo chown -R 1000:1000 ./data`.
+
+**"Could not reach plex.tv" — or nothing syncs and the logs mention name resolution**
+
+The container cannot resolve DNS. Check it directly:
+
+```bash
+docker exec tally getent hosts plex.tv
+```
+
+Empty output confirms it. `cat /etc/resolv.conf` inside the container shows which
+resolver it is using.
+
+If that resolver is a Pi-hole or AdGuard Home, this is the usual cause: every
+container on the host shares one apparent source address (the Docker bridge
+gateway, typically `172.17.0.1`), so they all count against a single client's
+query budget. Pi-hole's default is 1000 queries per minute, and once tripped it
+drops *every* query from that address until the window resets. Its log shows
+`RATE_LIMIT  Client 172.17.0.1 has been rate-limited`.
+
+Raise the limit in `/etc/pihole/pihole-FTL.conf` (`RATE_LIMIT=0/0` disables it),
+then `pihole restartdns`. Ad-blocking DNS can also filter Plex domains outright —
+check its query log for `plex.tv` and allow it if so.
+
+Failing that, point the container at a public resolver, which skips your local
+DNS for Tally only:
+
+```yaml
+services:
+  tally:
+    dns:
+      - 1.1.1.1
+```
 
 **No servers found in Settings**
 Press **Refresh**. If it still finds nothing, your Plex token may have expired —
