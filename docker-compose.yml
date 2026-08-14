@@ -1,0 +1,39 @@
+services:
+  tally:
+    image: ghcr.io/spillebulle/tally:latest
+    # Comment out `image` and uncomment this to build from a local checkout.
+    # build: .
+    container_name: tally
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Holds the SQLite database and the generated secret key. Back this up.
+      - ./data:/data
+    environment:
+      # The URL you actually reach Tally on. Plex sends the browser back here
+      # after sign-in, so a wrong value breaks the login flow.
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+
+      # --- Metadata providers (all optional) -------------------------------
+      # Without a TMDB key Tally still works, but posters and descriptions
+      # fall back to whatever your Plex server already has.
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TVDB_API_KEY: ${TVDB_API_KEY:-}
+      MAL_CLIENT_ID: ${MAL_CLIENT_ID:-}
+
+      # --- Behaviour -------------------------------------------------------
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-30}
+      SESSIONS_POLL_SECONDS: ${SESSIONS_POLL_SECONDS:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # Set this to a long random string to pin sessions and stored Plex tokens
+      # across container rebuilds. Left blank, one is generated into /data.
+      SECRET_KEY: ${SECRET_KEY:-}
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

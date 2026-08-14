@@ -1,0 +1,40 @@
+# The frontend stage runs `npm ci` and then `COPY frontend/ ./`. Without this
+# file a host node_modules is copied straight over the one just installed in the
+# image — and a Windows or macOS tree carries the wrong platform-specific
+# esbuild/rollup binaries, so the build fails or silently produces junk.
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Python virtualenvs are host-specific and would bloat the build context.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Runtime data must never be baked into an image — .secret_key decrypts stored
+# Plex tokens, and tally.db is the user's history.
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+
+# Not needed to build, and .git in particular is large and changes every commit,
+# which would bust the build cache on every layer.
+.git/
+.github/
+.gitignore
+.dockerignore
+*.md
+LICENSE
+docker-compose.yml
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

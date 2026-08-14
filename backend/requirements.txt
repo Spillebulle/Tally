@@ -1,0 +1,20 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+# SQLAlchemy's async engine needs greenlet, but only declares it for
+# python_version < "3.13" on known architectures. It therefore arrives by
+# accident on python:3.12-slim and vanishes the moment the base image moves to
+# 3.13, taking every database call with it. Declare it directly.
+greenlet==3.1.1
+pydantic==2.10.4
+pydantic-settings==2.7.0
+httpx==0.28.1
+apscheduler==3.11.0
+pyjwt==2.10.1
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 reads bcrypt.__about__, which bcrypt >= 4.1 removed. Pinning
+# here keeps hashing working without a noisy traceback on every call.
+bcrypt==4.0.1
+cryptography==44.0.0
+python-multipart==0.0.20

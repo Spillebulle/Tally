@@ -1,0 +1,14 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = [
+    # Long lines inside docstrings and comments are fine; code stays under 100.
+    "E501",
+    # FastAPI dependencies are function calls in defaults by design.
+    "B008",
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["E402"]  # conftest must set env vars before importing the app

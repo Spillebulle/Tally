@@ -1,0 +1,115 @@
+# Publishes the container image. Driven exclusively by `v*` tags — pushing main
+# deliberately does not build (ci.yml verifies branches instead). Use the
+# workflow_dispatch button to rebuild an existing version without cutting a new
+# one.
+name: Build and publish container image
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create the GitHub Release
+  packages: write   # push to GHCR
+
+jobs:
+  publish:
+    name: Build and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the annotated tag's message is available to become
+          # the Release body.
+          fetch-depth: 0
+
+      - name: Check the version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          code="$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' backend/app/__init__.py)"
+          echo "tag=$tag  backend/app/__init__.py=$code"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::Version mismatch: tag is v$tag but backend/app/__init__.py says $code. Bump it to match and re-tag."
+            exit 1
+          fi
+
+      # Needed to build the arm64 image on an amd64 runner.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # metadata-action lowercases its own `images:` input, so the
+          # capitalised repo name is safe here. Anything interpolating
+          # github.repository raw would need ${GITHUB_REPOSITORY,,}.
+          images: |
+            ghcr.io/${{ github.repository }}
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/tally
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=Tally
+            org.opencontainers.image.description=Self-hosted watch tracker with two-way Plex sync
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # The frontend stage is pinned to $BUILDPLATFORM inside the Dockerfile,
+          # so only the Python stage is actually emulated per target.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Create the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+
+          # Re-running via workflow_dispatch on an existing tag must not fail.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists — leaving it alone."
+            exit 0
+          fi
+
+          # The annotated tag's message is the release notes. `%(contents:body)`
+          # drops the subject line, which we use as the title instead.
+          subject="$(git tag -l --format='%(contents:subject)' "$tag")"
+          body="$(git tag -l --format='%(contents:body)' "$tag")"
+
+          gh release create "$tag" \
+            --title "${subject:-$tag}" \
+            --notes "${body:-Released from $tag.}"
