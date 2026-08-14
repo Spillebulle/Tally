@@ -49,7 +49,20 @@ export function Login() {
           const result = await api.auth.plexPoll(start.state)
           if (result.status === 'authenticated') {
             if (pollTimer.current) window.clearInterval(pollTimer.current)
-            popup.current?.close()
+            // Plex is redirecting the popup to /auth/callback at this moment,
+            // and that page closes itself. Closing it from here right away
+            // aborts the navigation mid-flight, which shows a browser error in
+            // the popup before it disappears. Let the redirect land, then force
+            // it shut in case it never does.
+            const opened = popup.current
+            popup.current = null
+            window.setTimeout(() => {
+              try {
+                opened?.close()
+              } catch {
+                // Already gone, or it closed itself. Nothing to do.
+              }
+            }, 2000)
             await refresh()
             navigate('/', { replace: true })
           } else if (result.status === 'expired') {
