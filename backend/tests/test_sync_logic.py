@@ -231,6 +231,58 @@ async def test_watchlist_removal_is_tombstoned_not_deleted(db):
     assert entry.removed_at is not None
 
 
+async def test_a_failing_request_opens_only_one_connection(monkeypatch):
+    """Regression: retries must not each build their own HTTP client.
+
+    Every AsyncClient opens a fresh connection, and every connection costs a DNS
+    lookup. Building one per attempt meant a single failing request fired one
+    lookup per candidate URL per retry, which is enough to trip a rate-limiting
+    resolver — and once tripped, every request failed and re-fired the whole
+    fan-out.
+    """
+    import httpx
+
+    from app.services import plex_server as ps
+
+    built = 0
+
+    class CountingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            nonlocal built
+            built += 1
+            self.attempts = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> bool:
+            return False
+
+        async def request(self, *args, **kwargs):
+            self.attempts += 1
+            raise httpx.ConnectError("name resolution failed")
+
+    monkeypatch.setattr(ps.httpx, "AsyncClient", CountingClient)
+    monkeypatch.setattr(ps.asyncio, "sleep", lambda _delay: _async(None))
+
+    client = ps.PlexServerClient(
+        "https://one.plex.direct:32400",
+        "token",
+        candidate_urls=[
+            "https://one.plex.direct:32400",
+            "https://two.plex.direct:32400",
+            "https://three.plex.direct:32400",
+        ],
+    )
+
+    with pytest.raises(ps.PlexUnreachable):
+        await client._request("GET", "/status/sessions")
+
+    # Three candidates with one retry each is six attempts — but they must all
+    # share a single pooled client rather than opening six connections.
+    assert built == 1
+
+
 def _async(value):
     """Wrap a value in an awaitable so it can stand in for an async method."""
     async def _inner(*_args, **_kwargs):

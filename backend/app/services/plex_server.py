@@ -87,36 +87,45 @@ class PlexServerClient:
             urls += [u for u in self.candidates if u != self.working_url]
 
         last_error: Exception | None = None
-        for url in urls:
-            if not url:
-                continue
-            for attempt in range(retries + 1):
-                try:
-                    async with httpx.AsyncClient(
-                        timeout=self._timeout, verify=False, follow_redirects=True
-                    ) as client:
+
+        # One client for the whole call, not one per attempt. Each AsyncClient
+        # opens its own connection, and every connection costs a DNS lookup, so
+        # building one inside the loop meant a single failing request could fire
+        # `len(urls) * (retries + 1)` lookups — eight or more against a server
+        # advertising the usual set of candidate URIs. Under a resolver with a
+        # query rate limit that is enough to get the whole container throttled,
+        # at which point every request fails and triggers the full fan-out
+        # again. Pooling here lets retries against a host reuse its connection.
+        async with httpx.AsyncClient(
+            timeout=self._timeout, verify=False, follow_redirects=True
+        ) as client:
+            for url in urls:
+                if not url:
+                    continue
+                for attempt in range(retries + 1):
+                    try:
                         resp = await client.request(
                             method,
                             f"{url}{path}",
                             headers=plex_headers(self.token),
                             params=params,
                         )
-                except (httpx.TransportError, httpx.TimeoutException) as exc:
-                    last_error = exc
-                    if attempt < retries:
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                    continue
+                    except (httpx.TransportError, httpx.TimeoutException) as exc:
+                        last_error = exc
+                        if attempt < retries:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
 
-                if resp.status_code == 401:
-                    raise PlexServerError("Server rejected the access token")
-                if resp.status_code == 404:
-                    return None
-                if resp.status_code >= 500:
-                    last_error = PlexServerError(f"Server error {resp.status_code}")
-                    break  # try the next URI rather than hammering a sick server
+                    if resp.status_code == 401:
+                        raise PlexServerError("Server rejected the access token")
+                    if resp.status_code == 404:
+                        return None
+                    if resp.status_code >= 500:
+                        last_error = PlexServerError(f"Server error {resp.status_code}")
+                        break  # try the next URI rather than hammering a sick server
 
-                self.working_url = url
-                return resp
+                    self.working_url = url
+                    return resp
 
         raise PlexUnreachable(
             f"No reachable connection for Plex server (tried {len(urls)}): {last_error}"
