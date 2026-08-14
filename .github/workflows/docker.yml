@@ -144,11 +144,31 @@ jobs:
             exit 0
           fi
 
-          # The annotated tag's message is the release notes. `%(contents:body)`
-          # drops the subject line, which we use as the title instead.
-          subject="$(git tag -l --format='%(contents:subject)' "$tag")"
-          body="$(git tag -l --format='%(contents:body)' "$tag")"
+          # Read the annotation from the API, not from git.
+          #
+          # actions/checkout leaves the tag lightweight in the runner's clone, so
+          # `git tag -l --format='%(contents)'` silently falls back to the COMMIT
+          # message — which shipped v0.0.1 with a commit subject as its title and
+          # a Co-Authored-By trailer in the body. The API always returns the real
+          # tag object.
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha')"
+          tag_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type')"
 
+          if [ "$tag_type" = "tag" ]; then
+            message="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq '.message')"
+          else
+            echo "::warning::$tag is a lightweight tag — it carries no annotation, so the release gets a placeholder body. Use 'git tag -a' for release notes."
+            message=""
+          fi
+
+          # First line is the title, the rest is the body.
+          subject="$(printf '%s\n' "$message" | head -n 1)"
+          body="$(printf '%s\n' "$message" | tail -n +2)"
+
+          printf '%s' "${body:-Released from $tag.}" > /tmp/notes.md
+
+          # --notes-file, not --notes: the body contains backticks and $ that a
+          # shell-expanded argument would mangle.
           gh release create "$tag" \
             --title "${subject:-$tag}" \
-            --notes "${body:-Released from $tag.}"
+            --notes-file /tmp/notes.md
