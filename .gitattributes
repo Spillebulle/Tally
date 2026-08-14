@@ -1,0 +1,21 @@
+# Normalise to LF in the repository, and let Git decide the working-copy ending.
+* text=auto
+
+# These MUST stay LF in the working copy, not just in the repo. On a Windows
+# clone (core.autocrlf=true) a CRLF checkout gives docker-entrypoint.sh the
+# shebang `#!/bin/sh\r`, and the container dies at startup with an unhelpful
+# "no such file or directory". The Dockerfile copies straight from the checkout,
+# so the working-copy ending is what ships.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary — never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

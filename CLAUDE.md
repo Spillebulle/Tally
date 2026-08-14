@@ -1,0 +1,335 @@
+# CLAUDE.md
+
+Working notes for Tally. This covers what is *not* obvious from reading the
+code — invariants that are easy to break, Plex API behaviour that is
+undocumented, and environment quirks that cost time to rediscover.
+
+User-facing setup, configuration and troubleshooting live in `README.md`; this
+file does not repeat them.
+
+---
+
+## Orientation
+
+Tally is a self-hosted watch tracker with two-way Plex sync. FastAPI + SQLAlchemy
++ SQLite on the backend, React + TypeScript + Tailwind on the frontend, shipped
+as one Docker image where the API also serves the built SPA.
+
+```
+backend/app/
+├── main.py            app wiring; mounts frontend/dist at app/static
+├── config.py          pydantic-settings; get_settings() is lru_cached
+├── models.py          the schema — read this first
+├── db.py              engine, session, create_all + light migrations
+├── security.py        JWT sessions, Fernet token encryption, bcrypt
+├── serializers.py     ORM → API payloads (bulk helpers avoid N+1)
+├── routers/           HTTP layer, thin
+└── services/
+    ├── plex_tv.py     plex.tv cloud: OAuth PINs, resources, Discover watchlist
+    ├── plex_server.py one Plex Media Server: libraries, history, sessions, writes
+    ├── guids.py       Plex GUID → external ids; also the anime agent signal
+    ├── media_repo.py  Plex metadata → canonical MediaItem rows
+    ├── sync_service.py the two-way engine
+    ├── webhooks.py    Plex Pass webhook ingestion
+    ├── scheduler.py   APScheduler jobs
+    └── metadata/      TMDB, TVDB, MAL/Jikan + anime classifier
+frontend/src/
+├── pages/             one file per screen
+├── components/        Poster, Charts, Layout, Icons, ui
+└── lib/               api client, types, contexts, utils
+```
+
+---
+
+## Invariants — break these and things corrupt quietly
+
+### `guid_key` is the identity of everything
+
+`MediaItem.guid_key` is the canonical dedup key. The entire model rests on it:
+the same show on two servers, scanned by different agents, plus a watchlist entry
+from Discover, must all collapse to one row.
+
+`build_guid_key()` has a **preference order** (tmdb → tvdb → imdb → anidb → mal →
+plex guid → title+year). Changing that order orphans every existing row: the next
+sync computes different keys, finds nothing, and creates duplicates of the whole
+library. If it ever must change, ship a migration that rewrites existing keys.
+
+Seasons and episodes derive their key from their show's (`<show_key>/s2e5`) so
+they stay grouped even when the episode carries no external id of its own.
+
+### Every timestamp column must be `UtcDateTime`
+
+SQLite has no native timestamp type and hands back **naive** datetimes even from
+`DateTime(timezone=True)`. Comparing one to `utcnow()` raises `TypeError`.
+
+This already shipped as a bug once: it crashed `recompute_show_state` during
+ordinary syncs. `models.UtcDateTime` normalises in both directions. Adding a
+plain `DateTime` column reintroduces the whole bug class — always use
+`UtcDateTime`.
+
+It also coerces a bare `date` to midnight UTC on bind, so a sloppy
+`column >= some_date` filter does not explode. Prefer passing real datetimes.
+
+### Two-way sync needs a `plex_*` mirror per field
+
+The conflict model works because each syncable field stores **both** the local
+value and the last value observed on Plex:
+
+```
+neither changed → no-op
+local changed   → push
+Plex changed    → pull
+both changed    → newer timestamp wins
+```
+
+Adding a syncable field without its `plex_*` baseline and timestamp means the
+sync cannot tell which side moved, and it will ping-pong the value forever. See
+`UserMediaState.rating` / `plex_rating` / `plex_rating_synced_at` for the shape.
+
+**After pushing to Plex, write the pushed value into the `plex_*` baseline.**
+Otherwise the next pass sees a local change again and re-pushes every time.
+
+### Watchlist removals are tombstones, never deletes
+
+`WatchlistEntry.active = False` with `removed_at` set. Deleting the row means the
+next pull from Plex sees the item present remotely and absent locally, and
+re-adds what the user just removed. Same reasoning applies to any future
+"removed by the user" state.
+
+### `WatchEvent.dedupe_key` makes history import idempotent
+
+`plex:<machine_id>:<historyKey>` for imports, `manual:<uuid>` for manual logs,
+`webhook:<machine_id>:<ratingKey>:<minute>` for webhooks. Without it, every
+re-sync duplicates the entire watch history. It is uniquely constrained per user.
+
+Webhooks carry no history key, hence the minute bucket — Plex will not scrobble
+the same item twice inside one minute.
+
+### Plex tokens are per user, not per server
+
+Ratings, watch state and history are **per-user** in Plex and only visible
+through that user's own token. Reading everything through the server owner's
+token would show every Tally account the owner's ratings.
+
+`UserServerAccess` holds one token per (user, server) plus `plex_account_id`.
+`PlexServer.access_token_encrypted` is the owner's, used only for library scans.
+
+### Anime lives on the show; children inherit
+
+Seasons and episodes copy `is_anime` / `anime_source` from their show. Anything
+that reclassifies must cascade to children — see `_reclassify_library` and the
+admin reclassify job.
+
+### Tokens are encrypted at rest
+
+Plex auth tokens grant full account access, so they are Fernet-encrypted with a
+key derived from `SECRET_KEY`. Rotating `SECRET_KEY` invalidates them by design;
+`decrypt_secret` returns `None` rather than raising so the UI can prompt a
+re-link. Never log a decrypted token.
+
+---
+
+## Plex API notes (mostly undocumented)
+
+* **`X-Plex-Client-Identifier` must be stable across restarts.** Plex ties auth
+  PINs and device entries to it. Persisted to `/data/.plex_client_id`; a
+  regenerating id breaks sign-in in confusing ways.
+* **OAuth PIN flow:** `POST /api/v2/pins?strong=true` → open
+  `https://app.plex.tv/auth#?clientID=…&code=…&forwardUrl=…` → poll
+  `GET /api/v2/pins/{id}` until `authToken` appears. The frontend polls; the
+  callback page only closes the popup.
+* **Server-side `accountID` ≠ plex.tv user id** for home/managed users. History
+  endpoints filter on the server-side one. `1` is always the owner. Resolved via
+  `/accounts` in `_resolve_account_id`.
+* **Connection order matters.** plex.tv advertises several URIs per server; rank
+  local HTTPS first, then remote direct, then **relay last** (bandwidth-capped).
+  `PlexServerClient` caches the first URI that answers in `working_url`.
+* **Incremental history** uses the `viewedAt>` query filter. Tally overlaps by a
+  day because Plex can backdate entries when a client syncs late.
+* **Writes are GETs** with `identifier=com.plexapp.plugins.library`:
+  `/:/scrobble`, `/:/unscrobble`, `/:/rate?rating=0-10`, `/:/progress`.
+  Ratings are 0–10; the Plex UI renders 5 stars. There is no "unrate" — send 0.
+* **Discover / watchlist is reverse-engineered.** `discover.provider.plex.tv`
+  for `/library/sections/watchlist/all`, `/actions/addToWatchlist`,
+  `/actions/removeFromWatchlist` (they want the bare ratingKey from a `plex://`
+  guid). Stable in practice, widely used by self-hosted tooling, but **this is
+  the piece most likely to break** if Plex changes something.
+* **GUID shapes** vary by agent — see the module docstring in `guids.py`. The
+  HAMA and AniDB forms are themselves an anime signal, because only anime
+  libraries use those agents.
+* **Webhooks need Plex Pass** and are strictly an optimisation; the periodic
+  sync picks up everything they deliver. The endpoint is necessarily
+  unauthenticated (Plex cannot send credentials), so it only ever matches
+  already-linked accounts and known servers, and never creates users. It must
+  never return 5xx — Plex retries and eventually disables the webhook.
+
+---
+
+## Anime classification
+
+Multi-signal and **scored**, threshold 5 — see the table in
+`services/metadata/anime.py`. The point of the scoring is that a single weak
+signal must not decide.
+
+The case it exists to get right: **animated + American + English is not anime**.
+Any change must keep `test_western_animation_is_not_anime` and
+`test_live_action_japanese_film_is_not_anime` passing.
+
+`should_try_mal()` is a cost filter, not a classifier — MAL has nothing to say
+about a Western film, and Jikan's rate limit is low. Do not call MAL for every
+item during a library scan.
+
+User overrides (`PlexLibrary.anime_override`, tri-state) always win.
+
+---
+
+## Frontend conventions
+
+* **Never a raw hex in a component.** Colours are semantic Tailwind tokens
+  (`bg-surface`, `text-muted`, `border-line`) mapping to CSS variables in
+  `index.css`. Light is the base definition; `.dark` redefines only what changes.
+* **Charts are hand-built SVG/CSS on purpose.** They hold fixed specs a charting
+  library fights: ≤24px marks, 4px rounded data-ends square at the baseline, 2px
+  surface gaps, hairline recessive gridlines, direct value labels, no legend for
+  a single series.
+* **The chart palette was validated, not chosen by eye** — colour-vision
+  separation and contrast against both surfaces. If you change series colours,
+  re-run the validator in the `dataviz` skill rather than eyeballing. Every chart
+  also ships a `DataTable` fallback so nothing is gated behind colour or hover.
+* Dark mode is applied pre-paint by an inline script in `index.html` to avoid a
+  light flash; `ThemeProvider` owns it afterwards.
+* Status is never colour-alone — a dot always sits beside a written label.
+* **Absolutely-positioned children need an explicit `left`/`right`.** The toggle
+  knob rendered outside its track because `left` was `auto` and the static
+  position was not where it looked like it should be.
+
+---
+
+## Testing and verification
+
+```bash
+cd backend && .venv/bin/python -m pytest -q     # 38 tests
+cd backend && .venv/bin/ruff check app tests
+cd frontend && npx tsc --noEmit && npm run build
+```
+
+`tests/conftest.py` **must set env vars before importing anything from `app`** —
+`get_settings()` is `lru_cache`d and reads `DATA_DIR` at import time. Hence the
+`# noqa: E402` imports; do not "tidy" them to the top.
+
+Each test gets a private file-backed SQLite database. In-memory would give every
+connection its own empty schema.
+
+### Verify by looking, not by assuming
+
+Three real bugs were found only by rendering the UI and running the container,
+none by tests:
+
+* naive-vs-aware datetime crash — found by running the container
+* Continue Watching listing a show twice — found by reading a screenshot
+* toggle knob outside its track — found by reading a screenshot, then measuring
+  the element's bounding box in the browser
+
+So: **screenshot the pages after UI changes, and run the container after
+Dockerfile changes.** Building is not running.
+
+---
+
+## Releasing
+
+Version lives in `backend/app/__init__.py` and feeds the API and `/api/health`.
+**Bump it to match the tag** — nothing enforces this.
+
+Only `v*` tags publish. Pushing `main` does not build, deliberately: listening on
+both a branch and its tag double-runs. Use `workflow_dispatch` to rebuild without
+a new version.
+
+```bash
+# edit backend/app/__init__.py, commit, then:
+git tag -a v0.1.0 -m "Tally v0.1.0
+
+- notes become the GitHub Release body"
+git push --follow-tags
+```
+
+The annotated tag's message becomes the Release body — write real notes there.
+
+`ci.yml` (branches/PRs, never pushes an image) and `docker.yml` (tags only,
+publishes) do not overlap. Keep it that way.
+
+**GHCR paths must be lowercase** and this repo is `Spillebulle/Tally`.
+`metadata-action` lowercases its own `images:` input, but anything interpolating
+`github.repository` raw needs `${GITHUB_REPOSITORY,,}`.
+
+The **frontend stage is pinned to `$BUILDPLATFORM`** — its output is static and
+architecture-free, so building it under QEMU per target is pure waste and invites
+npm optional-dependency (esbuild, rollup) problems on the emulated arch. The
+Python stage stays on the target platform; those wheels carry native extensions.
+
+Docker Hub needs `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` repo secrets. GHCR uses
+the built-in `GITHUB_TOKEN`.
+
+---
+
+## Deliberate choices, so they are not "fixed" later
+
+* **No Alembic.** `db.py` has a small idempotent `_run_light_migrations()` list
+  for additive columns. A single-file SQLite database the user owns does not
+  justify the dependency. If a destructive migration ever becomes necessary,
+  revisit — but additive columns go in that list.
+* **`create_all()` at startup**, not a migration step.
+* **bcrypt pinned to 4.0.1** — passlib 1.7.4 reads `bcrypt.__about__`, which
+  bcrypt ≥ 4.1 removed. Unpinning brings back a traceback on every hash.
+* **Library scans commit per page** so a long scan shows progress and a mid-scan
+  failure does not discard everything.
+* **Enrichment is skipped for episodes.** Only movies and shows get external
+  metadata; enriching every episode would multiply API calls for little gain.
+* **The scheduler runs in-process** via APScheduler with `max_instances=1`. A
+  slow first sync must not queue overlapping runs.
+
+---
+
+## Environment quirks (Claude Code web sandbox)
+
+These are about *this* sandbox, not about Tally. They are recorded because each
+one cost time.
+
+* **Pushing to GitHub is currently blocked.** `git push` and the GitHub API both
+  return 403 — the GitHub App has read-only contents on this repo. Reads work.
+  Do not burn turns retrying; report it and ask for write access to be granted at
+  `https://claude.ai/admin-settings/claude-in-slack`.
+* **Docker daemon is not running by default:** `(dockerd > /tmp/dockerd.log 2>&1 &)`
+  then poll `docker info`.
+* **Docker builds fail TLS verification** because the sandbox proxy MITMs HTTPS.
+  Build with a *temporary* copy of the Dockerfile that trusts
+  `/root/.ccr/ca-bundle.crt` (`PIP_CERT`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+  `NODE_EXTRA_CA_CERTS`). **Never commit that variant** — delete
+  `Dockerfile.sandbox` and the copied `.crt` afterwards.
+* **`binfmt_misc` is not mounted** in this microVM, so arm64 emulation fails with
+  `exec format error` even after running `tonistiigi/binfmt`. Fix:
+  `mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc` **first**, then
+  install the handler, then build with `--platform linux/arm64`.
+  The `docker-container` buildx driver does not inherit the proxy CA — the
+  default `docker` driver does, and handles one platform at a time, which is
+  enough to verify.
+* **Playwright:** the installed package expects a browser build the image does
+  not have. Launch with an explicit
+  `executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'` and
+  `args: ['--no-sandbox']`. Scripts must live in `frontend/` to resolve the
+  module. Do not run `playwright install`. Remove the package and any scratch
+  scripts before committing.
+* Put the demo database, seed script and screenshots in the session scratchpad
+  directory, never in the repo.
+
+### Previewing the UI with realistic data
+
+There is no Plex server here, so the UI looks empty until seeded. The fastest
+loop: write a seed script that inserts users, media, watch events and states
+directly, point `DATA_DIR` at a scratch directory, build the frontend into
+`backend/app/static`, run uvicorn, then drive it with Playwright.
+
+Posters will render as deterministic placeholder gradients — that is
+`posterFallbackGradient`, not a bug. Screenshots taken this way are fine for
+spotting layout and logic problems, but they **misrepresent the product** and
+should not be committed as documentation; real artwork needs a TMDB key or a
+Plex server.

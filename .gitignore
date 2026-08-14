@@ -1,0 +1,37 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# The built SPA is copied here by the Dockerfile (and by a local build) so the
+# API can serve it. It is generated output, never source.
+backend/app/static/
+
+# --- Runtime data -----------------------------------------------------------
+# The SQLite database, generated secret key and Plex client id. Never commit
+# these: .secret_key decrypts stored Plex tokens.
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Local configuration ----------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Editors / OS -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

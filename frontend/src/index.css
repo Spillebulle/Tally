@@ -1,0 +1,187 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens.
+ *
+ * Light is the base definition; dark redefines only what changes. The dark
+ * chart series are the same hues re-stepped for a dark surface (not an
+ * automatic flip) and the full set was validated for colour-vision
+ * separation against these exact surfaces.
+ */
+@layer base {
+  :root {
+    color-scheme: light;
+
+    --canvas: 246 246 244;
+    --surface: 255 255 255;
+    --raised: 249 249 247;
+    --line: 226 226 222;
+
+    --ink: 17 18 20;
+    --subtle: 82 81 78;
+    --muted: 130 129 124;
+
+    --accent: 42 120 214;
+    --accent-soft: 232 240 252;
+    --accent-ink: 255 255 255;
+
+    --series-1: 42 120 214;
+    --series-2: 235 104 52;
+    --series-3: 27 175 122;
+
+    --good: 0 131 0;
+    --warn: 237 161 0;
+    --danger: 227 73 72;
+  }
+
+  .dark {
+    color-scheme: dark;
+
+    --canvas: 15 16 19;
+    --surface: 23 24 28;
+    --raised: 31 33 38;
+    --line: 46 48 55;
+
+    --ink: 245 246 247;
+    --subtle: 176 178 186;
+    --muted: 132 135 145;
+
+    --accent: 57 135 229;
+    --accent-soft: 27 44 70;
+    --accent-ink: 255 255 255;
+
+    --series-1: 57 135 229;
+    --series-2: 217 89 38;
+    --series-3: 25 158 112;
+
+    --good: 0 131 0;
+    --warn: 201 133 0;
+    --danger: 230 103 103;
+  }
+
+  * {
+    @apply border-line;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+  }
+
+  /* Keyboard focus is visible everywhere; pointer focus stays quiet. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-canvas;
+  }
+
+  ::selection {
+    @apply bg-accent/25;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-surface shadow-card;
+  }
+
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-4 py-2
+           text-sm font-medium transition-all duration-200 ease-spring
+           disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-accent-ink hover:brightness-110 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn text-subtle hover:bg-raised hover:text-ink active:scale-[0.98];
+  }
+
+  .btn-outline {
+    @apply btn border border-line bg-surface text-ink hover:bg-raised active:scale-[0.98];
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-surface
+           px-3 py-1 text-xs font-medium text-subtle transition-colors
+           hover:border-accent/40 hover:text-ink;
+  }
+
+  .chip-active {
+    @apply border-accent/50 bg-accent-soft text-accent;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink
+           placeholder:text-muted focus:border-accent focus:outline-none
+           focus:ring-2 focus:ring-accent/25;
+  }
+
+  .label {
+    @apply text-xs font-medium uppercase tracking-wider text-muted;
+  }
+
+  /* Long horizontal content (tables, chart rows) scrolls inside its own box
+     so the page body never scrolls sideways. */
+  .scroll-x {
+    @apply overflow-x-auto overscroll-x-contain;
+  }
+}
+
+@layer utilities {
+  .skeleton {
+    @apply relative overflow-hidden bg-raised;
+  }
+
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0 -translate-x-full animate-shimmer
+           bg-gradient-to-r from-transparent via-black/5 to-transparent;
+  }
+
+  .dark .skeleton::after {
+    @apply via-white/5;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--line)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-line;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

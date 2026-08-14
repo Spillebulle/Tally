@@ -1,0 +1,99 @@
+# Verification only. This workflow never pushes an image — publishing lives in
+# docker.yml and is driven exclusively by `v*` tags. Keep it that way: listening
+# on both a branch and its tag double-runs every build.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Tags are docker.yml's job. Without this, tagging a commit on main would
+    # run both workflows over the same tree.
+    tags-ignore: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend — pytest + ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the runtime base image in the Dockerfile. SQLAlchemy only
+          # declares its greenlet dependency below 3.13, so testing on the
+          # version we actually ship matters.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        working-directory: backend
+        run: ruff check app tests
+
+      - name: Test
+        working-directory: backend
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend — typecheck + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  image:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    # No point building the image if the code it wraps is broken.
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (amd64 only, never pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Single platform on purpose: this is a "does the Dockerfile still
+          # work" check, and emulating arm64 under QEMU here would cost minutes
+          # for no extra signal. docker.yml builds the real multi-arch image.
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
