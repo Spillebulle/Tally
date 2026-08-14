@@ -1,4 +1,5 @@
 """End-to-end checks against the HTTP surface."""
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -337,6 +338,54 @@ async def test_listing_servers_serialises_libraries(authed_client, db):
     [payload] = response.json()
     assert payload["name"] == "Basement"
     assert [library["title"] for library in payload["libraries"]] == ["Films", "TV"]
+
+
+async def test_plex_tv_maps_a_network_failure_to_unreachable(monkeypatch):
+    """A container with broken DNS must not leak a raw httpx error.
+
+    Every plex.tv call goes out to the internet. Left unwrapped, httpx's
+    ConnectError reached the catch-all handler as a 500 plus a traceback that
+    never mentioned the network.
+    """
+    from app.services import plex_tv
+
+    class DeadClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> bool:
+            return False
+
+        async def get(self, *args, **kwargs):
+            raise httpx.ConnectError("[Errno -3] Temporary failure in name resolution")
+
+    monkeypatch.setattr(plex_tv.httpx, "AsyncClient", DeadClient)
+
+    with pytest.raises(plex_tv.PlexUnreachableError) as caught:
+        await plex_tv.PlexTVClient().get_resources("a-token")
+
+    # The message has to name the actual cause, not just restate the failure.
+    assert "DNS" in str(caught.value)
+
+
+async def test_unreachable_plex_is_a_503_not_a_500(authed_client, monkeypatch):
+    from app.services.plex_tv import PlexUnreachableError
+    from app.services.sync_service import SyncService
+
+    async def unreachable(self, user):
+        raise PlexUnreachableError(
+            "Could not reach https://plex.tv. Check that the container has "
+            "internet access and working DNS."
+        )
+
+    monkeypatch.setattr(SyncService, "discover_servers", unreachable)
+
+    response = await authed_client.post("/api/servers/discover")
+    assert response.status_code == 503
+    assert "DNS" in response.json()["detail"]
 
 
 async def test_genres_endpoint_deduplicates(authed_client, db):

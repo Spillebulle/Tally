@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import get_settings
 from .db import init_db
 from .routers import auth, history, library, stats, sync, users, watchlist, webhooks
+from .services.plex_tv import PlexTVError, PlexUnreachableError
 from .services.scheduler import shutdown_scheduler, start_scheduler
 
 settings = get_settings()
@@ -69,6 +70,25 @@ for router in (
 @app.get("/api/health")
 async def health() -> dict:
     return {"status": "ok", "version": sync.VERSION, "app": settings.app_name}
+
+
+@app.exception_handler(PlexTVError)
+async def plex_tv_error(request: Request, exc: PlexTVError) -> JSONResponse:
+    """Report Plex problems as Plex problems.
+
+    Failing to reach plex.tv is not a bug in Tally, and routing it through the
+    catch-all below answers "Something went wrong — check the logs" when the
+    API already knows the cause. A DNS failure inside the container and an
+    expired token need completely different fixes, so say which one it is.
+    """
+    unreachable = isinstance(exc, PlexUnreachableError)
+    # Deliberately not log.exception: this is an expected operational failure,
+    # and a full traceback for a DNS problem buries the one useful line.
+    log.warning("plex.tv request failed on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503 if unreachable else 502,
+        content={"detail": str(exc)},
+    )
 
 
 @app.exception_handler(Exception)
