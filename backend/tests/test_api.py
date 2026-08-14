@@ -1,7 +1,15 @@
 """End-to-end checks against the HTTP surface."""
 import pytest
+from sqlalchemy import select
 
-from app.models import MediaItem, MediaType
+from app.models import (
+    MediaItem,
+    MediaType,
+    PlexLibrary,
+    PlexServer,
+    User,
+    UserServerAccess,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -280,6 +288,55 @@ async def test_preferences_round_trip(authed_client):
     assert updated.json()["sync_ratings"] is False
     # Unspecified keys keep their defaults rather than being dropped.
     assert updated.json()["sync_watchlist"] is True
+
+
+async def test_listing_servers_serialises_libraries(authed_client, db):
+    """Regression: ServerOut.libraries has to be eager-loaded.
+
+    ServerOut carries the `libraries` relationship, so pydantic reads it while
+    validating. Left lazy, that emits a SELECT from inside attribute access,
+    which asyncio SQLAlchemy refuses with MissingGreenlet — and server
+    discovery returned a 500 instead of the server list. The request runs on a
+    different session than the one used here, so the relationship really is
+    unloaded when the endpoint serialises it.
+    """
+    user = (
+        await db.execute(select(User).where(User.username == "tester"))
+    ).scalar_one()
+
+    server = PlexServer(
+        machine_identifier="machine-1",
+        name="Basement",
+        base_url="https://plex.example:32400",
+        access_token_encrypted="encrypted",
+    )
+    db.add(server)
+    await db.flush()
+
+    db.add_all(
+        [
+            UserServerAccess(
+                user_id=user.id,
+                server_id=server.id,
+                access_token_encrypted="encrypted",
+            ),
+            # Inserted out of order — the response must come back sorted.
+            PlexLibrary(
+                server_id=server.id, section_key="2", title="TV", section_type="show"
+            ),
+            PlexLibrary(
+                server_id=server.id, section_key="1", title="Films", section_type="movie"
+            ),
+        ]
+    )
+    await db.commit()
+
+    response = await authed_client.get("/api/servers")
+    assert response.status_code == 200, response.text
+
+    [payload] = response.json()
+    assert payload["name"] == "Basement"
+    assert [library["title"] for library in payload["libraries"]] == ["Films", "TV"]
 
 
 async def test_genres_endpoint_deduplicates(authed_client, db):

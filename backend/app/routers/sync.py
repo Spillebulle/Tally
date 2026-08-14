@@ -102,22 +102,12 @@ async def sync_status(db: DbSession, user: CurrentUser) -> dict:
 
 @router.get("/servers", response_model=list[ServerOut])
 async def list_servers(db: DbSession, user: CurrentUser) -> list[ServerOut]:
-    service = SyncService(db)
-    servers = await service.servers_for(user)
-
-    out: list[ServerOut] = []
-    for server in servers:
-        result = await db.execute(
-            select(PlexLibrary)
-            .where(PlexLibrary.server_id == server.id)
-            .order_by(PlexLibrary.title)
-        )
-        payload = ServerOut.model_validate(server)
-        payload.libraries = [
-            LibraryOut.model_validate(library) for library in result.scalars()
-        ]
-        out.append(payload)
-    return out
+    # ServerOut carries `libraries`, so pydantic reads that relationship while
+    # validating. It has to be eager-loaded: a lazy load here raises
+    # MissingGreenlet under asyncio, which is what made server discovery return
+    # a 500. Loading it up front also replaces the previous query-per-server.
+    servers = await SyncService(db).servers_for(user, with_libraries=True)
+    return [ServerOut.model_validate(server) for server in servers]
 
 
 @router.post("/servers/discover", response_model=list[ServerOut])

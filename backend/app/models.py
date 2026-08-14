@@ -179,8 +179,12 @@ class PlexServer(Base):
     )
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
 
+    # order_by keeps the eager-loaded list stable for the API, which used to
+    # sort libraries in the router with its own query.
     libraries: Mapped[list[PlexLibrary]] = relationship(
-        back_populates="server", cascade="all, delete-orphan"
+        back_populates="server",
+        cascade="all, delete-orphan",
+        order_by="PlexLibrary.title",
     )
 
 

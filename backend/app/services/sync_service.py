@@ -24,6 +24,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..config import get_settings
 from ..models import (
@@ -243,8 +244,18 @@ class SyncService:
         self._clients[cache_key] = client
         return client
 
-    async def servers_for(self, user: User) -> list[PlexServer]:
-        result = await self.db.execute(
+    async def servers_for(
+        self, user: User, *, with_libraries: bool = False
+    ) -> list[PlexServer]:
+        """Servers this user can reach.
+
+        Pass `with_libraries=True` when the result will be serialised. Reading
+        `server.libraries` on a lazily-loaded instance raises MissingGreenlet
+        under asyncio — SQLAlchemy cannot emit the follow-up SELECT from inside
+        attribute access — so anything that touches the relationship has to say
+        so up front. The sync engine does not, and stays on the cheaper query.
+        """
+        stmt = (
             select(PlexServer)
             .join(UserServerAccess, UserServerAccess.server_id == PlexServer.id)
             .where(
@@ -253,6 +264,9 @@ class SyncService:
                 PlexServer.enabled.is_(True),
             )
         )
+        if with_libraries:
+            stmt = stmt.options(selectinload(PlexServer.libraries))
+        result = await self.db.execute(stmt)
         return list(result.scalars().unique())
 
     # ------------------------------------------------------------------

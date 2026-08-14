@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/app-context'
 import { Layout } from '@/components/Layout'
@@ -34,6 +35,14 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
  * the PIN, so this page only needs to close itself.
  */
 function PlexCallback() {
+  useEffect(() => {
+    // This has to be an effect. A <script> rendered through JSX is injected as
+    // innerHTML, and the HTML spec says scripts inserted that way never
+    // execute — so the popup used to sit here until the opener killed it.
+    const timer = window.setTimeout(() => window.close(), 600)
+    return () => window.clearTimeout(timer)
+  }, [])
+
   return (
     <div className="grid min-h-screen place-items-center bg-canvas px-6 text-center">
       <div>
@@ -41,9 +50,6 @@ function PlexCallback() {
         <p className="mt-4 text-sm text-muted">
           Signed in with Plex. You can close this window.
         </p>
-        <script
-          dangerouslySetInnerHTML={{ __html: 'window.setTimeout(() => window.close(), 800)' }}
-        />
       </div>
     </div>
   )
