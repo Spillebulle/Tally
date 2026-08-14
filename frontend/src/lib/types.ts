@@ -158,6 +158,8 @@ export interface Server {
   name: string
   machine_identifier: string
   base_url: string
+  /** User-pinned address. When set, discovery is skipped entirely. */
+  manual_url: string | null
   owned: boolean
   version: string | null
   platform: string | null

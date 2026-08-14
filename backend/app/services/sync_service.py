@@ -238,9 +238,17 @@ class SyncService:
         if not token:
             return None
 
-        client = PlexServerClient(
-            server.base_url, token, candidate_urls=server.candidate_urls
-        )
+        if server.manual_url:
+            # An explicit address means exactly that: do not fall back to the
+            # discovered list, or the useless candidates the user overrode are
+            # probed anyway the moment their address has a hiccup.
+            client = PlexServerClient(
+                server.manual_url, token, candidate_urls=[server.manual_url]
+            )
+        else:
+            client = PlexServerClient(
+                server.base_url, token, candidate_urls=server.candidate_urls
+            )
         self._clients[cache_key] = client
         return client
 

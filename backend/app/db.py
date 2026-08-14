@@ -52,6 +52,7 @@ async def _run_light_migrations() -> None:
     """
     additions: list[tuple[str, str, str]] = [
         # (table, column, DDL type + default)
+        ("plex_servers", "manual_url", "TEXT"),
     ]
     if not additions:
         return

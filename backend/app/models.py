@@ -165,6 +165,12 @@ class PlexServer(Base):
     # Alternate connection URIs discovered from plex.tv, tried in order when the
     # primary base_url is unreachable.
     candidate_urls: Mapped[list] = mapped_column(JSON, default=list)
+    # Set by the user to pin one address and skip discovery entirely. Plex
+    # advertises a URI for every address it can see, which for a Plex server
+    # running in Docker includes each of its host's bridge gateways — addresses
+    # nothing outside that host can reach. Probing them costs a DNS lookup
+    # apiece, so someone who knows the right address can say so directly.
+    manual_url: Mapped[str | None] = mapped_column(Text, default=None)
     access_token_encrypted: Mapped[str] = mapped_column(Text)
     owned: Mapped[bool] = mapped_column(Boolean, default=True)
     version: Mapped[str | None] = mapped_column(String(64), default=None)
