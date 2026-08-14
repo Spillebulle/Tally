@@ -3,6 +3,7 @@ import type {
   AuthStatus,
   ContinueWatchingItem,
   HistoryPage,
+  Library,
   MediaCard,
   MediaDetail,
   Paginated,
@@ -199,6 +200,7 @@ export const api = {
       post<{ status: string }>('/api/sync', { full_history, scan_libraries }),
     status: () => get<SyncStatus>('/api/sync/status'),
     runs: () => get<SyncRun[]>('/api/sync/runs'),
+    cancel: () => post<{ cancelling: boolean; run_id: number }>('/api/sync/cancel'),
   },
 
   servers: {
@@ -211,7 +213,7 @@ export const api = {
     updateLibrary: (
       id: number,
       body: { enabled?: boolean; anime_override?: boolean | null },
-    ) => patch<unknown>(`/api/libraries/${id}`, body),
+    ) => patch<Library>(`/api/libraries/${id}`, body),
     scanLibrary: (id: number) => post<unknown>(`/api/libraries/${id}/scan`),
   },
 

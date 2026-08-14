@@ -91,11 +91,41 @@ async def sync_status(db: DbSession, user: CurrentUser) -> dict:
         .limit(1)
     )
     latest = result.scalar_one_or_none()
+    running = bool(latest and latest.finished_at is None)
     return {
-        "running": bool(latest and latest.finished_at is None),
+        "running": running,
         "last_run": SyncRunOut.model_validate(latest).model_dump() if latest else None,
         "last_full_sync_at": user.last_full_sync_at,
+        # Only meaningful while running; the UI shows these on hover.
+        "run_id": latest.id if latest else None,
+        "phase": latest.phase if latest else None,
+        "progress_current": latest.progress_current if running else 0,
+        "progress_total": latest.progress_total if running else 0,
+        "cancel_requested": bool(latest and latest.cancel_requested) if running else False,
     }
+
+
+@router.post("/sync/cancel", response_model=dict)
+async def cancel_sync(db: DbSession, user: CurrentUser) -> dict:
+    """Ask the running sync to stop at its next checkpoint.
+
+    Cooperative rather than immediate: the sync finishes the unit of work it is
+    in and stops at the next boundary, so nothing is left half-written. That
+    can take a few seconds on a slow server.
+    """
+    result = await db.execute(
+        select(SyncRun)
+        .where(SyncRun.user_id == user.id, SyncRun.finished_at.is_(None))
+        .order_by(SyncRun.started_at.desc())
+        .limit(1)
+    )
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "No sync is running")
+
+    run.cancel_requested = True
+    await db.commit()
+    return {"cancelling": True, "run_id": run.id}
 
 
 # ---------------------------------------------------------------------------
@@ -209,15 +239,21 @@ async def update_library(
     if access.scalar_one_or_none() is None and not user.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this server")
 
-    if payload.enabled is not None:
-        library.enabled = payload.enabled
+    # exclude_unset, not `is not None`: anime_override is tri-state and null
+    # *is* a value — it means "go back to auto-detecting". Treating null as
+    # "field omitted" made cycling the chip to auto silently do nothing, so it
+    # snapped back to its previous value on the next read.
+    fields = payload.model_dump(exclude_unset=True)
+
+    if "enabled" in fields and fields["enabled"] is not None:
+        library.enabled = fields["enabled"]
 
     anime_changed = (
-        payload.anime_override is not None
-        and payload.anime_override != library.anime_override
+        "anime_override" in fields
+        and fields["anime_override"] != library.anime_override
     )
-    if payload.anime_override is not None:
-        library.anime_override = payload.anime_override
+    if "anime_override" in fields:
+        library.anime_override = fields["anime_override"]
     await db.commit()
 
     if anime_changed:
@@ -231,11 +267,19 @@ async def update_library(
 
 
 async def _reclassify_library_task(library_id: int) -> None:
-    """Background wrapper — the request's session is gone by the time this runs."""
-    async with session_scope() as scoped:
-        library = await scoped.get(PlexLibrary, library_id)
-        if library is not None:
-            await _reclassify_library(scoped, library)
+    """Background wrapper — the request's session is gone by the time this runs.
+
+    Nothing awaits the result, so an exception here has nowhere to surface.
+    Log it rather than letting it escape as an unhandled task error; the
+    override itself is already saved either way.
+    """
+    try:
+        async with session_scope() as scoped:
+            library = await scoped.get(PlexLibrary, library_id)
+            if library is not None:
+                await _reclassify_library(scoped, library)
+    except Exception:
+        log.exception("Reclassifying library %s failed", library_id)
 
 
 async def _reclassify_library(db: AsyncSession, library: PlexLibrary) -> None:

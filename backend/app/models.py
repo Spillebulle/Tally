@@ -105,6 +105,7 @@ class SyncStatus(str, enum.Enum):
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +495,17 @@ class SyncRun(Base):
     stats: Mapped[dict] = mapped_column(JSON, default=dict)
     messages: Mapped[list] = mapped_column(JSON, default=list)
     error: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # What the run is doing right now, so the UI can say more than "syncing".
+    phase: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Units of the current phase, not of the run as a whole — a sync does not
+    # know its total work up front, so a single overall percentage would be a
+    # lie. Zero total means "no meaningful bar, show it as indeterminate".
+    progress_current: Mapped[int] = mapped_column(Integer, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, default=0)
+    # Set by the cancel endpoint. The sync checks it between units of work and
+    # stops at the next boundary rather than being killed mid-write.
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class PlexPin(Base):

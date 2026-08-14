@@ -27,6 +27,22 @@ TYPE_SEASON = 3
 TYPE_EPISODE = 4
 
 
+# The only Plex item types that represent watching something in the library.
+# Trailers, behind-the-scenes featurettes and other extras come back as
+# `clip` — often carrying the parent film's title and artwork — so anything
+# that treats a session or history row as "the user watched this" has to
+# filter on type first, or playing a two-minute trailer marks the film watched.
+PLAYABLE_TYPES = frozenset({"movie", "episode"})
+
+
+def is_real_playback(meta: dict[str, Any]) -> bool:
+    """True when this Plex item is a library item rather than an extra."""
+    if str(meta.get("type") or "").lower() not in PLAYABLE_TYPES:
+        return False
+    # Extras can also be reported with a library type but an extra marker set.
+    return not meta.get("extraType") and not meta.get("subtype")
+
+
 class PlexServerError(RuntimeError):
     pass
 
@@ -278,20 +294,29 @@ class PlexServerClient:
                 params["viewedAt>"] = int(since.timestamp())
 
             container = await self._container("/status/sessions/history/all", params)
-            batch = container.get("Metadata", []) or []
-            if not batch:
+            raw = container.get("Metadata", []) or []
+            if not raw:
                 return
-            yield batch
+            # Drop trailers and extras before they reach the importer.
+            batch = [meta for meta in raw if is_real_playback(meta)]
+            if batch:
+                yield batch
 
-            offset += len(batch)
+            # Page on the unfiltered count: `batch` may be shorter after extras
+            # were dropped, and advancing by that would re-read rows forever.
+            offset += len(raw)
             total = container.get("totalSize") or 0
-            if len(batch) < page_size or (total and offset >= total):
+            if len(raw) < page_size or (total and offset >= total):
                 return
 
     async def sessions(self) -> list[PlexSession]:
         container = await self._container("/status/sessions")
         out: list[PlexSession] = []
         for meta in container.get("Metadata", []) or []:
+            if not is_real_playback(meta):
+                # A trailer or extra. Plex reports it with the parent film's
+                # metadata, so counting it would mark the film as watched.
+                continue
             user = (meta.get("User") or {})
             player = (meta.get("Player") or {})
             account_id = user.get("id")

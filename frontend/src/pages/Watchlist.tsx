@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import type { MediaCard } from '@/lib/types'
+import type { MediaCard, WatchlistEntry } from '@/lib/types'
 import { Poster, PosterSkeleton } from '@/components/Poster'
 import { EmptyState, PageHeader, Segmented, Spinner } from '@/components/ui'
 import { BookmarkIcon, PlusIcon, SearchIcon } from '@/components/Icons'
@@ -20,11 +20,24 @@ export function Watchlist() {
 
   const remove = useMutation({
     mutationFn: (mediaItemId: number) => api.watchlist.remove(mediaItemId),
-    onSuccess: () => {
-      notify('Removed from watchlist — also removed on Plex', 'info')
-      queryClient.invalidateQueries({ queryKey: ['watchlist'] })
+    // Removal also has to reach Plex, so the round trip is long enough to feel
+    // broken. Drop the row straight away and put it back if the write fails.
+    onMutate: async (mediaItemId: number) => {
+      await queryClient.cancelQueries({ queryKey: ['watchlist', filter] })
+      const previous = queryClient.getQueryData<WatchlistEntry[]>(['watchlist', filter])
+      queryClient.setQueryData<WatchlistEntry[]>(['watchlist', filter], (old) =>
+        old?.filter((entry) => entry.media_item_id !== mediaItemId),
+      )
+      return { previous }
     },
-    onError: (error: Error) => notify(error.message, 'error'),
+    onSuccess: () => notify('Removed from watchlist — also removed on Plex', 'info'),
+    onError: (error: Error, _mediaItemId, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(['watchlist', filter], context.previous)
+      }
+      notify(error.message, 'error')
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['watchlist'] }),
   })
 
   const entries = data ?? []
@@ -190,8 +203,10 @@ function DiscoverSearch({ onClose }: { onClose: () => void }) {
                 type="button"
                 onClick={() => add.mutate(card)}
                 disabled={add.isPending || card.on_watchlist}
-                className="btn-outline h-8 shrink-0 px-2.5 text-xs"
+                className="btn-outline h-8 shrink-0 gap-1.5 px-2.5 text-xs"
               >
+                {/* Adding pushes to Plex's watchlist, so show the wait. */}
+                {add.isPending && add.variables.id === card.id ? <Spinner /> : null}
                 {card.on_watchlist ? 'Added' : 'Add'}
               </button>
             </li>

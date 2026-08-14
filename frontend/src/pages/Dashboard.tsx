@@ -14,7 +14,7 @@ import {
 } from '@/lib/utils'
 import { PosterRail } from '@/components/Poster'
 import { StatTile } from '@/components/Charts'
-import { EmptyState } from '@/components/ui'
+import { EmptyState, Spinner } from '@/components/ui'
 import {
   ChartIcon,
   CheckIcon,
@@ -37,9 +37,12 @@ function greeting(): string {
 function ContinueCard({
   entry,
   onMarkWatched,
+  markingId = null,
 }: {
   entry: ContinueWatchingItem
   onMarkWatched: (card: MediaCard) => void
+  /** Item whose mark-as-watched is in flight, if any. */
+  markingId?: number | null
 }) {
   const target = entry.next_episode ?? entry.item
   const poster = entry.item.poster_url ?? entry.show?.poster_url
@@ -105,12 +108,21 @@ function ContinueCard({
             <button
               type="button"
               onClick={() => onMarkWatched(target)}
+              disabled={markingId === target.id}
               className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-muted
                          transition-colors hover:bg-raised hover:text-good"
-              title="Mark as watched"
-              aria-label={`Mark ${target.title} as watched`}
+              title={markingId === target.id ? 'Marking as watched…' : 'Mark as watched'}
+              aria-label={
+                markingId === target.id
+                  ? `Marking ${target.title} as watched`
+                  : `Mark ${target.title} as watched`
+              }
             >
-              <CheckIcon className="text-base" />
+              {markingId === target.id ? (
+                <Spinner className="text-base" />
+              ) : (
+                <CheckIcon className="text-base" />
+              )}
             </button>
           </div>
         </div>
@@ -227,6 +239,7 @@ export function Dashboard() {
                     key={`${entry.item.id}-${entry.next_episode?.id ?? 'self'}`}
                     entry={entry}
                     onMarkWatched={(card) => markWatched.mutate(card)}
+                    markingId={markWatched.isPending ? markWatched.variables.id : null}
                   />
                 ))}
           </div>
@@ -280,6 +293,7 @@ export function Dashboard() {
         cards={recentlyAdded.data ?? []}
         loading={recentlyAdded.isLoading}
         onQuickWatch={(card) => markWatched.mutate(card)}
+        quickWatchPendingId={markWatched.isPending ? markWatched.variables.id : null}
       />
 
       <PosterRail
@@ -292,6 +306,7 @@ export function Dashboard() {
           </Link>
         }
         onQuickWatch={(card) => markWatched.mutate(card)}
+        quickWatchPendingId={markWatched.isPending ? markWatched.variables.id : null}
       />
 
       {stats.data && stats.data.top_genres.length > 0 && (

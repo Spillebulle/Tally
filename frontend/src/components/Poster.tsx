@@ -8,11 +8,14 @@ import {
   ratingToStars,
 } from '@/lib/utils'
 import { CheckIcon, SparkIcon, StarIcon } from './Icons'
+import { Spinner } from './ui'
 
 interface PosterProps {
   card: MediaCard
   showProgress?: boolean
   onQuickWatch?: (card: MediaCard) => void
+  /** True while this card's quick-watch is in flight. */
+  quickWatchPending?: boolean
   className?: string
 }
 
@@ -23,7 +26,13 @@ interface PosterProps {
  * on hover or keyboard focus, so the default state stays quiet and the artwork
  * carries the page.
  */
-export function Poster({ card, showProgress = true, onQuickWatch, className }: PosterProps) {
+export function Poster({
+  card,
+  showProgress = true,
+  onQuickWatch,
+  quickWatchPending = false,
+  className,
+}: PosterProps) {
   const title = displayTitle(card)
   const subtitle = displaySubtitle(card)
   const stars = ratingToStars(card.rating)
@@ -119,13 +128,24 @@ export function Poster({ card, showProgress = true, onQuickWatch, className }: P
                   event.preventDefault()
                   onQuickWatch(card)
                 }}
+                disabled={quickWatchPending}
                 className="pointer-events-auto grid h-8 w-8 place-items-center rounded-full
                            bg-white/95 text-black transition-transform hover:scale-110
-                           active:scale-95"
-                title="Mark as watched"
-                aria-label={`Mark ${title} as watched`}
+                           active:scale-95 disabled:scale-100"
+                title={quickWatchPending ? 'Marking as watched…' : 'Mark as watched'}
+                aria-label={
+                  quickWatchPending
+                    ? `Marking ${title} as watched`
+                    : `Mark ${title} as watched`
+                }
               >
-                <CheckIcon className="text-sm" />
+                {/* Marking pushes a scrobble to Plex, so it is a round trip.
+                    Without this the tile just sat there looking ignored. */}
+                {quickWatchPending ? (
+                  <Spinner className="text-sm" />
+                ) : (
+                  <CheckIcon className="text-sm" />
+                )}
               </button>
             )}
           </div>
@@ -182,6 +202,8 @@ interface PosterGridProps {
   loading?: boolean
   skeletonCount?: number
   onQuickWatch?: (card: MediaCard) => void
+  /** Card whose quick-watch is currently in flight, if any. */
+  quickWatchPendingId?: number | null
 }
 
 export function PosterGrid({
@@ -189,6 +211,7 @@ export function PosterGrid({
   loading,
   skeletonCount = 12,
   onQuickWatch,
+  quickWatchPendingId = null,
 }: PosterGridProps) {
   return (
     <div
@@ -200,7 +223,12 @@ export function PosterGrid({
             <PosterSkeleton key={index} />
           ))
         : cards.map((card) => (
-            <Poster key={card.id} card={card} onQuickWatch={onQuickWatch} />
+            <Poster
+              key={card.id}
+              card={card}
+              onQuickWatch={onQuickWatch}
+              quickWatchPending={quickWatchPendingId === card.id}
+            />
           ))}
     </div>
   )
@@ -212,6 +240,7 @@ interface PosterRailProps {
   loading?: boolean
   action?: React.ReactNode
   onQuickWatch?: (card: MediaCard) => void
+  quickWatchPendingId?: number | null
 }
 
 /** Horizontally scrolling rail — used for dashboard sections. */
@@ -221,6 +250,7 @@ export function PosterRail({
   loading,
   action,
   onQuickWatch,
+  quickWatchPendingId = null,
 }: PosterRailProps) {
   if (!loading && cards.length === 0) return null
 
@@ -236,7 +266,11 @@ export function PosterRail({
             {loading ? (
               <PosterSkeleton />
             ) : (
-              <Poster card={card as MediaCard} onQuickWatch={onQuickWatch} />
+              <Poster
+                card={card as MediaCard}
+                onQuickWatch={onQuickWatch}
+                quickWatchPending={quickWatchPendingId === (card as MediaCard).id}
+              />
             )}
           </div>
         ))}

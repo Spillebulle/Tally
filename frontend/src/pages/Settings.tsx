@@ -5,6 +5,7 @@ import { useAuth, useTheme, useToast, type Theme } from '@/lib/app-context'
 import type { Library, Server } from '@/lib/types'
 import { cn, formatDateTime, relativeTime } from '@/lib/utils'
 import { EmptyState, PageHeader, Segmented, Spinner, Toggle } from '@/components/ui'
+import { SyncProgress, syncLabel } from '@/components/Layout'
 import { CheckIcon, RefreshIcon, SettingsIcon, SparkIcon } from '@/components/Icons'
 
 function Section({
@@ -65,6 +66,15 @@ export function Settings() {
     onSuccess: () => {
       notify('Plex servers refreshed', 'success')
       queryClient.invalidateQueries({ queryKey: ['servers'] })
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const cancelSync = useMutation({
+    mutationFn: api.sync.cancel,
+    onSuccess: () => {
+      notify('Stopping after the current step', 'info')
+      queryClient.invalidateQueries({ queryKey: ['sync-status'] })
     },
     onError: (error: Error) => notify(error.message, 'error'),
   })
@@ -132,17 +142,38 @@ export function Settings() {
         title="Syncing"
         description={`Runs automatically every ${settings.data?.sync_interval_minutes ?? 30} minutes.`}
         actions={
-          <button
-            type="button"
-            onClick={() => fullSync.mutate()}
-            disabled={fullSync.isPending || syncStatus.data?.running}
-            className="btn-outline h-9 text-sm"
-          >
-            {syncStatus.data?.running ? <Spinner /> : <RefreshIcon />}
-            Full re-import
-          </button>
+          <div className="flex items-center gap-2">
+            {syncStatus.data?.running && (
+              <button
+                type="button"
+                onClick={() => cancelSync.mutate()}
+                disabled={cancelSync.isPending || syncStatus.data.cancel_requested}
+                className="btn-ghost h-9 text-sm"
+              >
+                {syncStatus.data.cancel_requested ? 'Stopping…' : 'Cancel'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => fullSync.mutate()}
+              disabled={fullSync.isPending || syncStatus.data?.running}
+              className="btn-outline h-9 text-sm"
+              title={syncLabel(syncStatus.data, fullSync.isPending)}
+            >
+              {syncStatus.data?.running ? <Spinner /> : <RefreshIcon />}
+              Full re-import
+            </button>
+          </div>
         }
       >
+        {syncStatus.data?.running && (
+          <div className="mb-4 rounded-xl border border-line p-3">
+            <p className="text-xs font-medium text-ink">
+              {syncStatus.data.phase ?? 'Syncing'}
+            </p>
+            <SyncProgress status={syncStatus.data} />
+          </div>
+        )}
         <div className="divide-y divide-line">
           <Toggle
             label="Sync ratings with Plex"
@@ -394,12 +425,24 @@ function ServerCard({ server }: { server: Server }) {
       )
       return { previous }
     },
+    // Write the server's own answer into the cache. Invalidating instead would
+    // fire a refetch that can land while a sync is mid-write, and any stale
+    // read then looks like the click was undone.
+    onSuccess: (updated) => {
+      queryClient.setQueryData<Server[]>(['servers'], (old) =>
+        old?.map((entry) => ({
+          ...entry,
+          libraries: entry.libraries.map((library) =>
+            library.id === updated.id ? updated : library,
+          ),
+        })),
+      )
+    },
     onError: (error: Error, _variables, context) => {
       // Put the real value back; the optimistic one was a guess that lost.
       if (context?.previous) queryClient.setQueryData(['servers'], context.previous)
       notify(error.message, 'error')
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
   })
 
   const scan = useMutation({

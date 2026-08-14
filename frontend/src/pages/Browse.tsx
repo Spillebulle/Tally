@@ -232,6 +232,7 @@ export function Browse({ mode }: BrowseProps) {
           loading={isLoading}
           skeletonCount={PAGE_SIZE / 3}
           onQuickWatch={(card) => markWatched.mutate(card)}
+          quickWatchPendingId={markWatched.isPending ? markWatched.variables.id : null}
         />
       )}
 
