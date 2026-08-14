@@ -121,31 +121,37 @@ class ProviderClient:
         if (cached := self._cache_get(cache_key)) is not None:
             return cached
 
-        for attempt in range(attempts):
-            await self._limiter.acquire()
-            try:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
+        # One client for all attempts. Building it inside the loop gave every
+        # retry its own connection, and so its own DNS lookup, turning a
+        # provider outage into three lookups per item across a whole library
+        # scan.
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for attempt in range(attempts):
+                await self._limiter.acquire()
+                try:
                     resp = await client.get(url, params=params, headers=headers)
-            except (httpx.TransportError, httpx.TimeoutException) as exc:
-                log.debug("%s request failed (%s): %s", self.name, url, exc)
-                await asyncio.sleep(1.5 * (attempt + 1))
-                continue
+                except (httpx.TransportError, httpx.TimeoutException) as exc:
+                    log.debug("%s request failed (%s): %s", self.name, url, exc)
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                    continue
 
-            if resp.status_code == 429:
-                retry_after = float(resp.headers.get("Retry-After", 2))
-                await asyncio.sleep(min(retry_after, 10))
-                continue
-            if resp.status_code == 404:
-                self._cache_put(cache_key, None)
-                return None
-            if resp.status_code >= 400:
-                log.debug("%s returned %s for %s", self.name, resp.status_code, url)
-                return None
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("Retry-After", 2))
+                    await asyncio.sleep(min(retry_after, 10))
+                    continue
+                if resp.status_code == 404:
+                    self._cache_put(cache_key, None)
+                    return None
+                if resp.status_code >= 400:
+                    log.debug(
+                        "%s returned %s for %s", self.name, resp.status_code, url
+                    )
+                    return None
 
-            try:
-                data = resp.json()
-            except ValueError:
-                return None
-            self._cache_put(cache_key, data)
-            return data
+                try:
+                    data = resp.json()
+                except ValueError:
+                    return None
+                self._cache_put(cache_key, data)
+                return data
         return None
