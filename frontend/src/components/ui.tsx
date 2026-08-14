@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { cn, ratingToStars, starsToRating, STATUS_DOT, STATUS_LABELS } from '@/lib/utils'
+import { cn, formatRating, RATING_SCALE, STATUS_DOT, STATUS_LABELS } from '@/lib/utils'
 import type { WatchStatus } from '@/lib/types'
 import { StarIcon } from './Icons'
 
@@ -74,69 +74,64 @@ interface StarRatingProps {
 }
 
 /**
- * Five stars at half-star granularity, mapping to Plex's 0–10 scale.
- * Clicking the same value again clears the rating.
+ * Ten stars, one per point, matching Plex's underlying 0–10 scale directly.
+ *
+ * Previously this was five stars at half-star granularity over the same range,
+ * which needed two hit zones per star and made "7" unrepresentable as anything
+ * but three and a half stars. One star per point removes the translation
+ * entirely. Clicking the current value again clears the rating.
  */
 export function StarRating({ rating, onChange, size = 'md', readOnly }: StarRatingProps) {
-  const stars = ratingToStars(rating)
-  const sizes = { sm: 'text-sm', md: 'text-lg', lg: 'text-2xl' }
+  const score = rating ?? 0
+  const sizes = { sm: 'text-xs', md: 'text-sm', lg: 'text-lg' }
   const interactive = !readOnly && Boolean(onChange)
 
   return (
     <div
       className={cn('flex items-center gap-0.5', sizes[size])}
       role={interactive ? 'radiogroup' : undefined}
-      aria-label={interactive ? 'Your rating' : undefined}
+      aria-label={interactive ? 'Your rating out of 10' : undefined}
     >
-      {[1, 2, 3, 4, 5].map((position) => {
-        const filled = stars >= position
-        const half = !filled && stars >= position - 0.5
+      {RATING_SCALE.map((position) => {
+        const filled = score >= position
 
         if (!interactive) {
           return (
             <StarIcon
               key={position}
               filled={filled}
-              half={half}
-              className={filled || half ? 'text-warn' : 'text-line'}
+              className={filled ? 'text-warn' : 'text-line'}
             />
           )
         }
 
         return (
-          <span key={position} className="relative inline-flex">
-            {/* Two hit zones per star give half-star precision without a slider. */}
-            <button
-              type="button"
-              role="radio"
-              aria-checked={stars === position - 0.5}
-              aria-label={`${position - 0.5} stars`}
-              onClick={() =>
-                onChange?.(
-                  stars === position - 0.5 ? null : starsToRating(position - 0.5),
-                )
-              }
-              className="absolute left-0 top-0 z-10 h-full w-1/2"
-            />
-            <button
-              type="button"
-              role="radio"
-              aria-checked={stars === position}
-              aria-label={`${position} stars`}
-              onClick={() => onChange?.(stars === position ? null : starsToRating(position))}
-              className="absolute right-0 top-0 z-10 h-full w-1/2"
-            />
+          <button
+            key={position}
+            type="button"
+            role="radio"
+            aria-checked={score === position}
+            aria-label={`${position} out of 10`}
+            title={`${position} / 10`}
+            onClick={() => onChange?.(score === position ? null : position)}
+            className="inline-flex"
+          >
             <StarIcon
               filled={filled}
-              half={half}
               className={cn(
                 'transition-all duration-150 ease-spring hover:scale-110',
-                filled || half ? 'text-warn' : 'text-line hover:text-warn/50',
+                filled ? 'text-warn' : 'text-line hover:text-warn/50',
               )}
             />
-          </span>
+          </button>
         )
       })}
+      {/* The number is not decoration: ten stars are hard to count at a glance. */}
+      {rating != null && (
+        <span className="ml-1.5 text-xs font-medium tabular-nums text-muted">
+          {formatRating(rating)}
+        </span>
+      )}
       {interactive && rating != null && (
         <button
           type="button"

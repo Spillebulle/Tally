@@ -130,8 +130,10 @@ async def get_stats(
 
     distribution: Counter[str] = Counter()
     for value in ratings:
-        # Bucket to whole stars (Plex's 0-10 maps to 5 stars).
-        distribution[str(int(round(value / 2)))] += 1
+        # Bucket to whole points on Plex's own 0-10 scale. This used to halve the
+        # value into five star buckets, which merged 7 and 8 into one bar and
+        # made the chart disagree with the rating shown on the item itself.
+        distribution[str(int(round(value)))] += 1
 
     current_streak, longest_streak = _streaks(watch_days)
 
@@ -168,8 +170,8 @@ async def get_stats(
             StatCount(label="Anime", value=anime_count),
         ],
         rating_distribution=[
-            StatCount(label=star, value=distribution.get(star, 0))
-            for star in ("1", "2", "3", "4", "5")
+            StatCount(label=str(score), value=distribution.get(str(score), 0))
+            for score in range(1, 11)
         ],
     )
 

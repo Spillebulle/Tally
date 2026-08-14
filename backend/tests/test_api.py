@@ -464,6 +464,41 @@ async def test_cancelling_without_a_running_sync_is_a_409(authed_client):
     assert response.status_code == 409
 
 
+async def test_media_can_be_filtered_by_your_rating(authed_client, db):
+    """Ratings are 0-10, and both bounds are inclusive."""
+    from app.models import UserMediaState
+
+    user = (
+        await db.execute(select(User).where(User.username == "tester"))
+    ).scalar_one()
+
+    items = [
+        MediaItem(guid_key=f"tmdb:movie:{n}", media_type=MediaType.MOVIE, title=title)
+        for n, title in enumerate(["Perfect", "Great", "Fine", "Unrated"], start=1)
+    ]
+    db.add_all(items)
+    await db.flush()
+
+    for item, score in zip(items, [10.0, 8.0, 5.0, None], strict=True):
+        if score is not None:
+            db.add(
+                UserMediaState(user_id=user.id, media_item_id=item.id, rating=score)
+            )
+    await db.commit()
+
+    async def titles(**params):
+        response = await authed_client.get("/api/media", params=params)
+        assert response.status_code == 200, response.text
+        return sorted(card["title"] for card in response.json()["items"])
+
+    assert await titles(min_rating=8) == ["Great", "Perfect"]
+    assert await titles(min_rating=10) == ["Perfect"]
+    assert await titles(max_rating=8) == ["Fine", "Great"]
+    assert await titles(min_rating=8, max_rating=8) == ["Great"]
+    # An unrated title must never satisfy a rating filter.
+    assert "Unrated" not in await titles(min_rating=0)
+
+
 async def test_genres_endpoint_deduplicates(authed_client, db):
     db.add_all(
         [

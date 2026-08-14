@@ -112,6 +112,9 @@ export interface MediaQuery extends Query {
   unwatched?: boolean
   favorites?: boolean
   on_plex?: boolean
+  /** Your own rating, 0–10. Both bounds inclusive. */
+  min_rating?: number
+  max_rating?: number
   sort?: string
   order?: string
   offset?: number

@@ -55,6 +55,10 @@ async def list_media(
     unwatched: bool = False,
     favorites: bool = False,
     on_plex: bool | None = None,
+    # Your own rating, on Plex's 0-10 scale. Both bounds are inclusive, so
+    # min_rating=8 is "8 and up" and min=max=10 is "only tens".
+    min_rating: float | None = Query(None, ge=0, le=10),
+    max_rating: float | None = Query(None, ge=0, le=10),
     sort: SortField = "title",
     order: Literal["asc", "desc"] = "asc",
     offset: int = Query(0, ge=0),
@@ -92,8 +96,9 @@ async def list_media(
     stmt = select(MediaItem).where(and_(*conditions))
     count_stmt = select(func.count(MediaItem.id)).where(and_(*conditions))
 
+    rated = min_rating is not None or max_rating is not None
     needs_state_join = bool(
-        watch_status or unwatched or favorites or sort in ("watched", "rating")
+        watch_status or unwatched or favorites or rated or sort in ("watched", "rating")
     )
     if needs_state_join:
         join_on = and_(
@@ -116,6 +121,14 @@ async def list_media(
             )
         if favorites:
             extra.append(UserMediaState.is_favorite.is_(True))
+        if min_rating is not None:
+            extra.append(UserMediaState.rating >= min_rating)
+        if max_rating is not None:
+            extra.append(UserMediaState.rating <= max_rating)
+        if rated:
+            # The LEFT JOIN above lets unrated rows through with a NULL rating,
+            # and NULL comparisons are neither true nor false, so say it plainly.
+            extra.append(UserMediaState.rating.is_not(None))
         if extra:
             stmt = stmt.where(and_(*extra))
             count_stmt = count_stmt.where(and_(*extra))

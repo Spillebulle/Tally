@@ -31,6 +31,52 @@ const STATUS_FILTERS: Array<{ value: WatchStatus | 'all' | 'unwatched'; label: s
 
 const PAGE_SIZE = 60
 
+/**
+ * Rating shortcuts, on Plex's 0–10 scale.
+ *
+ * `min` alone is "this and above"; `min === max` pins an exact score, which is
+ * what clicking a bar on the stats page sends.
+ */
+const RATING_FILTERS: Array<{ label: string; min?: number; max?: number }> = [
+  { label: 'Any' },
+  { label: '10 only', min: 10, max: 10 },
+  { label: '9+', min: 9 },
+  { label: '8+', min: 8 },
+  { label: '7+', min: 7 },
+  { label: '5+', min: 5 },
+]
+
+/**
+ * The shortcut list, plus an entry describing the active filter when it is not
+ * one of them.
+ *
+ * Clicking a bar on the stats page can pin any exact score, and a select that
+ * showed "Any rating" while the grid was filtered to 7s would be lying about
+ * the state of the page.
+ */
+function ratingOptions(min?: number, max?: number) {
+  const known = RATING_FILTERS.some(
+    (option) => option.min === min && option.max === max,
+  )
+  if (known || (min == null && max == null)) return RATING_FILTERS
+
+  const label =
+    min != null && min === max
+      ? `${min} only`
+      : min != null && max != null
+        ? `${min}–${max}`
+        : min != null
+          ? `${min}+`
+          : `up to ${max}`
+  return [...RATING_FILTERS, { label, min, max }]
+}
+
+const numberParam = (raw: string | null): number | undefined => {
+  if (raw === null || raw === '') return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
 interface BrowseProps {
   mode: BrowseMode
 }
@@ -46,13 +92,15 @@ export function Browse({ mode }: BrowseProps) {
   const order = params.get('order') ?? (sort === 'title' ? 'asc' : 'desc')
   const statusFilter = (params.get('status') ?? 'all') as WatchStatus | 'all' | 'unwatched'
   const animeKind = (params.get('kind') ?? 'all') as 'all' | 'movie' | 'show'
+  const minRating = numberParam(params.get('min_rating'))
+  const maxRating = numberParam(params.get('max_rating'))
 
   const [page, setPage] = useState(0)
 
   // Any filter change invalidates the current offset.
   useEffect(() => {
     setPage(0)
-  }, [search, genre, sort, order, statusFilter, animeKind, mode])
+  }, [search, genre, sort, order, statusFilter, animeKind, minRating, maxRating, mode])
 
   const animeFilter: AnimeFilter = useMemo(() => {
     if (mode === 'anime') return 'only'
@@ -77,6 +125,8 @@ export function Browse({ mode }: BrowseProps) {
     watch_status:
       statusFilter !== 'all' && statusFilter !== 'unwatched' ? statusFilter : undefined,
     unwatched: statusFilter === 'unwatched' || undefined,
+    min_rating: minRating,
+    max_rating: maxRating,
     sort,
     order,
     offset: page * PAGE_SIZE,
@@ -93,6 +143,8 @@ export function Browse({ mode }: BrowseProps) {
     queryKey: ['genres', animeFilter],
     queryFn: () => api.media.genres(animeFilter),
   })
+
+  const ratingChoices = ratingOptions(minRating, maxRating)
 
   const markWatched = useMutation({
     mutationFn: (card: MediaCard) => api.history.markWatched(card.id),
@@ -179,6 +231,29 @@ export function Browse({ mode }: BrowseProps) {
           </select>
 
           <select
+            aria-label="Filter by your rating"
+            value={ratingChoices.findIndex(
+              (option) => option.min === minRating && option.max === maxRating,
+            )}
+            onChange={(event) => {
+              const choice = ratingChoices[Number(event.target.value)]
+              const next = new URLSearchParams(params)
+              if (choice?.min == null) next.delete('min_rating')
+              else next.set('min_rating', String(choice.min))
+              if (choice?.max == null) next.delete('max_rating')
+              else next.set('max_rating', String(choice.max))
+              setParams(next, { replace: true })
+            }}
+            className="input h-9 w-auto py-0 text-sm"
+          >
+            {ratingChoices.map((option, index) => (
+              <option key={option.label} value={index}>
+                {option.label === 'Any' ? 'Any rating' : `Rated ${option.label}`}
+              </option>
+            ))}
+          </select>
+
+          <select
             aria-label="Sort by"
             value={sort}
             onChange={(event) => update('sort', event.target.value)}
@@ -200,7 +275,7 @@ export function Browse({ mode }: BrowseProps) {
             {order === 'asc' ? '↑' : '↓'}
           </button>
 
-          {(genre || statusFilter !== 'all') && (
+          {(genre || statusFilter !== 'all' || minRating != null || maxRating != null) && (
             <button
               type="button"
               onClick={() => setParams(search ? { q: search } : {}, { replace: true })}
