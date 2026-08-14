@@ -21,6 +21,11 @@ jobs:
   publish:
     name: Build and push
     runs-on: ubuntu-latest
+    env:
+      # Lifted to env so steps can test it in an `if:` — secrets are not
+      # available in job-level conditionals. Empty when Docker Hub is not
+      # configured, which makes every Docker Hub step below skip.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,22 +56,41 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Skipped entirely when DOCKERHUB_USERNAME is unset, so a release still
+      # succeeds and publishes to GHCR before Docker Hub secrets are added.
       - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Decide which registries to publish to
+        id: registries
+        run: |
+          set -euo pipefail
+          # GHCR paths must be lowercase, and this repo is `Spillebulle/Tally`.
+          # metadata-action lowercases its own `images:` input, but building the
+          # list here means doing it ourselves.
+          images="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
+            images="${images}"$'\n'"docker.io/${DOCKERHUB_USERNAME,,}/tally"
+          else
+            echo "::warning::DOCKERHUB_USERNAME is not set — publishing to GHCR only. Add DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets to also publish to Docker Hub."
+          fi
+          echo "Publishing to:"; echo "$images"
+
+          {
+            echo 'images<<EOF'
+            echo "$images"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
       - name: Derive tags and labels
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # metadata-action lowercases its own `images:` input, so the
-          # capitalised repo name is safe here. Anything interpolating
-          # github.repository raw would need ${GITHUB_REPOSITORY,,}.
-          images: |
-            ghcr.io/${{ github.repository }}
-            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/tally
+          images: ${{ steps.registries.outputs.images }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
