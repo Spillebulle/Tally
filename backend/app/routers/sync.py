@@ -195,6 +195,20 @@ async def discover_servers(db: DbSession, user: CurrentUser) -> list[ServerOut]:
     return await list_servers(db, user)
 
 
+async def _require_server_access(
+    db: AsyncSession, user: User, server_id: int
+) -> None:
+    """Refuse unless the user can reach this server at all."""
+    access = await db.execute(
+        select(UserServerAccess).where(
+            UserServerAccess.user_id == user.id,
+            UserServerAccess.server_id == server_id,
+        )
+    )
+    if access.scalar_one_or_none() is None and not user.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this server")
+
+
 @router.patch("/servers/{server_id}", response_model=ServerOut)
 async def update_server(
     server_id: int, payload: ServerUpdate, db: DbSession, user: CurrentUser
@@ -204,14 +218,17 @@ async def update_server(
     if server is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
 
-    access = await db.execute(
-        select(UserServerAccess).where(
-            UserServerAccess.user_id == user.id,
-            UserServerAccess.server_id == server_id,
+    # A PlexServer row is global — one row serves every Tally account, and
+    # `client_for` prefers `manual_url` for *every* user of that server. Merely
+    # having access is therefore not enough authority to rewrite it: a shared
+    # library friend could point the server at a host they control and collect
+    # each viewer's own Plex token, which the artwork transcode puts in the
+    # query string. Only the owner (or an admin) may move the address.
+    if server.owner_user_id != user.id and not user.is_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only the owner of this server can change its address",
         )
-    )
-    if access.scalar_one_or_none() is None and server.owner_user_id != user.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this server")
 
     fields = payload.model_dump(exclude_unset=True)
     if "manual_url" in fields:
@@ -269,14 +286,7 @@ async def update_library(
     if library is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Library not found")
 
-    access = await db.execute(
-        select(UserServerAccess).where(
-            UserServerAccess.user_id == user.id,
-            UserServerAccess.server_id == library.server_id,
-        )
-    )
-    if access.scalar_one_or_none() is None and not user.is_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this server")
+    await _require_server_access(db, user, library.server_id)
 
     # exclude_unset, not `is not None`: anime_override is tri-state and null
     # *is* a value — it means "go back to auto-detecting". Treating null as
@@ -353,6 +363,10 @@ async def scan_library(
     library = await db.get(PlexLibrary, library_id)
     if library is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Library not found")
+    # Without this, any account could queue a scan of any library and read the
+    # title back out of the response — disclosing library names from servers it
+    # cannot otherwise see. `update_library` next door has always checked.
+    await _require_server_access(db, user, library.server_id)
 
     async def run() -> None:
         async with session_scope() as scoped:

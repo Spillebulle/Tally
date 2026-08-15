@@ -63,26 +63,34 @@ async def _resolve_user(db: AsyncSession, payload: dict[str, Any]) -> User | Non
             return user
 
     if title:
+        # `plex_username` only — never the local `username`. This endpoint
+        # cannot be authenticated (Plex sends no credentials), so every field
+        # here is attacker-supplied. Matching a local username let a forged
+        # payload write watch events and ratings into an account that has no
+        # Plex link at all, needing nothing but a guessable name.
         result = await db.execute(select(User).where(User.plex_username == title))
-        if user := result.scalar_one_or_none():
-            return user
-        result = await db.execute(select(User).where(User.username == title))
         if user := result.scalar_one_or_none():
             return user
     return None
 
 
 async def _resolve_server(db: AsyncSession, payload: dict[str, Any]) -> PlexServer | None:
+    """Match the payload's Server block to a known server, or give up.
+
+    There is deliberately no fallback. Returning "the first enabled server"
+    when the uuid was absent or unrecognised meant a payload with no Server
+    block at all — trivial to forge against an endpoint that by necessity has
+    no authentication — was attributed to an arbitrary server, writing
+    PlexMapping rows that point one server's rating keys at another.
+    """
     server_info = payload.get("Server") or {}
     identifier = server_info.get("uuid")
-    if identifier:
-        result = await db.execute(
-            select(PlexServer).where(PlexServer.machine_identifier == identifier)
-        )
-        if server := result.scalar_one_or_none():
-            return server
-    result = await db.execute(select(PlexServer).where(PlexServer.enabled.is_(True)))
-    return result.scalars().first()
+    if not identifier:
+        return None
+    result = await db.execute(
+        select(PlexServer).where(PlexServer.machine_identifier == identifier)
+    )
+    return result.scalar_one_or_none()
 
 
 async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str, Any]:

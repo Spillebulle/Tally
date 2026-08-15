@@ -117,6 +117,7 @@ async def _run_light_migrations() -> None:
         ("sync_runs", "progress_current", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "progress_total", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "cancel_requested", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("plex_pins", "link_user_id", "INTEGER"),
     ]
     async with engine.begin() as conn:
         for table, column, ddl in additions:
