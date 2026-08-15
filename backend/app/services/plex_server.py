@@ -485,6 +485,13 @@ class PlexServerClient:
                     "minSize": 1,
                     "upscale": 1,
                     "url": path,
+                    # The transcoder resolves `url` with a fetch of its own, and
+                    # that inner request does not inherit the outer request's
+                    # headers — so the token has to be in the query here or the
+                    # transcode is refused. This is Tally talking to Plex
+                    # server-side; the rule it looks like it breaks is about
+                    # URLs *stored* and handed to browsers, which this is not.
+                    "X-Plex-Token": self.token,
                 },
             ),
             # The raw asset, untranscoded. Bigger, but it is the same picture.

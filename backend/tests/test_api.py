@@ -653,9 +653,13 @@ async def test_artwork_on_a_plex_server_is_proxied_not_linked(authed_client, db)
     assert response.content == b"jpeg-bytes"
     assert seen["path"] == "/photo/:/transcode"
     assert seen["params"]["url"] == "/library/metadata/1234/thumb/999"
-    # Fetched with this user's own token, and not through a URL parameter.
+    # Fetched with this user's own token, never the owner's.
     assert seen["token"] == "user-token"
-    assert "X-Plex-Token" not in seen["params"]
+    # The token rides in the query here because the transcoder's own inner fetch
+    # needs it. That is a server-side request; what must never carry a token is
+    # a URL stored on an item and served to a browser, which is asserted by the
+    # card payload above pointing at /api/images rather than at Plex.
+    assert seen["params"]["X-Plex-Token"] == "user-token"
 
 
 async def test_the_owner_gets_artwork_without_an_access_row(authed_client, db):
