@@ -27,10 +27,10 @@ import logging
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response, status
-from sqlalchemy import and_, select
+from sqlalchemy import select
 
 from ..deps import CurrentUser, DbSession
-from ..models import MediaItem, PlexMapping, PlexServer, User, UserServerAccess
+from ..models import MediaItem, PlexMapping, PlexServer, User
 from ..security import decrypt_secret
 from ..services.plex_server import PlexServerError
 from ..services.plex_tv import DISCOVER, plex_headers
@@ -53,19 +53,18 @@ _TIMEOUT = 15.0
 
 async def _from_plex_servers(
     db: DbSession, user: User, item_id: int, attr: str, size: tuple[int, int]
-) -> tuple[bytes, str] | None:
-    """Try each Plex server this user can reach that holds artwork for the item."""
+) -> tuple[tuple[bytes, str] | None, bool]:
+    """Try each Plex server this user can reach that holds artwork for the item.
+
+    Reachability is left entirely to `client_for`, which returns None unless the
+    user has an access row *or* owns the server. Repeating the check here as a
+    join was both redundant and stricter than the real rule: an owner whose
+    UserServerAccess row is missing — the case `client_for` falls back for — got
+    no artwork at all.
+    """
     rows = await db.execute(
         select(PlexMapping, PlexServer)
         .join(PlexServer, PlexServer.id == PlexMapping.server_id)
-        .join(
-            UserServerAccess,
-            and_(
-                UserServerAccess.server_id == PlexServer.id,
-                UserServerAccess.user_id == user.id,
-                UserServerAccess.enabled.is_(True),
-            ),
-        )
         .where(
             PlexMapping.media_item_id == item_id,
             getattr(PlexMapping, attr).is_not(None),
@@ -75,10 +74,12 @@ async def _from_plex_servers(
 
     service = SyncService(db)
     width, height = size
+    tried = False
     for mapping, server in rows.all():
         client = await service.client_for(user, server)
         if client is None:
             continue
+        tried = True
         try:
             fetched = await client.image_bytes(
                 getattr(mapping, attr), width=width, height=height
@@ -86,11 +87,11 @@ async def _from_plex_servers(
         except PlexServerError as exc:
             # An unreachable server is ordinary here — it must not turn a poster
             # into a 500. Try the next one, then fall through to Discover.
-            log.debug("Artwork unavailable on %s: %s", server.name, exc)
+            log.info("Artwork unavailable on %s: %s", server.name, exc)
             continue
         if fetched:
-            return fetched
-    return None
+            return fetched, True
+    return None, tried
 
 
 async def _from_discover(user: User, path: str) -> tuple[bytes, str] | None:
@@ -126,12 +127,25 @@ async def _serve(
 
     # A Plex server first: it is usually on the same network and does not need a
     # round trip to plex.tv. Discover covers what is on no server at all.
-    fetched = await _from_plex_servers(db, user, item_id, mapping_attr, size)
-    if fetched is None and (path := getattr(item, discover_attr)):
-        fetched = await _from_discover(user, path)
+    fetched, tried_plex = await _from_plex_servers(db, user, item_id, mapping_attr, size)
+    discover_path = getattr(item, discover_attr)
+    if fetched is None and discover_path:
+        fetched = await _from_discover(user, discover_path)
 
     if fetched is None:
-        # No artwork anywhere. The poster tile falls back to its gradient.
+        # No artwork. The tile falls back to its gradient either way, so the log
+        # line is the only thing that distinguishes "Tally has no path stored
+        # for this" from "every source Tally asked turned it down" — which need
+        # completely different fixes.
+        log.info(
+            "No %s for %r (item %s): %s",
+            mapping_attr,
+            item.title,
+            item_id,
+            "no stored artwork path on any reachable server"
+            if not tried_plex and not discover_path
+            else "every source refused it",
+        )
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No artwork for this item")
 
     content, content_type = fetched

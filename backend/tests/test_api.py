@@ -1,4 +1,4 @@
-"""End-to-end checks against the HTTP surface."""
+﻿"""End-to-end checks against the HTTP surface."""
 import httpx
 import pytest
 from sqlalchemy import select
@@ -279,8 +279,8 @@ async def test_watchlist_takes_the_same_filters_as_the_grid(authed_client, db):
 async def test_watchlist_sorts_are_independent_of_library_added(authed_client, db):
     """"Added" on this page means added to the watchlist, not to the library.
 
-    They are genuinely different dates — something can sit in your library for a
-    year before you decide to watchlist it — so the two sorts must not collapse
+    They are genuinely different dates â€” something can sit in your library for a
+    year before you decide to watchlist it â€” so the two sorts must not collapse
     into each other.
     """
     from datetime import timedelta
@@ -534,7 +534,7 @@ async def test_artwork_proxy_only_serves_paths_stored_on_the_item(authed_client,
     db.add_all([bare, arted])
     await db.commit()
 
-    # Nothing stored, nothing served — the tile falls back to its gradient.
+    # Nothing stored, nothing served â€” the tile falls back to its gradient.
     assert (await authed_client.get(f"/api/images/{bare.id}/poster")).status_code == 404
     assert (await authed_client.get("/api/images/99999/poster")).status_code == 404
 
@@ -577,7 +577,7 @@ async def test_artwork_proxy_only_serves_paths_stored_on_the_item(authed_client,
     assert response.status_code == 200
     assert response.content == b"\xff\xd8\xff-jpeg-bytes"
     assert response.headers["content-type"] == "image/jpeg"
-    # Resolved against Discover, with the token in a header — never the URL.
+    # Resolved against Discover, with the token in a header â€” never the URL.
     assert requested["url"] == (
         "https://discover.provider.plex.tv/library/metadata/abc/thumb/1"
     )
@@ -587,9 +587,9 @@ async def test_artwork_proxy_only_serves_paths_stored_on_the_item(authed_client,
 async def test_artwork_on_a_plex_server_is_proxied_not_linked(authed_client, db):
     """Regression: a poster URL must never carry a Plex token.
 
-    Tally used to store `…/photo/:/transcode?…&X-Plex-Token=…` on the item. A
+    Tally used to store `â€¦/photo/:/transcode?â€¦&X-Plex-Token=â€¦` on the item. A
     MediaItem row is read by every account, so that handed one user's server
-    token to all of them — and baked in whichever address answered during the
+    token to all of them â€” and baked in whichever address answered during the
     sync, so posters broke when the library was opened from another network.
     """
     from app.models import PlexMapping
@@ -630,7 +630,7 @@ async def test_artwork_on_a_plex_server_is_proxied_not_linked(authed_client, db)
 
     seen: dict = {}
 
-    async def fake_request(self, method, path, *, params=None, retries=1):
+    async def fake_request(self, method, path, *, params=None, retries=1, record_failures=True):
         seen["path"] = path
         seen["params"] = params
         seen["token"] = self.token
@@ -656,6 +656,61 @@ async def test_artwork_on_a_plex_server_is_proxied_not_linked(authed_client, db)
     # Fetched with this user's own token, and not through a URL parameter.
     assert seen["token"] == "user-token"
     assert "X-Plex-Token" not in seen["params"]
+
+
+async def test_the_owner_gets_artwork_without_an_access_row(authed_client, db):
+    """Regression: the proxy must not be stricter than `client_for`.
+
+    `client_for` falls back to the server's own token when the user owns it and
+    has no UserServerAccess row. The proxy used to require that row as a join,
+    so an owner in exactly that state got no artwork at all.
+    """
+    from app.models import PlexMapping
+    from app.services import plex_server as plex_server_module
+
+    user = (await db.execute(select(User))).scalars().first()
+    server = PlexServer(
+        machine_identifier="machine-1",
+        name="Basement",
+        base_url="https://plex.example:32400",
+        access_token_encrypted=encrypt_secret("owner-token"),
+        owner_user_id=user.id,
+    )
+    item = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Dune")
+    db.add_all([server, item])
+    await db.flush()
+    # Deliberately no UserServerAccess row.
+    db.add(
+        PlexMapping(
+            media_item_id=item.id,
+            server_id=server.id,
+            rating_key="1234",
+            thumb_path="/library/metadata/1234/thumb/999",
+        )
+    )
+    await db.commit()
+
+    seen: dict = {}
+
+    async def fake_request(self, method, path, *, params=None, retries=1, record_failures=True):
+        seen["token"] = self.token
+
+        class Resp:
+            status_code = 200
+            content = b"jpeg-bytes"
+            headers = {"content-type": "image/jpeg"}
+
+        return Resp()
+
+    original = plex_server_module.PlexServerClient._request
+    plex_server_module.PlexServerClient._request = fake_request  # type: ignore[assignment]
+    try:
+        response = await authed_client.get(f"/api/images/{item.id}/poster")
+    finally:
+        plex_server_module.PlexServerClient._request = original  # type: ignore[assignment]
+
+    assert response.status_code == 200
+    assert seen["token"] == "owner-token"
 
 
 async def test_an_unreachable_server_does_not_500_a_poster(authed_client, db):
@@ -690,7 +745,7 @@ async def test_an_unreachable_server_does_not_500_a_poster(authed_client, db):
     )
     await db.commit()
 
-    async def unreachable(self, method, path, *, params=None, retries=1):
+    async def unreachable(self, method, path, *, params=None, retries=1, record_failures=True):
         raise plex_server_module.PlexUnreachable("no route to host")
 
     original = plex_server_module.PlexServerClient._request
@@ -731,7 +786,7 @@ async def test_listing_servers_serialises_libraries(authed_client, db):
 
     ServerOut carries the `libraries` relationship, so pydantic reads it while
     validating. Left lazy, that emits a SELECT from inside attribute access,
-    which asyncio SQLAlchemy refuses with MissingGreenlet — and server
+    which asyncio SQLAlchemy refuses with MissingGreenlet â€” and server
     discovery returned a 500 instead of the server list. The request runs on a
     different session than the one used here, so the relationship really is
     unloaded when the endpoint serialises it.
@@ -756,7 +811,7 @@ async def test_listing_servers_serialises_libraries(authed_client, db):
                 server_id=server.id,
                 access_token_encrypted="encrypted",
             ),
-            # Inserted out of order — the response must come back sorted.
+            # Inserted out of order â€” the response must come back sorted.
             PlexLibrary(
                 server_id=server.id, section_key="2", title="TV", section_type="show"
             ),

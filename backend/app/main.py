@@ -117,10 +117,15 @@ async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "static"
 
-if FRONTEND_DIR.is_dir():
-    app.mount(
-        "/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets"
-    )
+# Test index.html rather than the directory: an empty or half-written `static/`
+# used to raise at import time, because StaticFiles refuses a missing `assets/`.
+# That turns a partial build — or a stray directory — into a container that
+# cannot boot at all, rather than one serving the API without a UI.
+if (FRONTEND_DIR / "index.html").is_file():
+    if (FRONTEND_DIR / "assets").is_dir():
+        app.mount(
+            "/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets"
+        )
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str) -> FileResponse:

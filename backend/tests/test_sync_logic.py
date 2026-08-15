@@ -608,6 +608,73 @@ async def test_trailers_and_extras_are_not_real_playback():
     assert not is_real_playback({})
 
 
+async def test_artwork_falls_back_to_the_raw_asset_when_transcoding_fails(monkeypatch):
+    """The photo transcoder can refuse what the file handler serves happily."""
+    from app.services.plex_server import PlexServerClient
+
+    client = PlexServerClient("https://plex.example:32400", "token")
+    tried: list[str] = []
+
+    class Resp:
+        def __init__(self, status, body=b""):
+            self.status_code = status
+            self.content = body
+            self.headers = {"content-type": "image/jpeg"}
+
+    async def request(self, method, path, *, params=None, retries=1, record_failures=True):
+        tried.append(path)
+        # Transcoding refused; the original asset is fine.
+        return Resp(400) if path == "/photo/:/transcode" else Resp(200, b"jpeg")
+
+    monkeypatch.setattr(PlexServerClient, "_request", request)
+    assert await client.image_bytes("/library/metadata/1/thumb/9") == (
+        b"jpeg",
+        "image/jpeg",
+    )
+    assert tried == ["/photo/:/transcode", "/library/metadata/1/thumb/9"]
+
+
+async def test_artwork_failures_do_not_trip_the_unreachable_backoff(monkeypatch):
+    """Regression: a poster must not be able to declare the server dead.
+
+    Dozens of artwork requests ride on the same connection as the sync. If a
+    refused one recorded a failure, a page of missing posters could put the
+    whole server into cooldown and stop syncing entirely.
+    """
+    import httpx
+
+    from app.services import plex_server as module
+
+    module.reset_failure_state()
+    client = module.PlexServerClient("https://plex.example:32400", "token")
+
+    class DeadClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, *args, **kwargs):
+            raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(httpx, "AsyncClient", DeadClient)
+
+    with pytest.raises(module.PlexUnreachable):
+        await client.image_bytes("/library/metadata/1/thumb/9")
+    # Nothing recorded, so the next real call still gets to try.
+    assert module._failures == {}
+
+    # An ordinary call does record it, which is what the backoff is for.
+    with pytest.raises(module.PlexUnreachable):
+        await client.identity()
+    assert module._failures != {}
+    module.reset_failure_state()
+
+
 async def test_section_total_reads_totalsize_without_fetching_items(monkeypatch):
     """One cheap request for the denominator — and 0 when the server won't say."""
     from app.services.plex_server import PlexServerClient
