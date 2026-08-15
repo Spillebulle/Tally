@@ -254,13 +254,21 @@ class SyncService:
             account_id = account.get("id")
             if account_id is None:
                 continue
+            # `name` and `title` are the identity fields on a server-side
+            # account; `email` matches a home user whose server name differs.
+            # This used to read `defaultAudioLanguage` — an audio setting, not
+            # an identity — so the comparison never matched anything real.
             names = {
                 str(account.get("name") or "").lower(),
-                str(account.get("defaultAudioLanguage") or "").lower(),
+                str(account.get("title") or "").lower(),
+                str(account.get("email") or "").lower(),
             }
+            names.discard("")
             if user.plex_username and user.plex_username.lower() in names:
                 return int(account_id)
             if user.username.lower() in names:
+                return int(account_id)
+            if user.email and user.email.lower() in names:
                 return int(account_id)
         # accountID 1 is always the server owner.
         if server.owner_user_id == user.id:
@@ -503,6 +511,23 @@ class SyncService:
         )
         access = result.scalar_one_or_none()
         account_id = access.plex_account_id if access else None
+        if account_id is None:
+            # `iter_history` omits the accountID parameter entirely when this is
+            # None, which asks Plex for *everyone's* history and files it all
+            # under this user — other household members' plays, as permanent
+            # WatchEvent rows. Failing closed loses nothing that can't be
+            # recovered by resolving the id on a later run.
+            log.warning(
+                "No Plex account id resolved for %s on %s; skipping history "
+                "import rather than importing the whole server's",
+                user.username,
+                server.name,
+            )
+            stats.errors.append(
+                f"{server.name}: could not identify your Plex account, so watch "
+                "history was not imported"
+            )
+            return
 
         since: datetime | None = None
         if not full and access and access.last_history_sync_at:
@@ -569,6 +594,32 @@ class SyncService:
             )
         )
         if exists.scalar_one_or_none() is not None:
+            return False
+
+        # The same play may already be here from a webhook. Webhooks carry no
+        # history key, so their dedupe key is a minute bucket that can never
+        # match the authoritative `plex:` one — which meant every scrobble on a
+        # Plex Pass instance was recorded twice, showing two rows in the history
+        # list and counting the view twice, since record_watch_state increments.
+        # Adopt the webhook's row instead of adding a second.
+        adopted = await self.db.execute(
+            select(WatchEvent)
+            .where(
+                WatchEvent.user_id == user.id,
+                WatchEvent.media_item_id == item.id,
+                WatchEvent.source == WatchSource.PLEX_WEBHOOK,
+                WatchEvent.watched_at >= viewed_at - timedelta(minutes=2),
+                WatchEvent.watched_at <= viewed_at + timedelta(minutes=2),
+            )
+            .limit(1)
+        )
+        if (event := adopted.scalar_one_or_none()) is not None:
+            event.dedupe_key = dedupe_key
+            event.source = WatchSource.PLEX_HISTORY
+            event.watched_at = viewed_at
+            event.duration_ms = event.duration_ms or entry.get("duration")
+            event.server_id = event.server_id or server.id
+            await self.db.flush()
             return False
 
         self.db.add(
@@ -1067,11 +1118,17 @@ class SyncService:
             except PlexServerError:
                 continue
 
+            # Same reasoning as the history import: with no account id there is
+            # nothing to attribute playback by, and skipping the filter would
+            # put every other viewer's session into this user's Continue
+            # Watching.
+            if access is None or access.plex_account_id is None:
+                continue
+
             repo = MediaRepository(self.db, enrich=False)
             for session in sessions:
-                if access and access.plex_account_id is not None:
-                    if session.account_id != access.plex_account_id:
-                        continue
+                if session.account_id != access.plex_account_id:
+                    continue
                 item = await repo.find_by_rating_key(server.id, session.rating_key)
                 if item is None:
                     try:

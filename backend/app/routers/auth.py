@@ -58,6 +58,29 @@ async def _is_first_user(db) -> bool:
     return not count
 
 
+async def _unused_username(db: DbSession, preferred: str) -> str:
+    """A username not already taken, since `User.username` is unique.
+
+    A Plex account whose name collides with an existing local account now gets
+    a distinct account rather than being merged into it — merging on a name is
+    exactly the takeover this flow used to allow. Suffixing keeps sign-in
+    working instead of failing on the unique constraint.
+    """
+    result = await db.execute(
+        select(User.username).where(func.lower(User.username) == preferred.lower())
+    )
+    if result.scalar_one_or_none() is None:
+        return preferred
+    for suffix in range(2, 100):
+        candidate = f"{preferred}{suffix}"
+        result = await db.execute(
+            select(User.username).where(func.lower(User.username) == candidate.lower())
+        )
+        if result.scalar_one_or_none() is None:
+            return candidate
+    return f"{preferred}-{secrets.token_hex(4)}"
+
+
 # ---------------------------------------------------------------------------
 # Plex OAuth
 # ---------------------------------------------------------------------------
@@ -66,6 +89,10 @@ async def _is_first_user(db) -> bool:
 @router.post("/plex/start", response_model=PlexAuthStart)
 async def plex_start(db: DbSession) -> PlexAuthStart:
     """Begin the Plex PIN flow and return the URL to open."""
+    return await _start_pin(db, link_user=None)
+
+
+async def _start_pin(db: DbSession, *, link_user: User | None) -> PlexAuthStart:
     client = PlexTVClient()
     state = secrets.token_urlsafe(24)
     forward_url = f"{settings.public_url.rstrip('/')}/auth/callback?state={state}"
@@ -77,7 +104,11 @@ async def plex_start(db: DbSession) -> PlexAuthStart:
 
     db.add(
         PlexPin(
-            pin_id=pin.pin_id, code=pin.code, state=state, expires_at=pin.expires_at
+            pin_id=pin.pin_id,
+            code=pin.code,
+            state=state,
+            expires_at=pin.expires_at,
+            link_user_id=link_user.id if link_user else None,
         )
     )
     await db.commit()
@@ -118,18 +149,22 @@ async def plex_poll(state: str, response: Response, db: DbSession) -> PlexAuthPo
     result = await db.execute(select(User).where(User.plex_user_id == account.id))
     user = result.scalar_one_or_none()
 
-    if user is None:
-        # Link to an existing local account with the same username rather than
-        # creating a confusing duplicate.
-        result = await db.execute(
-            select(User).where(func.lower(User.username) == account.username.lower())
-        )
-        user = result.scalar_one_or_none()
+    if user is None and pin.link_user_id is not None:
+        # A relink: the flow was started from an authenticated session, so we
+        # have proof this account asked to be attached to this Plex identity.
+        #
+        # This used to match on username instead, from an endpoint that needs
+        # no credentials at all — so on a reachable instance anyone could set
+        # their plex.tv username to the operator's, run the PIN flow, and be
+        # handed a session for that account. Plex usernames are freely
+        # changeable, which made it trivial.
+        user = await db.get(User, pin.link_user_id)
 
     first_user = await _is_first_user(db)
     if user is None:
+        username = await _unused_username(db, account.username)
         user = User(
-            username=account.username,
+            username=username,
             display_name=account.title or account.username,
             email=account.email,
             plex_user_id=account.id,
@@ -164,8 +199,14 @@ async def plex_poll(state: str, response: Response, db: DbSession) -> PlexAuthPo
 
 @router.post("/plex/relink", response_model=PlexAuthStart)
 async def plex_relink(db: DbSession, user: CurrentUser) -> PlexAuthStart:
-    """Refresh an expired Plex token for the signed-in account."""
-    return await plex_start(db)
+    """Refresh an expired Plex token for the signed-in account.
+
+    The signed-in account is recorded on the PIN, which is what lets the
+    anonymous poll attach the resulting Plex identity to it. Delegating to
+    `plex_start` dropped that, so a relink could hand the session to whichever
+    account the poll happened to match.
+    """
+    return await _start_pin(db, link_user=user)
 
 
 # ---------------------------------------------------------------------------

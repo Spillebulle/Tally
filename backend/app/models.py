@@ -534,6 +534,14 @@ class PlexPin(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime)
     consumed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Set when the flow was started by an already-signed-in account, i.e. a
+    # relink. It is the *only* thing that may attach a Plex identity to an
+    # existing user: the poll endpoint is anonymous, so without proof of a
+    # session recorded here, matching on username alone would let anyone with
+    # a matching plex.tv name take over a local account.
+    link_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), default=None
+    )
 
 
 class ApiKey(Base):
