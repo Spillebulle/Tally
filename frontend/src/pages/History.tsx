@@ -234,9 +234,15 @@ function HistoryRow({ event, onRemove }: { event: WatchEvent; onRemove: () => vo
         type="button"
         onClick={onRemove}
         className={cn(
-          'grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted opacity-0',
+          'grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted',
           'transition-all hover:bg-danger/10 hover:text-danger',
-          'group-hover:opacity-100 focus-visible:opacity-100',
+          // Always visible and tappable where there is no hover to reveal it
+          // with. Above lg it fades in on hover, but `opacity-0` alone still
+          // hit-tests: on a touch screen that left an invisible delete button
+          // permanently armed at the end of every row.
+          'lg:pointer-events-none lg:opacity-0',
+          'lg:group-hover:pointer-events-auto lg:group-hover:opacity-100',
+          'lg:focus-visible:pointer-events-auto lg:focus-visible:opacity-100',
         )}
         title="Remove from history"
         aria-label={`Remove ${title} from history`}
