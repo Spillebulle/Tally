@@ -1280,7 +1280,13 @@ class SyncService:
 
         This only ever *adds* what it learns. Collapsing the duplicate pair it
         exposes is `merge_duplicates`' job — that is the pass allowed to delete,
-        and it stays the only one.
+        and it stays the only one — but it is invoked from here, because this is
+        the moment its work comes into existence. It can only pair rows on an
+        external id, and until this pass attaches one there is nothing for it to
+        see. Left to the startup call alone the heal would be half-finished: the
+        artwork would come back and the phantom row would sit beside it, still
+        claiming not to be on your server, until the next restart — which on a
+        self-hosted box may be the next upgrade, weeks away.
         """
         cutoff = utcnow() - ARTWORK_RETRY_INTERVAL
         result = await self.db.execute(
@@ -1324,7 +1330,35 @@ class SyncService:
             len(items),
         )
         stats.metadata_backfilled = identified
+
+        if identified:
+            await self._merge_duplicates_now()
         return identified
+
+    async def _merge_duplicates_now(self) -> None:
+        """Collapse pairs the backfill has just made visible.
+
+        Nothing about how timid that pass is changes: it still needs a matching
+        external id *and* a matching normalised title, and it is still
+        idempotent, so calling it here rather than only at startup does not make
+        it any more willing to delete — it only stops the answer waiting for a
+        restart.
+
+        A failure here must not fail the sync. The artwork this run recovered is
+        already committed and is the larger half of the win; an uncollapsed
+        duplicate is visible and can be merged on the next pass, which is the
+        trade `merge_duplicates` is written around.
+        """
+        from ..merge_duplicates import merge_duplicate_media_items
+
+        try:
+            merged = await merge_duplicate_media_items(self.db)
+        except Exception:
+            log.exception("Could not merge duplicates after the metadata backfill")
+            await self.db.rollback()
+            return
+        if merged:
+            log.info("Merged %s duplicate row(s) the backfill made matchable", merged)
 
     async def full_sync(
         self,
