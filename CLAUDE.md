@@ -115,6 +115,22 @@ next pull from Plex sees the item present remotely and absent locally, and
 re-adds what the user just removed. Same reasoning applies to any future
 "removed by the user" state.
 
+Two corollaries, both learned the hard way:
+
+**`plex_active` records what we last *told* Plex, not what Plex confirmed.**
+`remove_from_watchlist` sets it False before the push, unconditionally. Left
+True after a failed push, the next sync reads the tombstone as "gone from Plex
+last time, present now" and *reactivates* the entry — undoing the removal
+instead of retrying it. Watchlist-only titles have no `PlexMapping` and so no
+guid to push with, which made the failure the common path, not the edge.
+
+**"Absent from Plex" is only meaningful if the whole watchlist arrived.**
+`get_watchlist` returns a `WatchlistFetch` carrying `complete`, and the pass
+that mirrors removals is skipped entirely unless every page came back. It used
+to return whatever pages it had managed to fetch, so a 500 on page two silently
+tombstoned every entry after it. Anything else that mirrors deletions from a
+remote list needs the same "did I see all of it?" guard.
+
 ### `WatchEvent.dedupe_key` makes history import idempotent
 
 `plex:<machine_id>:<historyKey>` for imports, `manual:<uuid>` for manual logs,
@@ -123,6 +139,14 @@ re-sync duplicates the entire watch history. It is uniquely constrained per user
 
 Webhooks carry no history key, hence the minute bucket — Plex will not scrobble
 the same item twice inside one minute.
+
+**The two key shapes can never match, so the history import has to reconcile
+them.** A webhook and the periodic import describe the *same play* with
+different keys, and `record_watch_state` increments `view_count` — so on a Plex
+Pass instance every scrobble was counted twice and listed twice. The import
+looks for a recent `PLEX_WEBHOOK` event for the same item within two minutes and
+adopts it rather than inserting a second row. A duplicated event is not free;
+only a *missed* one is.
 
 ### Plex tokens are per user, not per server
 
@@ -225,6 +249,34 @@ render an indeterminate bar.
 Because the row now exists up front, the endpoint also has to refuse a second
 concurrent run, or a double click is two visible syncs over one library.
 
+### Global rows need owner-level authority to write
+
+`PlexServer` is one row shared by every account that can reach that server, and
+`client_for` prefers its `manual_url` for **all** of them. So merely *having
+access* is not authority to rewrite it: a shared-library user could point the
+server at a host they control and collect each viewer's own token — which the
+artwork transcode puts in the query string. Writing a global row takes
+`owner_user_id == user.id or is_admin`; per-user preferences belong on
+`UserServerAccess`.
+
+### Anything anonymous must fail closed, on identity and on scope
+
+Two endpoints take no credentials by necessity, and both used to guess:
+
+* The **Plex PIN poll** matched an unlinked Plex identity to a local account by
+  *username*. Plex usernames are freely changeable, so anyone could rename to
+  the operator's and be handed their session. Attaching a Plex identity to an
+  existing account now requires proof — `PlexPin.link_user_id`, recorded when
+  the flow starts from an authenticated relink. Nothing else may link.
+* The **webhook** matched `User.username` and fell back to "the first enabled
+  server" for an unknown uuid. Both fallbacks are gone: it matches
+  `plex_username` and a known `machine_identifier`, or it ignores the event.
+
+The same rule applies inside sync. When `_resolve_account_id` cannot identify
+the user, history import and session polling **skip** rather than dropping the
+`accountID` filter — dropping it asks Plex for the whole server's history and
+files every household member's plays under one account.
+
 ### API keys are hashed, not encrypted — and with SHA-256, not bcrypt
 
 Plex tokens are Fernet-*encrypted* because Tally has to replay them to Plex. An
@@ -240,6 +292,27 @@ would be paid on every single API request for no security. Compare with
 `ApiKey.prefix` is stored in the clear so a key can be found without scanning
 every row. It is a *lookup hint only* — matching it is never authentication.
 
+### The SPA catch-all must contain the path it is handed
+
+`main.static_file_for()` resolves the candidate and refuses anything not
+`is_relative_to(FRONTEND_ROOT)`. FastAPI hands the route an **already
+percent-decoded** path and Starlette does not collapse `..`, so `%2e%2e%2f`
+arrives as a real `../`. Without the check the route served any file the
+process could read, unauthenticated — including `/data/.secret_key`, which
+decrypts every stored Plex token.
+
+The check lives at module level, not inline in the route, because the route
+only exists when a built `static/index.html` does. A test through the HTTP
+layer passes in a dev checkout without exercising anything.
+
+### Never log a URL that can carry a secret
+
+`httpx` logs full request URLs — query string included — at INFO, and two
+things put secrets there on purpose: TMDB takes `?api_key=`, and the Plex
+artwork transcode *requires* `X-Plex-Token` in the query. `main.py` therefore
+pins the `httpx` logger to WARNING unless `LOG_LEVEL=DEBUG`. Users paste
+`docker logs` into issues.
+
 ### Connections to Plex are pooled process-wide
 
 `plex_server._pool()` returns one shared `httpx.AsyncClient` for the whole
@@ -250,8 +323,10 @@ container behind one bridge address). This is not hypothetical: a live instance
 had its Plex server *and* plex.tv both stop resolving mid-sync, seconds apart,
 right after a burst of ~700 metadata lookups.
 
-Never build an `AsyncClient` per request in this module. Tests get isolation
-from the autouse `_isolate_plex_connection_pool` fixture.
+Never build an `AsyncClient` per request in this module — or in `plex_tv.py`,
+which pools the same way for the same reason: the incident took out plex.tv
+resolution too, not just the media server. Tests get isolation from the autouse
+`_isolate_plex_connection_pool` fixture, which closes **both** pools.
 
 ### Tokens are encrypted at rest
 
@@ -336,6 +411,20 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
   separation and contrast against both surfaces. If you change series colours,
   re-run the validator in the `dataviz` skill rather than eyeballing. Every chart
   also ships a `DataTable` fallback so nothing is gated behind colour or hover.
+* **Never key or parse a local date through `toISOString()` / `new Date('YYYY-MM-DD')`.**
+  Both convert via UTC, so they are off by one day (east of Greenwich) or one
+  month (west) — which is exactly how the heatmap and the monthly axis were
+  wrong for everyone outside UTC. Use `localDateKey()` and
+  `parseLocalDateLabel()` in `lib/utils.ts`.
+* **A failed request is not an empty list.** Check `isError` *before* the empty
+  branch and render `ErrorState`; falling through told the user their library
+  was empty and to run a sync, while hiding a 500.
+* **`navigator.clipboard` does not exist over plain HTTP**, which is how
+  self-hosted Tally is normally reached. Use `copyText()` and only claim success
+  when it resolves — the API-key toast lied, and that key is unrecoverable.
+* **Opacity is not a hit-test.** A control faded out with `opacity-0` is still
+  tappable; pair it with `pointer-events-none`, and do not hide anything behind
+  hover alone on touch.
 * Dark mode is applied pre-paint by an inline script in `index.html` to avoid a
   light flash; `ThemeProvider` owns it afterwards.
 * Status is never colour-alone — a dot always sits beside a written label.
@@ -348,7 +437,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 81 tests
+cd backend && .venv/bin/python -m pytest -q     # 112 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
@@ -356,6 +445,11 @@ cd frontend && npx tsc --noEmit && npm run build
 `tests/conftest.py` **must set env vars before importing anything from `app`** —
 `get_settings()` is `lru_cache`d and reads `DATA_DIR` at import time. Hence the
 `# noqa: E402` imports; do not "tidy" them to the top.
+
+The test engine sets `PRAGMA foreign_keys=ON`, matching production. SQLite
+leaves them off by default, and without it a missing existence check *passes* in
+CI — writing a row that references nothing — then 500s in the real app. That is
+precisely how `set_favorite` and `set_notes` kept their bug.
 
 Each test gets a private file-backed SQLite database. In-memory would give every
 connection its own empty schema.
@@ -438,7 +532,16 @@ the built-in `GITHUB_TOKEN`.
 * **Enrichment is skipped for episodes.** Only movies and shows get external
   metadata; enriching every episode would multiply API calls for little gain.
 * **The scheduler runs in-process** via APScheduler with `max_instances=1`. A
-  slow first sync must not queue overlapping runs.
+  slow first sync must not queue overlapping runs. It also checks for an
+  unfinished `SyncRun` per user first — `max_instances=1` only serialises the
+  scheduler against itself, not against someone pressing Sync.
+* **Interrupted `SyncRun` rows are closed at startup** (`db._close_interrupted_sync_runs`).
+  A hard kill never reaches `full_sync`'s `finally`, and an open row is exactly
+  what `trigger_sync` reads as "already running" — so without this the sync
+  button stays dead forever, with no UI path to recover.
+* **External providers get a circuit breaker**, like Plex does. Five consecutive
+  transport failures pause that provider for five minutes; otherwise an outage
+  costs the full retry budget on every item and a large scan never finishes.
 
 ---
 

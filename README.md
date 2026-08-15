@@ -236,7 +236,12 @@ A few useful ones:
 | `POST /api/history/{id}/watched` | Log something as watched |
 | `POST /api/sync` | Trigger a sync |
 | `GET /api/sync/status` | Progress of the running sync |
-| `GET /api/health` | Version and liveness — the only public endpoint |
+| `GET /api/health` | Version and liveness — needs no credentials |
+
+Three endpoints take no credentials: `GET /api/health`, `GET /api/version`, and
+`POST /api/webhooks/plex`. The webhook has to be open because Plex cannot send
+credentials with it — it only ever matches events to accounts and servers that
+are already linked, and never creates either.
 
 **Keys are shown once.** Only a fingerprint is stored, so Tally cannot show a
 key to you again — losing it means issuing a new one. A key acts as the account

@@ -95,5 +95,47 @@ jobs:
           # for no extra signal. docker.yml builds the real multi-arch image.
           platforms: linux/amd64
           push: false
+          # Loaded into the local daemon so the next step can actually run it.
+          load: true
+          tags: tally:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Building is not running. Three of this project's real bugs — a
+      # naive-vs-aware datetime crash among them — got through a green build and
+      # were only found by starting the container. This costs about twenty
+      # seconds and covers the entire class: import errors, migrations that
+      # raise on an empty database, and a broken entrypoint.
+      - name: Start it and check it answers
+        run: |
+          docker run -d --name tally-ci \
+            -e SECRET_KEY=ci-smoke-test-key \
+            -e DATA_DIR=/data \
+            -p 8080:8080 \
+            tally:ci
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/api/health > /tmp/health.json; then
+              echo "Healthy after ${attempt}s:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::The container never answered /api/health"
+          docker logs tally-ci
+          exit 1
+
+      - name: Container logs must be free of tracebacks
+        run: |
+          if docker logs tally-ci 2>&1 | grep -q "Traceback (most recent call last)"; then
+            echo "::error::The container logged a traceback during startup"
+            docker logs tally-ci
+            exit 1
+          fi
+          echo "No tracebacks logged."
+
+      - name: Stop it
+        if: always()
+        run: docker rm -f tally-ci || true
