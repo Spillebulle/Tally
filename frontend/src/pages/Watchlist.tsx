@@ -179,9 +179,13 @@ export function Watchlist() {
                   type="button"
                   onClick={() => remove.mutate(entry.media_item_id)}
                   className="absolute right-2 top-2 z-10 grid h-7 w-7 place-items-center rounded-full
-                             bg-black/70 text-white opacity-0 backdrop-blur-sm transition-opacity
-                             hover:bg-danger group-hover/entry:opacity-100
-                             focus-visible:opacity-100"
+                             bg-black/70 text-white backdrop-blur-sm transition-opacity
+                             hover:bg-danger
+                             lg:pointer-events-none lg:opacity-0
+                             lg:group-hover/entry:pointer-events-auto
+                             lg:group-hover/entry:opacity-100
+                             lg:focus-visible:pointer-events-auto
+                             lg:focus-visible:opacity-100"
                   title="Remove from watchlist"
                   aria-label={`Remove ${entry.item.title} from watchlist`}
                 >
