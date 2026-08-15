@@ -55,7 +55,7 @@ from .plex_server import (
     PlexServerError,
     _ts,
 )
-from .plex_tv import PlexAuthError, PlexTVClient
+from .plex_tv import PlexAuthError, PlexTVClient, PlexTVError
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -861,15 +861,21 @@ class SyncService:
             return
 
         try:
-            remote_items = await self.plex_tv.get_watchlist(token)
+            fetched = await self.plex_tv.get_watchlist(token)
         except PlexAuthError:
             stats.errors.append("Plex token expired; watchlist not synced")
+            return
+        except PlexTVError as exc:
+            # Discover is reverse-engineered and the likeliest thing here to
+            # break. A failure to read it says nothing about the user's
+            # watchlist, so leave every local entry exactly as it is.
+            stats.errors.append(f"Watchlist not synced: {exc}")
             return
 
         repo = MediaRepository(self.db, enrich=True)
         remote_by_item: dict[int, str] = {}
 
-        for meta in remote_items:
+        for meta in fetched.items:
             item = await repo.upsert_from_discover(meta)
             if item is None:
                 continue
@@ -918,6 +924,18 @@ class SyncService:
                 entry.plex_synced_at = utcnow()
 
         # --- push: active here, absent on Plex ---------------------------
+        # "Absent on Plex" is only meaningful if the whole watchlist arrived.
+        # On a partial fetch every entry past the failing page looks absent,
+        # and this loop would tombstone the lot — silent, unrecoverable data
+        # loss on the user's side of a two-way sync.
+        if not fetched.complete:
+            stats.errors.append(
+                "Watchlist only partly readable from Plex; removals were not "
+                "mirrored this run"
+            )
+            await self.db.commit()
+            return
+
         for item_id, entry in local_entries.items():
             if item_id in remote_by_item:
                 continue
@@ -1008,13 +1026,21 @@ class SyncService:
             return
         entry.active = False
         entry.removed_at = utcnow()
+        # Record the removal against the Plex baseline immediately, before we
+        # know whether the push lands. `plex_active` means "what we last told
+        # Plex", not "what Plex confirmed": left True on a failed push, the next
+        # sync reads the tombstone as "gone last time, present now" and
+        # reactivates the entry — undoing the removal instead of retrying it.
+        # Items watchlisted only on Discover have no PlexMapping and so no
+        # guid at all, which made that the common path rather than the edge.
+        entry.plex_active = False
+        entry.plex_synced_at = utcnow()
 
         token = decrypt_secret(user.plex_token_encrypted)
         if token and user_pref(user, "sync_watchlist"):
             plex_guid = await self._plex_guid_for_item(item.id)
-            if plex_guid and await self.plex_tv.remove_from_watchlist(token, plex_guid):
-                entry.plex_active = False
-                entry.plex_synced_at = utcnow()
+            if plex_guid:
+                await self.plex_tv.remove_from_watchlist(token, plex_guid)
         await self.db.commit()
 
     # ------------------------------------------------------------------

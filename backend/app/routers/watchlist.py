@@ -101,12 +101,12 @@ async def _item_from_discover(db, token: str, plex_guid: str) -> MediaItem | Non
     """Resolve a Discover guid into a local canonical item."""
     client = PlexTVClient()
     try:
-        entries = await client.get_watchlist(token)
+        fetched = await client.get_watchlist(token)
     except PlexAuthError:
         return None
 
     repo = MediaRepository(db, enrich=True)
-    for meta in entries:
+    for meta in fetched.items:
         if repo.plex_guid_for(meta) == plex_guid or str(meta.get("guid")) == plex_guid:
             item = await repo.upsert_from_discover(meta)
             await db.commit()

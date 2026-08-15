@@ -68,6 +68,19 @@ class PlexUnreachableError(PlexTVError):
 
 
 @dataclass(slots=True)
+class WatchlistFetch:
+    """A watchlist read, and whether every page of it arrived.
+
+    `complete` is False when a page errored partway through. Sync must not
+    mirror removals from an incomplete read — the missing entries are missing
+    because Discover broke, not because the user removed them.
+    """
+
+    items: list[dict[str, Any]]
+    complete: bool
+
+
+@dataclass(slots=True)
 class PlexPinResponse:
     pin_id: str
     code: str
@@ -259,9 +272,15 @@ class PlexTVClient:
 
     # -- Watchlist (Discover) --------------------------------------------
 
-    async def get_watchlist(self, token: str) -> list[dict[str, Any]]:
-        """Fetch the account's universal watchlist, following pagination."""
+    async def get_watchlist(self, token: str) -> WatchlistFetch:
+        """Fetch the account's universal watchlist, following pagination.
+
+        Returns the items *and* whether the fetch actually completed. A caller
+        that mirrors removals has to know the difference: a half-fetched list
+        looks exactly like "the user deleted everything after page one".
+        """
         items: list[dict[str, Any]] = []
+        complete = True
         offset, page_size = 0, 100
 
         async with self._http() as client:
@@ -284,7 +303,13 @@ class PlexTVClient:
                 if resp.status_code == 401:
                     raise PlexAuthError("Plex token is no longer valid")
                 if resp.status_code >= 400:
-                    log.warning("Watchlist fetch failed: %s", resp.status_code)
+                    log.warning(
+                        "Watchlist fetch failed at offset %s: %s — treating the "
+                        "result as incomplete",
+                        offset,
+                        resp.status_code,
+                    )
+                    complete = False
                     break
 
                 container = resp.json().get("MediaContainer", {})
@@ -295,7 +320,7 @@ class PlexTVClient:
                 offset += page_size
                 if len(batch) < page_size or offset >= total:
                     break
-        return items
+        return WatchlistFetch(items=items, complete=complete)
 
     async def add_to_watchlist(self, token: str, plex_guid: str) -> bool:
         return await self._watchlist_action(token, plex_guid, "addToWatchlist")
