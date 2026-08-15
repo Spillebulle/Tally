@@ -9,7 +9,9 @@ import {
   BookmarkIcon,
   ChartIcon,
   ClockIcon,
+  DockerIcon,
   FilmIcon,
+  GitHubIcon,
   HomeIcon,
   LogOutIcon,
   MenuIcon,
@@ -365,6 +367,52 @@ function Toasts() {
   )
 }
 
+/**
+ * Version and where this build came from, at the foot of the sidebar.
+ *
+ * Cached indefinitely: the version cannot change without the page reloading,
+ * because changing it means replacing the container.
+ */
+function VersionFooter() {
+  const { data } = useQuery({
+    queryKey: ['app-version'],
+    queryFn: api.settings.version,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  })
+
+  const links = [
+    { href: data?.github_url, label: 'Source on GitHub', icon: GitHubIcon },
+    { href: data?.dockerhub_url, label: 'Image on Docker Hub', icon: DockerIcon },
+  ]
+
+  return (
+    <div className="flex items-center justify-between gap-2 px-3">
+      <span className="text-[11px] tabular-nums text-muted">
+        {data ? `v${data.version}` : 'Tally'}
+      </span>
+      <span className="flex items-center gap-1">
+        {links.map(({ href, label, icon: Icon }) =>
+          href ? (
+            <a
+              key={label}
+              href={href}
+              target="_blank"
+              rel="noreferrer noopener"
+              title={label}
+              aria-label={label}
+              className="grid h-7 w-7 place-items-center rounded-lg text-muted
+                         transition-colors hover:bg-raised hover:text-ink"
+            >
+              <Icon className="text-sm" />
+            </a>
+          ) : null,
+        )}
+      </span>
+    </div>
+  )
+}
+
 export function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const location = useLocation()
@@ -415,7 +463,7 @@ export function Layout() {
       >
         <Wordmark />
         <div className="mt-7 flex-1">{nav}</div>
-        <p className="px-3 text-[11px] text-muted">Tally · in sync with Plex</p>
+        <VersionFooter />
       </aside>
 
       {mobileOpen && (
@@ -442,6 +490,7 @@ export function Layout() {
               </button>
             </div>
             <div className="mt-7 flex-1">{nav}</div>
+            <VersionFooter />
           </aside>
         </>
       )}

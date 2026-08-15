@@ -225,6 +225,12 @@ export interface AppSettings {
   continue_watching_weeks: number
 }
 
+export interface AppVersion {
+  version: string
+  github_url: string
+  dockerhub_url: string
+}
+
 export interface AuthStatus {
   setup_required: boolean
   plex_enabled: boolean
