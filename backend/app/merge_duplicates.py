@@ -75,13 +75,19 @@ _FILLABLE = (
 async def _duplicate_groups(db: AsyncSession) -> list[list[int]]:
     """Item ids sharing one external id and media type, most specific first.
 
-    tmdb first, then imdb over whatever is left — an item merged on tmdb must not
-    be gathered up again by the imdb pass in the same run.
+    tmdb first, then tvdb, then imdb over whatever is left — an item merged on
+    one pass must not be gathered up again by a later one in the same run.
+
+    tvdb earns its place because shows are frequently tvdb-keyed: a show whose
+    duplicate pair carries no tmdb or imdb id was previously never collapsed,
+    even though `tvdb_id` is already in `_FILLABLE`. The `_titles_agree` guard
+    applies to every pass equally, so a wrong id alone still cannot fuse two
+    unrelated rows.
     """
     groups: list[list[int]] = []
     claimed: set[int] = set()
 
-    for column in (MediaItem.tmdb_id, MediaItem.imdb_id):
+    for column in (MediaItem.tmdb_id, MediaItem.tvdb_id, MediaItem.imdb_id):
         rows = await db.execute(
             select(MediaItem.media_type, column, func.group_concat(MediaItem.id))
             .where(column.is_not(None))
