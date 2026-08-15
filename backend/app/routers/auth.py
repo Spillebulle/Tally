@@ -33,9 +33,13 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _to_out(user: User) -> UserOut:
-    data = UserOut.model_validate(user)
-    data.has_plex_link = bool(user.plex_token_encrypted)
-    return data
+    # Delegates to the users router's serializer so the two agree. They had
+    # drifted: this one returned the raw preferences column, so /api/auth/me
+    # omitted default_view, theme and continue_watching_weeks entirely while
+    # /api/users/me merged the defaults in. The frontend reads both.
+    from .users import _to_out as user_to_out
+
+    return user_to_out(user)
 
 
 def _set_session_cookie(response: Response, user: User) -> None:

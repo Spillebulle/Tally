@@ -254,11 +254,16 @@ async def recently_added(
     elif anime == "exclude":
         conditions.append(MediaItem.is_anime.is_(False))
 
+    # Group rather than join-and-dedupe. An item mapped on two servers appeared
+    # twice in the joined rows, LIMIT counted both, and `.unique()` then removed
+    # the duplicate client-side — so the row ended up short of `limit`, and
+    # "recently added" quietly returned fewer cards than asked for.
     result = await db.execute(
         select(MediaItem)
         .join(PlexMapping, PlexMapping.media_item_id == MediaItem.id)
         .where(and_(*conditions))
-        .order_by(PlexMapping.added_at.desc().nulls_last())
+        .group_by(MediaItem.id)
+        .order_by(func.max(PlexMapping.added_at).desc().nulls_last())
         .limit(limit)
     )
     items = list(result.scalars().unique())
@@ -335,25 +340,45 @@ async def get_children(
         ]
 
     states = await states_for(db, user.id, [c.id for c in children])
+
+    # Episode counts for every season at once. This was two `db.scalar` calls
+    # per season row, so a show with 10 seasons cost 20 extra round trips to
+    # render one page.
+    season_ids = [c.id for c in children if c.media_type == MediaType.SEASON]
+    totals: dict[int, int] = {}
+    watched_counts: dict[int, int] = {}
+    if season_ids:
+        total_rows = await db.execute(
+            select(MediaItem.parent_id, func.count(MediaItem.id))
+            .where(
+                MediaItem.parent_id.in_(season_ids),
+                MediaItem.media_type == MediaType.EPISODE,
+            )
+            .group_by(MediaItem.parent_id)
+        )
+        totals = {parent_id: int(count) for parent_id, count in total_rows}
+
+        watched_rows = await db.execute(
+            select(
+                MediaItem.parent_id,
+                func.count(func.distinct(UserMediaState.media_item_id)),
+            )
+            .join(UserMediaState, UserMediaState.media_item_id == MediaItem.id)
+            .where(
+                MediaItem.parent_id.in_(season_ids),
+                UserMediaState.user_id == user.id,
+                UserMediaState.view_count > 0,
+            )
+            .group_by(MediaItem.parent_id)
+        )
+        watched_counts = {parent_id: int(count) for parent_id, count in watched_rows}
+
     cards = []
     for child in children:
         watched = total = None
         if child.media_type == MediaType.SEASON:
-            total = await db.scalar(
-                select(func.count(MediaItem.id)).where(
-                    MediaItem.parent_id == child.id,
-                    MediaItem.media_type == MediaType.EPISODE,
-                )
-            )
-            watched = await db.scalar(
-                select(func.count(func.distinct(UserMediaState.media_item_id)))
-                .join(MediaItem, MediaItem.id == UserMediaState.media_item_id)
-                .where(
-                    MediaItem.parent_id == child.id,
-                    UserMediaState.user_id == user.id,
-                    UserMediaState.view_count > 0,
-                )
-            )
+            total = totals.get(child.id, 0)
+            watched = watched_counts.get(child.id, 0)
         cards.append(
             to_card(
                 child,
@@ -419,6 +444,12 @@ async def set_status(
 async def set_favorite(
     item_id: int, payload: FavoriteRequest, db: DbSession, user: CurrentUser
 ) -> UserStateOut:
+    # Same guard as set_rating and set_status. Without it an unknown id reached
+    # the insert and tripped the foreign key, answering 500 where 404 is the
+    # honest reply.
+    if await db.get(MediaItem, item_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+
     service = SyncService(db)
     state = await service.get_or_create_state(user.id, item_id)
     state.is_favorite = payload.is_favorite
@@ -431,6 +462,9 @@ async def set_favorite(
 async def set_notes(
     item_id: int, payload: NotesRequest, db: DbSession, user: CurrentUser
 ) -> UserStateOut:
+    if await db.get(MediaItem, item_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+
     service = SyncService(db)
     state = await service.get_or_create_state(user.id, item_id)
     state.notes = payload.notes

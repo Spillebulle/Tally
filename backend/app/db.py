@@ -127,6 +127,20 @@ async def _run_light_migrations() -> None:
                 log.info("Migrating: adding %s.%s", table, column)
                 await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
+    # Indexes added after a release. `create_all` only creates indexes
+    # alongside a table it is creating, so an existing database never gets
+    # them. `IF NOT EXISTS` makes each idempotent; the names match what
+    # SQLAlchemy would have generated so it does not try to create them twice.
+    indexes = [
+        ("ix_media_items_created_at", "media_items", "created_at"),
+        ("ix_plex_mappings_added_at", "plex_mappings", "added_at"),
+    ]
+    async with engine.begin() as conn:
+        for name, table, column in indexes:
+            await conn.execute(
+                text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})")
+            )
+
     await _scrub_token_bearing_artwork()
 
 
