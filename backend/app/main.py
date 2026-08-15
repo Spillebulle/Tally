@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import get_settings
 from .db import init_db
 from .routers import (
+    api_keys,
     auth,
     history,
     images,
@@ -23,6 +24,7 @@ from .routers import (
     watchlist,
     webhooks,
 )
+from .services.plex_server import close_pool
 from .services.plex_tv import PlexTVError, PlexUnreachableError
 from .services.scheduler import shutdown_scheduler, start_scheduler
 
@@ -44,6 +46,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         shutdown_scheduler()
+        await close_pool()
 
 
 app = FastAPI(
@@ -74,6 +77,7 @@ for router in (
     sync.router,
     webhooks.router,
     images.router,
+    api_keys.router,
 ):
     app.include_router(router)
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import secrets
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -57,6 +59,40 @@ def verify_password(password: str, password_hash: str | None) -> bool:
         return pwd_context.verify(password, password_hash)
     except ValueError:
         return False
+
+
+# --- API keys -------------------------------------------------------------
+#
+# Keys are hashed with SHA-256 rather than bcrypt. That is the opposite of the
+# rule for passwords, and deliberately: bcrypt is slow *by design* to make
+# guessing a low-entropy human secret expensive, and an API key is neither
+# low-entropy nor human — it is 256 random bits, so there is nothing to guess.
+# Paying bcrypt's cost on every API request would only buy latency.
+#
+# The prefix is stored in the clear so a key can be found without scanning
+# every row, and so the UI can show which key is which.
+
+API_KEY_PREFIX = "tally_"
+_PREFIX_LENGTH = len(API_KEY_PREFIX) + 8
+
+
+def generate_api_key() -> tuple[str, str, str]:
+    """Return (full_key, lookup_prefix, hash). The full key is never stored."""
+    key = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    return key, key[:_PREFIX_LENGTH], hash_api_key(key)
+
+
+def api_key_prefix(key: str) -> str:
+    return key[:_PREFIX_LENGTH]
+
+
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def verify_api_key(key: str, key_hash: str) -> bool:
+    # Constant time: the comparison itself must not leak how much matched.
+    return hmac.compare_digest(hash_api_key(key), key_hash)
 
 
 def create_access_token(user_id: int, *, ttl_hours: int | None = None) -> str:

@@ -2,11 +2,17 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, useTheme, useToast, type Theme } from '@/lib/app-context'
-import type { Library, Server } from '@/lib/types'
+import type { ApiKeyCreated, Library, Server } from '@/lib/types'
 import { cn, formatDateTime, relativeTime } from '@/lib/utils'
 import { EmptyState, PageHeader, Segmented, Spinner, Toggle } from '@/components/ui'
 import { SyncProgress, syncLabel } from '@/components/Layout'
-import { CheckIcon, RefreshIcon, SettingsIcon, SparkIcon } from '@/components/Icons'
+import {
+  CheckIcon,
+  PlusIcon,
+  RefreshIcon,
+  SettingsIcon,
+  SparkIcon,
+} from '@/components/Icons'
 
 function Section({
   title,
@@ -355,6 +361,14 @@ export function Settings() {
         </ul>
       </Section>
 
+      {/* --- API keys --------------------------------------------------- */}
+      <Section
+        title="API keys"
+        description="For scripts and integrations. A key acts as this account, so treat it like a password."
+      >
+        <ApiKeys />
+      </Section>
+
       {/* --- Appearance ------------------------------------------------- */}
       <Section title="Appearance">
         <div className="flex items-center justify-between gap-4">
@@ -393,6 +407,167 @@ export function Settings() {
           </div>
         </dl>
       </Section>
+    </div>
+  )
+}
+
+function ApiKeys() {
+  const queryClient = useQueryClient()
+  const { notify } = useToast()
+  const [name, setName] = useState('')
+  // The plaintext exists only in this response. Once it leaves the screen it is
+  // gone for good, so it is held here until the user dismisses it deliberately.
+  const [issued, setIssued] = useState<ApiKeyCreated | null>(null)
+
+  const keys = useQuery({ queryKey: ['api-keys'], queryFn: api.apiKeys.list })
+
+  const create = useMutation({
+    mutationFn: (value: string) => api.apiKeys.create(value),
+    onSuccess: (key) => {
+      setIssued(key)
+      setName('')
+      queryClient.invalidateQueries({ queryKey: ['api-keys'] })
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const revoke = useMutation({
+    mutationFn: (id: number) => api.apiKeys.revoke(id),
+    onSuccess: () => {
+      notify('Key revoked', 'info')
+      queryClient.invalidateQueries({ queryKey: ['api-keys'] })
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const active = (keys.data ?? []).filter((key) => !key.revoked_at)
+
+  return (
+    <div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (name.trim()) create.mutate(name.trim())
+        }}
+        className="flex gap-2"
+      >
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder="What is this key for? e.g. Home Assistant"
+          aria-label="New API key name"
+          className="input"
+        />
+        <button
+          type="submit"
+          disabled={create.isPending || !name.trim()}
+          className="btn-primary shrink-0"
+        >
+          {create.isPending ? <Spinner /> : <PlusIcon />}
+          Create
+        </button>
+      </form>
+
+      {issued && (
+        <div className="mt-3 rounded-xl border border-accent/40 bg-accent-soft p-3">
+          <p className="text-sm font-medium text-ink">
+            Copy this now — it is not shown again
+          </p>
+          <div className="mt-2 flex gap-2">
+            <input
+              readOnly
+              value={issued.key}
+              className="input font-mono text-xs"
+              onFocus={(event) => event.currentTarget.select()}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard?.writeText(issued.key)
+                notify('API key copied', 'success')
+              }}
+              className="btn-outline shrink-0"
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              onClick={() => setIssued(null)}
+              className="btn-ghost shrink-0"
+            >
+              Done
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-muted">
+            Only its fingerprint is stored, so Tally cannot show it to you again.
+          </p>
+        </div>
+      )}
+
+      {keys.isLoading ? (
+        <p className="mt-4 flex items-center gap-2 text-sm text-muted">
+          <Spinner /> Loading keys…
+        </p>
+      ) : (keys.data ?? []).length === 0 ? (
+        <p className="mt-4 text-sm text-muted">
+          No keys yet. Create one to use the API from a script or another app.
+        </p>
+      ) : (
+        <ul className="mt-4 space-y-2">
+          {(keys.data ?? []).map((key) => (
+            <li
+              key={key.id}
+              className={cn(
+                'flex flex-wrap items-center gap-3 rounded-xl border border-line p-3',
+                key.revoked_at && 'opacity-60',
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ink">
+                  {key.name}
+                  {key.revoked_at && (
+                    <span className="ml-2 rounded-md bg-raised px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
+                      Revoked
+                    </span>
+                  )}
+                </p>
+                <p className="font-mono text-xs text-muted">{key.prefix}…</p>
+                <p className="mt-0.5 text-xs text-muted">
+                  Created {formatDateTime(key.created_at)} ·{' '}
+                  {key.last_used_at
+                    ? `last used ${relativeTime(key.last_used_at)}`
+                    : 'never used'}
+                </p>
+              </div>
+              {!key.revoked_at && (
+                <button
+                  type="button"
+                  onClick={() => revoke.mutate(key.id)}
+                  disabled={revoke.isPending && revoke.variables === key.id}
+                  className="btn-outline h-8 shrink-0 px-2.5 text-xs"
+                >
+                  {revoke.isPending && revoke.variables === key.id ? (
+                    <Spinner />
+                  ) : null}
+                  Revoke
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className="mt-3 text-xs text-muted">
+        Send it as <code className="font-mono">X-API-Key</code> or{' '}
+        <code className="font-mono">Authorization: Bearer</code>. Every endpoint
+        under <code className="font-mono">/api</code> accepts it, and{' '}
+        <a href="/api/docs" className="text-accent hover:underline">
+          the API docs
+        </a>{' '}
+        list them all.
+        {active.length > 0 &&
+          ' Revoking takes effect immediately, on every integration using that key.'}
+      </p>
     </div>
   )
 }

@@ -498,6 +498,7 @@ async def test_a_failing_request_opens_only_one_connection(monkeypatch):
             self.attempts += 1
             raise httpx.ConnectError("name resolution failed")
 
+    await ps.close_pool()
     monkeypatch.setattr(ps.httpx, "AsyncClient", CountingClient)
     monkeypatch.setattr(ps.asyncio, "sleep", lambda _delay: _async(None))
 
@@ -517,6 +518,55 @@ async def test_a_failing_request_opens_only_one_connection(monkeypatch):
     # Three candidates with one retry each is six attempts — but they must all
     # share a single pooled client rather than opening six connections.
     assert built == 1
+    await ps.close_pool()
+
+
+async def test_connections_are_pooled_across_calls_not_just_within_one(monkeypatch):
+    """Regression: the DNS storm that took a live instance's sync down.
+
+    A history import asks Plex about every entry it has not seen, which on a
+    first run is hundreds of requests in seconds. A client per call is a
+    connection per call is a DNS lookup per call — enough to trip a
+    rate-limiting resolver, after which the Plex server *and* plex.tv both stop
+    resolving mid-sync. Pooling within a single call was not enough.
+    """
+    from app.services import plex_server as ps
+
+    ps.reset_failure_state()
+    await ps.close_pool()
+    built = 0
+
+    class CountingClient:
+        def __init__(self, *args, **kwargs) -> None:
+            nonlocal built
+            built += 1
+            self.is_closed = False
+
+        async def request(self, *args, **kwargs):
+            class Resp:
+                status_code = 200
+
+            return Resp()
+
+        async def aclose(self) -> None:
+            self.is_closed = True
+
+    monkeypatch.setattr(ps.httpx, "AsyncClient", CountingClient)
+    client = ps.PlexServerClient("https://one.plex.direct:32400", "token")
+
+    for _ in range(50):
+        await client._request("GET", "/library/metadata/1")
+
+    # Fifty calls, one connection pool — not fifty.
+    assert built == 1
+
+    # A second client instance shares it too: SyncService builds one of these
+    # per (user, server), and the images proxy builds more per request.
+    other = ps.PlexServerClient("https://one.plex.direct:32400", "token")
+    await other._request("GET", "/library/metadata/2")
+    assert built == 1
+
+    await ps.close_pool()
 
 
 async def test_an_unreachable_server_is_not_re_probed_every_poll(monkeypatch):
@@ -537,6 +587,8 @@ async def test_an_unreachable_server_is_not_re_probed_every_poll(monkeypatch):
     requests = 0
 
     class DeadClient:
+        is_closed = False
+
         def __init__(self, *args, **kwargs) -> None:
             pass
 
@@ -677,6 +729,8 @@ async def test_artwork_failures_do_not_trip_the_unreachable_backoff(monkeypatch)
     client = module.PlexServerClient("https://plex.example:32400", "token")
 
     class DeadClient:
+        is_closed = False
+
         def __init__(self, **kwargs):
             pass
 

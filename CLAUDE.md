@@ -25,7 +25,8 @@ backend/app/
 ├── serializers.py     ORM → API payloads (bulk helpers avoid N+1)
 ├── media_filters.py   browse filters + sorting, shared by grid and watchlist
 ├── routers/           HTTP layer, thin
-│   └── images.py      artwork proxy — Plex art needs a token, URLs must not
+│   ├── images.py      artwork proxy — Plex art needs a token, URLs must not
+│   └── api_keys.py    issue/revoke keys; auth for them lives in deps.py
 └── services/
     ├── plex_tv.py     plex.tv cloud: OAuth PINs, resources, Discover watchlist
     ├── plex_server.py one Plex Media Server: libraries, history, sessions, writes
@@ -209,6 +210,34 @@ render an indeterminate bar.
 Because the row now exists up front, the endpoint also has to refuse a second
 concurrent run, or a double click is two visible syncs over one library.
 
+### API keys are hashed, not encrypted — and with SHA-256, not bcrypt
+
+Plex tokens are Fernet-*encrypted* because Tally has to replay them to Plex. An
+API key is only ever compared, so it is *hashed*: a leaked database yields no
+working keys, and the plaintext exists solely in the copy the user saved.
+
+SHA-256 rather than bcrypt is deliberate and the opposite of the password rule.
+bcrypt is slow by design to make guessing a low-entropy human secret expensive;
+an API key is 256 random bits, so there is nothing to guess, and bcrypt's cost
+would be paid on every single API request for no security. Compare with
+`hmac.compare_digest`, never `==`.
+
+`ApiKey.prefix` is stored in the clear so a key can be found without scanning
+every row. It is a *lookup hint only* — matching it is never authentication.
+
+### Connections to Plex are pooled process-wide
+
+`plex_server._pool()` returns one shared `httpx.AsyncClient` for the whole
+process. A client per call is a connection per call is a DNS lookup per call,
+and a history import makes hundreds of calls in seconds — enough to trip a
+rate-limiting resolver (Pi-hole's default is 1000 queries/minute shared by every
+container behind one bridge address). This is not hypothetical: a live instance
+had its Plex server *and* plex.tv both stop resolving mid-sync, seconds apart,
+right after a burst of ~700 metadata lookups.
+
+Never build an `AsyncClient` per request in this module. Tests get isolation
+from the autouse `_isolate_plex_connection_pool` fixture.
+
 ### Tokens are encrypted at rest
 
 Plex auth tokens grant full account access, so they are Fernet-encrypted with a
@@ -304,7 +333,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 68 tests
+cd backend && .venv/bin/python -m pytest -q     # 72 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```

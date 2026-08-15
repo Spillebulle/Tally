@@ -210,6 +210,41 @@ Settings; everyone else only ever sees their own data.
 
 ---
 
+## API
+
+Everything the web UI does is a normal HTTP API, and you can use it from scripts
+or other apps. Create a key under **Settings → API keys** and send it as a
+header:
+
+```bash
+curl -H "X-API-Key: tally_…" https://tally.example.com/api/stats/summary
+curl -H "Authorization: Bearer tally_…" https://tally.example.com/api/media?limit=5
+```
+
+Either header works. Interactive docs, generated from the code and always
+current, are at **`/api/docs`** — that is the authoritative endpoint list.
+
+A few useful ones:
+
+| | |
+|---|---|
+| `GET /api/media?q=&media_type=&sort=` | Browse and search, same filters as the UI |
+| `GET /api/media/continue-watching` | What you are part-way through |
+| `GET /api/watchlist` | Your watchlist, filterable and sortable |
+| `GET /api/history` | Watch history |
+| `GET /api/stats` | Totals, genres, ratings, streaks |
+| `POST /api/history/{id}/watched` | Log something as watched |
+| `POST /api/sync` | Trigger a sync |
+| `GET /api/sync/status` | Progress of the running sync |
+| `GET /api/health` | Version and liveness — the only public endpoint |
+
+**Keys are shown once.** Only a fingerprint is stored, so Tally cannot show a
+key to you again — losing it means issuing a new one. A key acts as the account
+that created it, with exactly that account's access, so treat it like a
+password. Revoking takes effect immediately.
+
+---
+
 ## Backups
 
 Everything lives in `/data`:

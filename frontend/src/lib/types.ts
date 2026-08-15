@@ -120,6 +120,21 @@ export interface WatchlistEntry {
   item: MediaCard | null
 }
 
+export interface ApiKey {
+  id: number
+  name: string
+  /** The visible half. The rest only ever existed in your copy. */
+  prefix: string
+  created_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
+/** Only the create call returns `key`, and only once. */
+export interface ApiKeyCreated extends ApiKey {
+  key: string
+}
+
 export interface PaginatedWatchlist {
   entries: WatchlistEntry[]
   total: number
