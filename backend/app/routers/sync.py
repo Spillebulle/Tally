@@ -43,14 +43,17 @@ router = APIRouter(prefix="/api", tags=["sync"])
 VERSION = __version__
 
 
-async def _run_sync(user_id: int, full_history: bool, scan_libraries: bool) -> None:
+async def _run_sync(
+    user_id: int, run_id: int, full_history: bool, scan_libraries: bool
+) -> None:
     """Background sync with its own session — the request's is long gone."""
     async with session_scope() as db:
         user = await db.get(User, user_id)
-        if user is None:
+        run = await db.get(SyncRun, run_id)
+        if user is None or run is None:
             return
         await SyncService(db).full_sync(
-            user, full_history=full_history, scan_libraries=scan_libraries
+            user, full_history=full_history, scan_libraries=scan_libraries, run=run
         )
 
 
@@ -58,13 +61,47 @@ async def _run_sync(user_id: int, full_history: bool, scan_libraries: bool) -> N
 async def trigger_sync(
     payload: SyncRequest,
     background: BackgroundTasks,
+    db: DbSession,
     user: CurrentUser,
 ) -> dict:
+    """Start a sync, and make it *visibly* started before returning.
+
+    The SyncRun row is created here rather than inside the background task, so
+    the status endpoint reports "running" as soon as this responds. Created in
+    the task instead, the UI's refetch raced it, saw nothing running, dropped
+    back to the slow poll, and the progress bar stayed hidden until the user
+    reloaded the page.
+    """
+    existing = await db.scalar(
+        select(SyncRun)
+        .where(SyncRun.user_id == user.id, SyncRun.finished_at.is_(None))
+        .order_by(SyncRun.started_at.desc())
+        .limit(1)
+    )
+    if existing is not None:
+        # Already going. Report that rather than starting a second one — now
+        # that the row exists up front, a double click would otherwise be two
+        # visible runs competing over the same library.
+        return {
+            "status": "already_running",
+            "run_id": existing.id,
+            "full_history": existing.kind == "full",
+            "scan_libraries": payload.scan_libraries,
+        }
+
+    run = SyncRun(
+        user_id=user.id, kind="full" if payload.full_history else "incremental"
+    )
+    run.phase = "Starting"
+    db.add(run)
+    await db.commit()
+
     background.add_task(
-        _run_sync, user.id, payload.full_history, payload.scan_libraries
+        _run_sync, user.id, run.id, payload.full_history, payload.scan_libraries
     )
     return {
         "status": "started",
+        "run_id": run.id,
         "full_history": payload.full_history,
         "scan_libraries": payload.scan_libraries,
     }

@@ -775,6 +775,48 @@ async def test_artwork_proxy_needs_a_session(client, db):
     assert (await client.get(f"/api/images/{item.id}/poster")).status_code == 401
 
 
+async def test_triggering_a_sync_reports_running_immediately(authed_client, monkeypatch):
+    """Regression: the progress bar stayed hidden until the page was reloaded.
+
+    The SyncRun row used to be created inside the background task, so the UI's
+    follow-up refetch raced it, saw nothing running, and dropped back to the
+    slow poll. A button must never look like it did nothing.
+    """
+    from app.routers import sync as sync_router
+
+    started: list[tuple] = []
+
+    async def fake_run(user_id, run_id, full_history, scan_libraries):
+        started.append((user_id, run_id, full_history, scan_libraries))
+
+    monkeypatch.setattr(sync_router, "_run_sync", fake_run)
+
+    triggered = await authed_client.post(
+        "/api/sync", json={"full_history": False, "scan_libraries": True}
+    )
+    assert triggered.status_code == 202
+    assert triggered.json()["status"] == "started"
+    run_id = triggered.json()["run_id"]
+
+    # The very next request already sees it, with no sleep and no reload.
+    status_now = (await authed_client.get("/api/sync/status")).json()
+    assert status_now["running"] is True
+    assert status_now["run_id"] == run_id
+    assert status_now["phase"] == "Starting"
+
+    # A second click does not start a competing run.
+    again = await authed_client.post(
+        "/api/sync", json={"full_history": False, "scan_libraries": True}
+    )
+    assert again.json()["status"] == "already_running"
+    assert again.json()["run_id"] == run_id
+
+    runs = (await authed_client.get("/api/sync/runs")).json()
+    assert len(runs) == 1
+    # Only the first click scheduled work.
+    assert len(started) == 1
+
+
 async def test_preferences_round_trip(authed_client):
     updated = await authed_client.put(
         "/api/users/me/preferences", json={"sync_ratings": False}

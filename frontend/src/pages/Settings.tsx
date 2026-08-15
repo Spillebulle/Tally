@@ -164,18 +164,27 @@ export function Settings() {
               className="btn-outline h-9 text-sm"
               title={syncLabel(syncStatus.data, fullSync.isPending)}
             >
-              {syncStatus.data?.running ? <Spinner /> : <RefreshIcon />}
+              {fullSync.isPending || syncStatus.data?.running ? (
+                <Spinner />
+              ) : (
+                <RefreshIcon />
+              )}
               Full re-import
             </button>
           </div>
         }
       >
-        {syncStatus.data?.running && (
+        {/* From the click, not from the poll that confirms it — see SyncProgress. */}
+        {(syncStatus.data?.running || fullSync.isPending) && (
           <div className="mb-4 rounded-xl border border-line p-3">
             <p className="text-xs font-medium text-ink">
-              {syncStatus.data.phase ?? 'Syncing'}
+              {syncStatus.data?.running
+                ? (syncStatus.data.phase ?? 'Syncing')
+                : 'Starting sync'}
             </p>
-            <SyncProgress status={syncStatus.data} />
+            <SyncProgress
+              status={syncStatus.data?.running ? syncStatus.data : undefined}
+            />
           </div>
         )}
         <div className="divide-y divide-line">
@@ -296,7 +305,7 @@ export function Settings() {
             disabled={reclassify.isPending}
             className="btn-outline h-9 text-sm"
           >
-            <SparkIcon /> Re-detect
+            {reclassify.isPending ? <Spinner /> : <SparkIcon />} Re-detect
           </button>
         }
       >

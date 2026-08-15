@@ -1081,11 +1081,26 @@ class SyncService:
     # ------------------------------------------------------------------
 
     async def full_sync(
-        self, user: User, *, full_history: bool = False, scan_libraries: bool = True
+        self,
+        user: User,
+        *,
+        full_history: bool = False,
+        scan_libraries: bool = True,
+        run: SyncRun | None = None,
     ) -> SyncRun:
-        run = SyncRun(user_id=user.id, kind="full" if full_history else "incremental")
-        self.db.add(run)
-        await self.db.commit()
+        """Run one sync end to end.
+
+        `run` lets the caller create the SyncRun row *before* this starts. The
+        HTTP trigger does that so /api/sync/status reports "running" the instant
+        the button's request returns — creating it here instead meant the UI
+        raced a background task and showed nothing until the next poll.
+        """
+        if run is None:
+            run = SyncRun(
+                user_id=user.id, kind="full" if full_history else "incremental"
+            )
+            self.db.add(run)
+            await self.db.commit()
         self._run = run
 
         stats = SyncStats()

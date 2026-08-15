@@ -608,6 +608,34 @@ async def test_trailers_and_extras_are_not_real_playback():
     assert not is_real_playback({})
 
 
+async def test_full_sync_adopts_a_run_created_by_the_trigger(db):
+    """The row the HTTP trigger created is the one that gets finished.
+
+    It exists so the UI sees "running" straight away; if full_sync created its
+    own anyway there would be two rows, and the one the UI is watching would
+    never complete.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import SyncRun
+
+    user = User(username="sam")
+    db.add(user)
+    await db.flush()
+
+    run = SyncRun(user_id=user.id, kind="incremental", phase="Starting")
+    db.add(run)
+    await db.commit()
+
+    finished = await SyncService(db).full_sync(user, run=run)
+
+    assert finished.id == run.id
+    assert await db.scalar(select(func.count(SyncRun.id))) == 1
+    assert run.finished_at is not None
+    # And the placeholder phase does not outlive the run.
+    assert run.phase is None
+
+
 async def test_artwork_falls_back_to_the_raw_asset_when_transcoding_fails(monkeypatch):
     """The photo transcoder can refuse what the file handler serves happily."""
     from app.services.plex_server import PlexServerClient

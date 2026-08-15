@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import type { MediaCard, WatchStatus } from '@/lib/types'
+import type { MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
 import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/lib/utils'
 import { Artwork } from '@/components/Poster'
 import {
@@ -76,7 +76,31 @@ export function ItemDetail() {
 
   const toggleFavorite = useMutation({
     mutationFn: (value: boolean) => api.media.setFavorite(itemId, value),
-    onSuccess: invalidate,
+    // Fill the heart on click rather than on the round trip. It is one small
+    // boolean and the button has no other pending affordance, so without this
+    // the click looked like it had missed. Rolled back if the write fails.
+    onMutate: async (value: boolean) => {
+      await queryClient.cancelQueries({ queryKey: ['item', itemId] })
+      const previous = queryClient.getQueryData<MediaDetail>(['item', itemId])
+      queryClient.setQueryData<MediaDetail>(['item', itemId], (old) =>
+        old
+          ? {
+              ...old,
+              state: old.state
+                ? { ...old.state, is_favorite: value }
+                : old.state,
+            }
+          : old,
+      )
+      return { previous }
+    },
+    onError: (error: Error, _value, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(['item', itemId], context.previous)
+      }
+      notify(error.message, 'error')
+    },
+    onSettled: invalidate,
   })
 
   const markWatched = useMutation({
@@ -288,9 +312,15 @@ export function ItemDetail() {
                 type="button"
                 onClick={() => watchlist.mutate(!item.on_watchlist)}
                 disabled={watchlist.isPending}
-                className={cn(item.on_watchlist ? 'btn-outline' : 'btn-outline')}
+                className="btn-outline"
               >
-                <BookmarkIcon className={item.on_watchlist ? 'text-accent' : undefined} />
+                {/* Adding writes through to the Plex watchlist, so this is a
+                    real round trip and needs to say so. */}
+                {watchlist.isPending ? (
+                  <Spinner />
+                ) : (
+                  <BookmarkIcon className={item.on_watchlist ? 'text-accent' : undefined} />
+                )}
                 {item.on_watchlist ? 'On watchlist' : 'Add to watchlist'}
               </button>
 

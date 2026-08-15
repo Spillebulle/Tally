@@ -97,22 +97,27 @@ function SyncButton() {
         <RefreshIcon className={cn('text-lg', busy && 'animate-spin')} />
       </button>
 
-      {status?.running && (
+      {busy && (
+        // Shown from the click, not from the first poll that confirms it: the
+        // request and its follow-up refetch are two round trips, and waiting
+        // for them made the button look like it had done nothing.
         // Hover/focus only, and the same text is already on the button's title
         // and aria-label, so nothing here is the only way to reach it.
         <div
           role="status"
           className="pointer-events-none absolute right-0 top-full z-30 mt-2 hidden w-64 rounded-xl border border-line bg-surface p-3 shadow-lg group-hover:block group-focus-within:block"
         >
-          <p className="text-xs font-medium text-ink">{status.phase ?? 'Syncing'}</p>
-          <SyncProgress status={status} />
+          <p className="text-xs font-medium text-ink">
+            {status?.running ? (status.phase ?? 'Syncing') : 'Starting sync'}
+          </p>
+          <SyncProgress status={status?.running ? status : undefined} />
           <button
             type="button"
             onClick={() => cancel.mutate()}
-            disabled={cancel.isPending || status.cancel_requested}
+            disabled={!status?.running || cancel.isPending || status.cancel_requested}
             className="btn-ghost pointer-events-auto mt-2 h-7 w-full px-2 text-xs"
           >
-            {status.cancel_requested ? 'Stopping…' : 'Cancel sync'}
+            {status?.cancel_requested ? 'Stopping…' : 'Cancel sync'}
           </button>
         </div>
       )}
@@ -136,12 +141,16 @@ export function syncLabel(status: SyncStatus | undefined, starting = false): str
  * when it doesn't — a sync cannot know its total up front, and inventing a
  * percentage would be worse than admitting that.
  */
-export function SyncProgress({ status }: { status: SyncStatus }) {
+export function SyncProgress({ status }: { status?: SyncStatus }) {
+  // Undefined means the click has been made but the first status has not come
+  // back yet. That is a real state and it gets the indeterminate bar, so a
+  // button press never looks like it did nothing.
   // A phase with no total reports 0, meaning "unknown" — never divide by it.
-  const determinate = status.progress_total > 0
-  const percent = determinate
-    ? Math.min(100, Math.round((status.progress_current / status.progress_total) * 100))
-    : null
+  const determinate = (status?.progress_total ?? 0) > 0
+  const percent =
+    determinate && status
+      ? Math.min(100, Math.round((status.progress_current / status.progress_total) * 100))
+      : null
 
   return (
     <div className="mt-2">
@@ -151,7 +160,7 @@ export function SyncProgress({ status }: { status: SyncStatus }) {
         aria-valuenow={percent ?? undefined}
         aria-valuemin={determinate ? 0 : undefined}
         aria-valuemax={determinate ? 100 : undefined}
-        aria-label={status.phase ?? 'Sync progress'}
+        aria-label={status?.phase ?? 'Sync progress'}
       >
         <div
           className={cn(
@@ -161,7 +170,7 @@ export function SyncProgress({ status }: { status: SyncStatus }) {
           style={determinate ? { width: `${percent}%` } : undefined}
         />
       </div>
-      {determinate && (
+      {determinate && status && (
         <p className="mt-1 text-[11px] tabular-nums text-muted">
           {/* Separators, not compact notation: a counter ticking through
               "45.2K" for thousands of items looks stuck. */}
