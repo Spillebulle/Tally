@@ -24,6 +24,11 @@ _scheduler: AsyncIOScheduler | None = None
 # anyway.
 MIN_SESSIONS_POLL_SECONDS = 5
 
+# APScheduler's IntervalTrigger silently rewrites a zero interval to one second,
+# so SYNC_INTERVAL_MINUTES=0 scheduled a full multi-user Plex sync every second
+# rather than the "off" it reads as. Clamp it the way the sessions poll is.
+MIN_SYNC_INTERVAL_MINUTES = 5
+
 
 async def _periodic_sync() -> None:
     log.info("Starting scheduled sync")
@@ -44,12 +49,21 @@ async def _poll_sessions() -> None:
                 User.is_active.is_(True), User.plex_token_encrypted.is_not(None)
             )
         )
-        for user in result.scalars():
-            service = SyncService(db)
-            try:
-                await service.poll_sessions(user)
-            except Exception as exc:
-                log.debug("Session poll failed for %s: %s", user.username, exc)
+        user_ids = [user.id for user in result.scalars()]
+
+    # A session per user, not one shared across all of them: an exception
+    # mid-poll leaves the session needing a rollback, and every later user in
+    # the same tick then failed too — silently, because this was logged at
+    # debug. One user's unreachable server should not stop everyone else's
+    # Continue Watching from updating.
+    for user_id in user_ids:
+        try:
+            async with session_scope() as db:
+                user = await db.get(User, user_id)
+                if user is not None:
+                    await SyncService(db).poll_sessions(user)
+        except Exception as exc:
+            log.warning("Session poll failed for user %s: %s", user_id, exc)
 
 
 def start_scheduler() -> AsyncIOScheduler:
@@ -69,10 +83,22 @@ def start_scheduler() -> AsyncIOScheduler:
         )
         poll_seconds = MIN_SESSIONS_POLL_SECONDS
 
+    sync_minutes = settings.sync_interval_minutes
+    if sync_minutes < MIN_SYNC_INTERVAL_MINUTES:
+        log.warning(
+            "SYNC_INTERVAL_MINUTES=%s is below the %s minute minimum — using %s. "
+            "Zero in particular does not disable the sync: APScheduler reads it "
+            "as a one-second interval.",
+            sync_minutes,
+            MIN_SYNC_INTERVAL_MINUTES,
+            MIN_SYNC_INTERVAL_MINUTES,
+        )
+        sync_minutes = MIN_SYNC_INTERVAL_MINUTES
+
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         _periodic_sync,
-        IntervalTrigger(minutes=settings.sync_interval_minutes),
+        IntervalTrigger(minutes=sync_minutes),
         id="periodic_sync",
         # A slow first sync must not queue up a backlog of overlapping runs.
         max_instances=1,

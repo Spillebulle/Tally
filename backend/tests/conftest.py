@@ -30,13 +30,20 @@ async def _isolate_plex_connection_pool():
     """Plex connections are pooled process-wide, so they outlive a test.
 
     A test that monkeypatches httpx would otherwise leave its stub in the pool
-    for whatever runs next.
+    for whatever runs next — and, the other way round, would find a real client
+    already pooled and never see its own stub.
+
+    Both modules pool: `plex_server` for the media server, `plex_tv` for the
+    cloud APIs.
     """
     from app.services.plex_server import close_pool
+    from app.services.plex_tv import close_pool as close_plex_tv_pool
 
     await close_pool()
+    await close_plex_tv_pool()
     yield
     await close_pool()
+    await close_plex_tv_pool()
 
 
 @pytest_asyncio.fixture

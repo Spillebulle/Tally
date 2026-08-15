@@ -12,6 +12,7 @@ Plex Media Server):
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -31,6 +32,36 @@ PLEX_TV = "https://plex.tv"
 DISCOVER = "https://discover.provider.plex.tv"
 METADATA_PROVIDER = "https://metadata.provider.plex.tv"
 AUTH_APP = "https://app.plex.tv/auth"
+
+# One client for the process, for the same reason `plex_server._pool()` exists:
+# a client per call is a connection per call is a DNS lookup per call. The
+# incident that motivated pooling took out plex.tv resolution too, not just the
+# media server, and a watchlist sync walks every page of the watchlist.
+_pooled_client: httpx.AsyncClient | None = None
+
+
+def _pool(timeout: float) -> httpx.AsyncClient:
+    global _pooled_client
+    if _pooled_client is None or _pooled_client.is_closed:
+        _pooled_client = httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            limits=httpx.Limits(
+                max_keepalive_connections=10,
+                max_connections=20,
+                keepalive_expiry=120.0,
+            ),
+        )
+    return _pooled_client
+
+
+async def close_pool() -> None:
+    """Drop the shared client. Called on shutdown, and by tests for isolation."""
+    global _pooled_client
+    client, _pooled_client = _pooled_client, None
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await client.aclose()
 
 
 def plex_headers(token: str | None = None) -> dict[str, str]:
@@ -147,8 +178,8 @@ class PlexTVClient:
         wrong" plus a wall of traceback that never mentions the network.
         """
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as raw:
-                yield raw
+            # Pooled process-wide; deliberately not closed here.
+            yield _pool(self._timeout)
         except httpx.RequestError as exc:
             # Covers DNS failure, refused connections, TLS errors and timeouts.
             raise PlexUnreachableError(

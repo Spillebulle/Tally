@@ -3,12 +3,22 @@
 Plex Pass accounts can POST playback events to Tally, which makes tracking
 near-instant instead of waiting for the next poll. Webhooks are strictly an
 optimisation: everything they deliver is also picked up by the periodic history
-sync, so a missed or duplicated event is harmless.
+sync, so a *missed* event costs nothing.
+
+A duplicated one is not free, though — `record_watch_state` increments
+`view_count`, so the same play arriving twice counts twice. The webhook's
+dedupe key is a minute bucket, which can never match the `plex:<historyKey>`
+key the history import uses for the same play, so the import looks for a
+recent webhook row and adopts it rather than inserting a second.
+
+The endpoint is unauthenticated by necessity — Plex offers no way to send
+credentials — so everything here is attacker-supplied. It only ever matches
+already-linked accounts and known servers, never creates users, and must never
+return 5xx: Plex retries, then disables the webhook.
 """
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -191,12 +201,3 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str,
         return {"status": "ok", "action": "rated", "item": item.title}
 
     return {"status": "ignored", "reason": f"unhandled event {event!r}"}
-
-
-def parse_timestamp(value: Any) -> datetime | None:
-    if value in (None, "", 0):
-        return None
-    try:
-        return datetime.fromtimestamp(int(value), tz=UTC)
-    except (TypeError, ValueError, OSError):
-        return None

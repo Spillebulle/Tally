@@ -26,6 +26,7 @@ from .routers import (
 )
 from .services.plex_server import close_pool
 from .services.plex_tv import PlexTVError, PlexUnreachableError
+from .services.plex_tv import close_pool as close_plex_tv_pool
 from .services.scheduler import shutdown_scheduler, start_scheduler
 
 settings = get_settings()
@@ -56,6 +57,7 @@ async def lifespan(app: FastAPI):
     finally:
         shutdown_scheduler()
         await close_pool()
+        await close_plex_tv_pool()
 
 
 app = FastAPI(

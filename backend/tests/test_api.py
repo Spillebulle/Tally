@@ -1050,6 +1050,10 @@ async def test_plex_tv_maps_a_network_failure_to_unreachable(monkeypatch):
     from app.services import plex_tv
 
     class DeadClient:
+        # `is_closed` because the client is pooled process-wide now: `_pool()`
+        # reads it to decide whether the cached client is still usable.
+        is_closed = False
+
         def __init__(self, *args, **kwargs) -> None:
             pass
 

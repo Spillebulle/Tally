@@ -6,6 +6,7 @@ import pytest
 from app.models import (
     MediaItem,
     MediaType,
+    PlexLibrary,
     PlexMapping,
     PlexServer,
     User,
@@ -28,9 +29,16 @@ class FakePlexClient:
         self.rated: list[tuple[str, float]] = []
         self.scrobbled: list[str] = []
         self.unscrobbled: list[str] = []
+        # Ratings are read from the paged section listings now, not one
+        # metadata() call per item, so the fake has to serve them the same way.
+        self.section_pages = 0
 
     async def metadata(self, rating_key: str):
         return self._metadata.get(rating_key)
+
+    async def iter_section_items(self, section_key: str, item_type: int, **_kwargs):
+        self.section_pages += 1
+        yield list(self._metadata.values())
 
     async def rate(self, rating_key: str, rating: float) -> bool:
         self.rated.append((rating_key, rating))
@@ -64,11 +72,25 @@ async def _fixture_world(db, *, plex_user_rating=None):
             plex_account_id=1,
         )
     )
+    library = PlexLibrary(
+        server_id=server.id,
+        section_key="1",
+        title="Movies",
+        section_type="movie",
+        enabled=True,
+    )
     item = MediaItem(guid_key="tmdb:movie:603", media_type=MediaType.MOVIE, title="The Matrix")
-    db.add(item)
+    db.add_all([library, item])
     await db.flush()
 
-    db.add(PlexMapping(media_item_id=item.id, server_id=server.id, rating_key="42"))
+    db.add(
+        PlexMapping(
+            media_item_id=item.id,
+            server_id=server.id,
+            library_id=library.id,
+            rating_key="42",
+        )
+    )
     await db.commit()
 
     metadata = {"42": {"ratingKey": "42", "userRating": plex_user_rating}}
@@ -940,3 +962,67 @@ async def test_a_local_removal_is_retried_not_reverted(db):
 
     await db.refresh(entry)
     assert entry.active is False, "a local removal was reverted by the next sync"
+
+
+async def test_clearing_a_rating_is_pushed_and_not_reverted(db, monkeypatch):
+    """Regression: a cleared rating was neither pushed nor defended.
+
+    `local is None` is a change like any other, but both push branches guarded
+    on `local is not None`. So a clear was never sent and never baselined — it
+    re-evaluated every sync forever — and in the both-changed branch it fell
+    through to the pull, writing Plex's old rating back over the user's
+    deliberate clear.
+    """
+    user, server, item, fake = await _fixture_world(db, plex_user_rating=7.0)
+
+    service = SyncService(db)
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+
+    now = utcnow()
+    state = UserMediaState(
+        user_id=user.id,
+        media_item_id=item.id,
+        rating=None,
+        rating_updated_at=now,
+        plex_rating=7.0,
+        plex_rating_synced_at=now - timedelta(hours=2),
+    )
+    db.add(state)
+    await db.commit()
+
+    stats = SyncStats()
+    await service.sync_ratings(user, server, stats)
+
+    # Plex has no unrate, so a clear is sent as 0.
+    assert fake.rated == [("42", 0.0)]
+    assert stats.ratings_pushed == 1
+
+    await db.refresh(state)
+    assert state.rating is None, "the user's clear was reverted to Plex's value"
+    # Baselined, so the next run is a no-op rather than pushing again.
+    assert state.plex_rating is None
+
+
+async def test_ratings_are_read_in_pages_not_one_request_per_item(db, monkeypatch):
+    """sync_ratings used to make one metadata() call per library item per sync.
+
+    On a 4,000-film library that was 4,000 HTTP round trips every sync
+    interval — the traffic shape CLAUDE.md records as having taken a live
+    instance's DNS down.
+    """
+    user, server, item, fake = await _fixture_world(db, plex_user_rating=6.0)
+    calls: list[str] = []
+
+    async def _track(rating_key: str):
+        calls.append(rating_key)
+        return fake._metadata.get(rating_key)
+
+    monkeypatch.setattr(fake, "metadata", _track)
+
+    service = SyncService(db)
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+
+    await service.sync_ratings(user, server, SyncStats())
+
+    assert calls == [], "ratings still make a per-item metadata request"
+    assert fake.section_pages > 0

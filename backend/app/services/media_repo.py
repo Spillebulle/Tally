@@ -516,7 +516,12 @@ class MediaRepository:
             item = MediaItem(guid_key=guid_key, media_type=media_type, title=title)
             self.db.add(item)
 
-        item.title = title
+        # Only fill in a title, never overwrite one. When
+        # `_existing_match_for_discover` matched a row the library scan created,
+        # the scan's title is the better one — it came from the server that
+        # actually holds the file — and rewriting it from Discover renamed
+        # library items every time the watchlist synced.
+        item.title = item.title or title
         item.year = item.year or year
         item.overview = item.overview or meta.get("summary")
         item.tmdb_id = item.tmdb_id or ids.tmdb_id

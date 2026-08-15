@@ -172,6 +172,14 @@ class SyncService:
         except PlexAuthError:
             log.warning("Plex token for %s is no longer valid", user.username)
             return []
+        except PlexTVError as exc:
+            # DNS, blocked egress, or plex.tv itself having a bad day. None of
+            # that says anything about the local Plex server, so returning []
+            # lets full_sync fall back to the servers already known instead of
+            # failing a run that would otherwise have worked entirely offline
+            # from plex.tv.
+            log.warning("Could not reach plex.tv for %s: %s", user.username, exc)
+            return []
 
         servers: list[PlexServer] = []
         for resource in resources:
@@ -430,6 +438,7 @@ class SyncService:
         await self._progress(0, total=item_total)
 
         count = 0
+        partial = False
         shows_touched: set[int] = set()
         for item_type in types:
             try:
@@ -443,6 +452,14 @@ class SyncService:
                             log.warning(
                                 "Failed to import %r: %s", meta.get("title"), exc
                             )
+                            # Roll back before carrying on. A failed flush — an
+                            # IntegrityError on the unique guid_key, say —
+                            # leaves the session needing one, and without it
+                            # every later item raises PendingRollbackError,
+                            # which this handler swallows, until the page commit
+                            # raises it outside the PlexServerError guard and
+                            # takes the whole run down with it.
+                            await self.db.rollback()
                             continue
                         if item is not None:
                             count += 1
@@ -461,6 +478,7 @@ class SyncService:
                                     meta.get("title"),
                                     exc,
                                 )
+                                await self.db.rollback()
                     # Commit per page so a long scan makes visible progress and a
                     # mid-scan failure doesn't discard everything.
                     await self.db.commit()
@@ -470,6 +488,7 @@ class SyncService:
                     await self._checkpoint()
             except PlexServerError as exc:
                 stats.errors.append(f"{library.title}: {exc}")
+                partial = True
                 break
 
         # A show's status is derived from its episodes, so refresh any show that
@@ -482,8 +501,13 @@ class SyncService:
         if shows_touched:
             await self.db.commit()
 
-        library.item_count = count
-        library.last_synced_at = utcnow()
+        # Only claim the library is fully scanned if it was. Recording the count
+        # and timestamp after a mid-scan failure presents a partial scan as a
+        # complete one, so the missing items look deliberately absent rather
+        # than pending, and nothing prompts a rescan.
+        if not partial:
+            library.item_count = count
+            library.last_synced_at = utcnow()
         await self.db.commit()
         stats.items_updated += count
 
@@ -755,6 +779,36 @@ class SyncService:
     # Ratings (two-way)
     # ------------------------------------------------------------------
 
+    async def _section_ratings(
+        self, client: PlexServerClient, server: PlexServer
+    ) -> dict[str, float | None]:
+        """Map ratingKey -> the viewer's rating, for every movie and show.
+
+        Read through the paged section listings rather than per item. A missing
+        key means "we did not see it"; a None value means "seen, and unrated",
+        and the two must stay distinguishable or an unreadable library would
+        look like the user had cleared every rating in it.
+        """
+        result = await self.db.execute(
+            select(PlexLibrary).where(
+                PlexLibrary.server_id == server.id,
+                PlexLibrary.enabled.is_(True),
+            )
+        )
+        ratings: dict[str, float | None] = {}
+        for library in result.scalars():
+            for item_type in (TYPE_MOVIE, TYPE_SHOW):
+                async for page in client.iter_section_items(
+                    library.section_key, item_type
+                ):
+                    for meta in page:
+                        key = str(meta.get("ratingKey") or "")
+                        if not key:
+                            continue
+                        raw = meta.get("userRating")
+                        ratings[key] = float(raw) if raw not in (None, "") else None
+        return ratings
+
     async def sync_ratings(
         self, user: User, server: PlexServer, stats: SyncStats
     ) -> None:
@@ -775,25 +829,37 @@ class SyncService:
             )
         )
         rows = result.all()
+        if not rows:
+            return
+
+        # One query for every state, not one per item.
+        states_result = await self.db.execute(
+            select(UserMediaState).where(
+                UserMediaState.user_id == user.id,
+                UserMediaState.media_item_id.in_([item.id for item, _ in rows]),
+            )
+        )
+        states = {state.media_item_id: state for state in states_result.scalars()}
+
+        # Ratings come from the section listings, which carry `userRating` on
+        # every entry. This used to be one client.metadata() call per item per
+        # sync — 4,000 HTTP round trips for a 4,000-film library, every sync
+        # interval. That is the traffic shape that took a live instance's DNS
+        # down after a few hundred lookups; paging a section is ~1/200th of it.
+        try:
+            remote_ratings = await self._section_ratings(client, server)
+        except PlexServerError as exc:
+            stats.errors.append(f"{server.name} ratings: {exc}")
+            return
 
         for item, mapping in rows:
-            state_result = await self.db.execute(
-                select(UserMediaState).where(
-                    UserMediaState.user_id == user.id,
-                    UserMediaState.media_item_id == item.id,
-                )
-            )
-            state = state_result.scalar_one_or_none()
+            state = states.get(item.id)
 
-            try:
-                meta = await client.metadata(mapping.rating_key)
-            except PlexServerError:
+            if mapping.rating_key not in remote_ratings:
+                # Not in any section we could read: no evidence either way, so
+                # leave the pair alone rather than treating it as "unrated".
                 continue
-            if meta is None:
-                continue
-
-            remote_raw = meta.get("userRating")
-            remote = float(remote_raw) if remote_raw not in (None, "") else None
+            remote = remote_ratings[mapping.rating_key]
 
             if state is None:
                 if remote is None:
@@ -810,7 +876,12 @@ class SyncService:
                 continue
 
             if local_changed and not remote_changed:
-                if local is not None and await client.rate(mapping.rating_key, local):
+                # `local is None` means the user cleared the rating, which is a
+                # change like any other. Guarding on `is not None` meant a clear
+                # was never pushed and never baselined, so it re-evaluated on
+                # every sync forever. Plex has no unrate — 0 is the clear, the
+                # same convention push_rating already uses.
+                if await client.rate(mapping.rating_key, local if local is not None else 0.0):
                     state.plex_rating = local
                     state.plex_rating_synced_at = utcnow()
                     stats.ratings_pushed += 1
@@ -828,8 +899,13 @@ class SyncService:
                 prefer_local = bool(
                     local_time and (remote_time is None or local_time > remote_time)
                 )
-                if prefer_local and local is not None:
-                    if await client.rate(mapping.rating_key, local):
+                if prefer_local:
+                    # Again, a cleared rating is a local value worth defending:
+                    # falling through to the else branch here wrote Plex's old
+                    # rating back over the user's deliberate clear.
+                    if await client.rate(
+                        mapping.rating_key, local if local is not None else 0.0
+                    ):
                         state.plex_rating = local
                         state.plex_rating_synced_at = utcnow()
                         stats.ratings_pushed += 1
@@ -1251,9 +1327,32 @@ class SyncService:
                 run.phase = None
             run.progress_current = 0
             run.progress_total = 0
-            await self.db.commit()
+            try:
+                await self.db.commit()
+            except Exception:
+                # The session may be poisoned by whatever failed above, in
+                # which case this commit raises too and the run is never marked
+                # finished — leaving a row that blocks every future sync. Roll
+                # back and write the terminal status on a clean session.
+                log.exception("Could not record the outcome of the sync run")
+                await self.db.rollback()
+                run.finished_at = utcnow()
+                run.status = SyncStatus.FAILED
+                try:
+                    await self.db.commit()
+                except Exception:
+                    log.exception("Sync run %s left unfinished", run.id)
             self._run = None
         return run
+
+    async def has_unfinished_run(self, user: User) -> bool:
+        """Whether a sync is already in flight for this user."""
+        result = await self.db.execute(
+            select(SyncRun.id).where(
+                SyncRun.user_id == user.id, SyncRun.finished_at.is_(None)
+            )
+        )
+        return result.scalars().first() is not None
 
 
 async def sync_all_users(db: AsyncSession, *, full_history: bool = False) -> None:
@@ -1267,6 +1366,16 @@ async def sync_all_users(db: AsyncSession, *, full_history: bool = False) -> Non
     for user in users:
         service = SyncService(db)
         try:
+            # max_instances=1 only serialises the scheduler against itself. A
+            # user pressing Sync mid-job would otherwise get a second run over
+            # the same libraries on a different session — duplicated Plex
+            # traffic, and cross-session races on the unique guid_key.
+            if await service.has_unfinished_run(user):
+                log.info(
+                    "Skipping scheduled sync for %s: one is already running",
+                    user.username,
+                )
+                continue
             await service.full_sync(user, full_history=full_history)
         except Exception:
             log.exception("Scheduled sync failed for %s", user.username)
