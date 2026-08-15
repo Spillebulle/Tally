@@ -184,6 +184,18 @@ class MediaRepository:
         if genres := _plex_genres(meta):
             item.genres = sorted({*(item.genres or []), *genres})
         item.first_aired = item.first_aired or _parse_date(meta.get("originallyAvailableAt"))
+        # A thin payload — a history row especially — carries the air date but
+        # no `year`. Without a year the title is not enough for a provider to
+        # identify, so the item can never be enriched and never gets artwork.
+        # The air date already answers the question.
+        #
+        # Deliberately *after* `build_guid_key` and never fed into it: the key's
+        # last-resort branch is title+year, so filling this in beforehand would
+        # give every existing id-less row a new key and duplicate the lot.
+        # Identity moves the way it is designed to — enrichment finds the real
+        # external id, and `merge_duplicates` collapses the rows on that.
+        if not item.year and item.first_aired:
+            item.year = item.first_aired.year
         item.child_count = _int_or_none(meta.get("childCount")) or item.child_count
         item.leaf_count = _int_or_none(meta.get("leafCount")) or item.leaf_count
 
@@ -255,6 +267,35 @@ class MediaRepository:
         # Bounded, though: a title the providers genuinely have nothing for
         # would otherwise be re-queried on every sync, forever. Once a week.
         return item.metadata_updated_at < utcnow() - ARTWORK_RETRY_INTERVAL
+
+    async def enrich_existing(self, item: MediaItem) -> bool:
+        """Re-run external enrichment for a row that already exists.
+
+        Every other enrichment call hangs off something being imported, so a row
+        that no pass imports any more — one created from a thin payload, holding
+        a title and nothing else — is never looked at again by anything. This is
+        the way back in for those. Returns whether it now has artwork.
+
+        The year is recovered here as well as on import, and it has to be: rows
+        that predate the import-side fix are exactly the ones this pass exists
+        for, and nothing will ever run `upsert_from_plex` over them again. A
+        bare title is not enough for a provider to match on — recovering the
+        year is most of what makes this pass work at all.
+        """
+        if not item.year and item.first_aired:
+            item.year = item.first_aired.year
+
+        ids = ExternalIds(
+            tmdb_id=item.tmdb_id,
+            tvdb_id=item.tvdb_id,
+            imdb_id=item.imdb_id,
+            mal_id=item.mal_id,
+            anilist_id=item.anilist_id,
+        )
+        await self._apply_enrichment(
+            item, ids=ids, library=None, genres=item.genres or []
+        )
+        return bool(item.poster_url)
 
     async def _apply_enrichment(
         self,

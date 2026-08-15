@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -45,7 +45,8 @@ from ..models import (
     utcnow,
 )
 from ..security import decrypt_secret, encrypt_secret
-from .media_repo import MediaRepository
+from .guids import extract_ids
+from .media_repo import ARTWORK_RETRY_INTERVAL, MediaRepository
 from .metadata.anime import library_looks_like_anime
 from .plex_server import (
     TYPE_EPISODE,
@@ -63,6 +64,11 @@ settings = get_settings()
 # Plex reports a "watched" scrobble at ~90% of runtime; mirror that so an item
 # a user abandoned two minutes from the end still counts as watched.
 COMPLETION_THRESHOLD = 0.9
+
+# How many artwork-less rows one run tries to identify. Each is a provider
+# call behind a rate limit, so a backlog drains over several syncs rather
+# than turning a single one into an hour of TMDB traffic.
+METADATA_BACKFILL_BATCH = 100
 
 
 class SyncCancelled(Exception):
@@ -82,6 +88,7 @@ class SyncStats:
     watchlist_pulled: int = 0
     watchlist_removed_local: int = 0
     watchlist_removed_remote: int = 0
+    metadata_backfilled: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -97,6 +104,7 @@ class SyncStats:
             "watchlist_pulled": self.watchlist_pulled,
             "watchlist_removed_local": self.watchlist_removed_local,
             "watchlist_removed_remote": self.watchlist_removed_remote,
+            "metadata_backfilled": self.metadata_backfilled,
             "errors": self.errors[:50],
         }
 
@@ -598,8 +606,23 @@ class SyncService:
             item = await repo.find_by_rating_key(server.id, rating_key)
         if item is None:
             # History rows are thin; fetch full metadata so guids resolve.
+            #
+            # The test used to be "does the entry have a guid at all", and a
+            # modern Plex history row always does — the `plex://` form, which
+            # names the item to this server and to nothing else. So the fetch
+            # was skipped, `build_guid_key` fell through to `plex:<key>`, and a
+            # film the library already held as `tmdb:movie:603` got a *second*
+            # row carrying only what a history row has: a title and an air
+            # date. No year, no ids, no artwork path, no way for enrichment to
+            # identify it later, and no way for `merge_duplicates` to see it —
+            # that pass needs an external id on both rows. On a real instance
+            # this was 372 of 4796 rows, each one a duplicate with a permanent
+            # placeholder where its poster should be.
+            #
+            # This is the same fault the Discover watchlist had, and it has the
+            # same answer: always ask for guids before minting an identity.
             meta = entry
-            if rating_key and not entry.get("guid"):
+            if rating_key and not extract_ids(entry).identifying:
                 try:
                     fetched = await client.metadata(rating_key)
                 except PlexServerError:
@@ -1239,6 +1262,70 @@ class SyncService:
     # Orchestration
     # ------------------------------------------------------------------
 
+    async def backfill_missing_metadata(self, stats: SyncStats) -> int:
+        """Give rows that never got an identity another chance at one.
+
+        Enrichment normally hangs off an import, so a row nothing imports any
+        more is never revisited: a library scan only sees what Plex still holds,
+        and the watchlist pass only sees the watchlist. A row created from a
+        thin payload — a title, maybe an air date, no external id and no artwork
+        — therefore keeps its blank tile forever. On a real instance that was
+        372 of 4796 rows, most of them a duplicate of a title sitting next to
+        them with its poster intact.
+
+        Bounded per run, because each item is a provider call: a backlog drains
+        over several syncs rather than turning one into an hour of TMDB traffic.
+        Items are chosen oldest-attempt-first so the queue rotates instead of
+        retrying the same hopeless titles every time.
+
+        This only ever *adds* what it learns. Collapsing the duplicate pair it
+        exposes is `merge_duplicates`' job — that is the pass allowed to delete,
+        and it stays the only one.
+        """
+        cutoff = utcnow() - ARTWORK_RETRY_INTERVAL
+        result = await self.db.execute(
+            select(MediaItem)
+            .where(
+                MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
+                # No identity from any provider — `plex_guid` is not one, which
+                # is the whole reason these rows exist.
+                MediaItem.tmdb_id.is_(None),
+                MediaItem.tvdb_id.is_(None),
+                MediaItem.imdb_id.is_(None),
+                MediaItem.mal_id.is_(None),
+                MediaItem.anilist_id.is_(None),
+                MediaItem.poster_url.is_(None),
+                MediaItem.discover_thumb_path.is_(None),
+                or_(
+                    MediaItem.metadata_updated_at.is_(None),
+                    MediaItem.metadata_updated_at < cutoff,
+                ),
+            )
+            .order_by(MediaItem.metadata_updated_at.asc().nulls_first(), MediaItem.id)
+            .limit(METADATA_BACKFILL_BATCH)
+        )
+        items = list(result.scalars())
+        if not items:
+            return 0
+
+        repo = MediaRepository(self.db)
+        identified = 0
+        await self._progress(0, total=len(items))
+        for index, item in enumerate(items, start=1):
+            await self._checkpoint()
+            if await repo.enrich_existing(item):
+                identified += 1
+            await self._progress(index)
+        await self.db.commit()
+
+        log.info(
+            "Backfilled metadata for %s of %s item(s) that had no artwork",
+            identified,
+            len(items),
+        )
+        stats.metadata_backfilled = identified
+        return identified
+
     async def full_sync(
         self,
         user: User,
@@ -1306,6 +1393,10 @@ class SyncService:
             await self._checkpoint()
             await self._set_phase("Syncing your watchlist")
             await self.sync_watchlist(user, stats)
+
+            await self._checkpoint()
+            await self._set_phase("Filling in missing artwork")
+            await self.backfill_missing_metadata(stats)
 
             await self._set_phase("Checking what is playing now")
             await self.poll_sessions(user)

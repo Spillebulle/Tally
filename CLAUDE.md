@@ -76,6 +76,30 @@ So: **always request guids**, and when a payload still has none,
 minting a new identity. `merge_duplicates.py` cleans up what the old behaviour
 left behind.
 
+**It then happened a second time, in the history import.** `_ingest_history_entry`
+fetched full metadata only when the entry had no `guid` at all — but a modern
+Plex history row always has one, and it is the `plex://` form. Presence is not
+resolution: `extract_ids` returns nothing but `plex_guid` from it, so the fetch
+was skipped and `build_guid_key` fell through to `plex:<key>` all the same. 372
+of 4796 rows on a live instance, each a duplicate of a film sitting next to it
+with its poster intact. The test is now `extract_ids(entry).identifying` — does
+this payload name the item to anything other than this one server — and that is
+the test any future source has to pass before it is allowed to mint a row.
+
+Two things follow, and both were missing:
+
+* **A thin payload has no `year`, and without one nothing can ever identify the
+  row.** History rows carry `originallyAvailableAt` but not `year`, so these
+  rows could not be enriched into having artwork either. The air date answers
+  it — but only onto `item.year`, **never into `build_guid_key`**, whose
+  last-resort branch is title+year: filling it in beforehand re-keys every
+  id-less row already stored and duplicates the lot.
+* **Nothing revisits a row once it exists.** Enrichment hangs off an import, and
+  a row no import touches — no longer in the library, not on the watchlist — is
+  never looked at again by anything. `backfill_missing_metadata` is the only
+  pass that goes back for them. It only ever adds; `merge_duplicates` stays the
+  only pass allowed to delete.
+
 ### Every timestamp column must be `UtcDateTime`
 
 SQLite has no native timestamp type and hands back **naive** datetimes even from

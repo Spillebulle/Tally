@@ -49,6 +49,25 @@ class ExternalIds:
     agents: set[str] = field(default_factory=set)
 
     @property
+    def identifying(self) -> bool:
+        """Whether these ids can name the item to anything but this Plex server.
+
+        `plex_guid` deliberately does not count. It is a per-item Plex key, so
+        it produces a `plex:…` guid_key that no other source — a library scan
+        asking for guids, an enrichment lookup, another server — will ever
+        arrive at for the same title. Treating it as an identity is how a film
+        already held as `tmdb:movie:603` acquires a second, artwork-less row.
+        """
+        return bool(
+            self.tmdb_id
+            or self.tvdb_id
+            or self.imdb_id
+            or self.mal_id
+            or self.anilist_id
+            or self.anidb_id
+        )
+
+    @property
     def anime_hinted(self) -> bool:
         return bool(
             self.anidb_id
