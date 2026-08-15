@@ -24,6 +24,7 @@ backend/app/
 ├── security.py        JWT sessions, Fernet token encryption, bcrypt
 ├── serializers.py     ORM → API payloads (bulk helpers avoid N+1)
 ├── media_filters.py   browse filters + sorting, shared by grid and watchlist
+├── merge_duplicates.py startup repair for items recorded under two identities
 ├── routers/           HTTP layer, thin
 │   ├── images.py      artwork proxy — Plex art needs a token, URLs must not
 │   └── api_keys.py    issue/revoke keys; auth for them lives in deps.py
@@ -60,6 +61,20 @@ library. If it ever must change, ship a migration that rewrites existing keys.
 
 Seasons and episodes derive their key from their show's (`<show_key>/s2e5`) so
 they stay grouped even when the episode carries no external id of its own.
+
+**The identity of a source is only as good as the ids you asked it for.** This
+already went wrong once, at scale. A library scan sends `includeGuids=1` and
+gets `tmdb:movie:300671`; the Discover watchlist was fetched *without* it, so
+the only id available was the `plex://` ratingKey and `build_guid_key` fell
+through to `plex:<key>`. Same film, two keys, two rows — one per watchlist
+entry, 447 duplicates on a real instance, and the phantom half had no
+`PlexMapping` and therefore no artwork. Enrichment then gave both rows the same
+tmdb id, which made it look like dedup had simply failed.
+
+So: **always request guids**, and when a payload still has none,
+`_existing_match_for_discover` looks for the row that already exists rather than
+minting a new identity. `merge_duplicates.py` cleans up what the old behaviour
+left behind.
 
 ### Every timestamp column must be `UtcDateTime`
 
@@ -333,7 +348,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 72 tests
+cd backend && .venv/bin/python -m pytest -q     # 81 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
@@ -402,11 +417,19 @@ the built-in `GITHUB_TOKEN`.
   for additive columns. A single-file SQLite database the user owns does not
   justify the dependency. If a destructive migration ever becomes necessary,
   revisit — but additive columns go in that list.
-  The one non-additive step is `_scrub_token_bearing_artwork()`, which clears
-  the old token-carrying `poster_url` values so the proxy can take over. It is
-  idempotent and rebuilt by the next library scan; anything else that has to
-  *change* data needs the same treatment — a named function, a reason, and no
-  dependence on running exactly once.
+  Two steps are not additive: `_scrub_token_bearing_artwork()`, which clears the
+  old token-carrying `poster_url` values so the proxy can take over, and
+  `merge_duplicates.py`, which collapses items the old watchlist import recorded
+  twice. Both are idempotent, both log what they did, and neither may assume it
+  runs exactly once. Anything else that has to *change* data needs the same
+  treatment — a named function and a reason.
+
+  The merge deletes rows unattended, so it is deliberately timid: it needs a
+  **matching external id and a matching normalised title**. The id alone is not
+  proof — real data had two "Seven" (1995) rows carrying tmdb 807 and 966, so a
+  wrong id can be attached, and fusing two unrelated films would take one's
+  history with it. A missed merge leaves a visible duplicate; a wrong merge
+  loses data silently. Prefer the visible mistake.
 * **`create_all()` at startup**, not a migration step.
 * **bcrypt pinned to 4.0.1** — passlib 1.7.4 reads `bcrypt.__about__`, which
   bcrypt ≥ 4.1 removed. Unpinning brings back a traceback on every hash.
