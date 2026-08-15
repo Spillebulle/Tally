@@ -77,6 +77,8 @@ export function App() {
         <Route path="/shows" element={<Browse mode="shows" />} />
         <Route path="/anime" element={<Browse mode="anime" />} />
         <Route path="/search" element={<Browse mode="search" />} />
+        {/* Everything, filtered by query string — where the stats charts link. */}
+        <Route path="/browse" element={<Browse mode="browse" />} />
         <Route path="/item/:id" element={<ItemDetail />} />
         <Route path="/watchlist" element={<Watchlist />} />
         <Route path="/history" element={<History />} />
