@@ -40,6 +40,56 @@ def _clean_title(title: str) -> str:
     return re.sub(r"\s{2,}", " ", _NOISE.sub("", title or "")).strip(" -:·")
 
 
+def _match_key(title: str) -> str:
+    """Lowercase alphanumerics only, so punctuation and spacing stop mattering."""
+    return re.sub(r"[^a-z0-9]+", "", _clean_title(title).lower())
+
+
+def _titles_match(wanted: str, candidate_titles: list[str | None]) -> bool:
+    """Whether a search hit is plausibly the thing we asked for.
+
+    A MAL match is worth +2 in the anime classifier, and the anime keyword
+    signal is worth +3 — so an unchecked hit alone reached the threshold of 5
+    and could make a Western cartoon "anime". The search is a fuzzy one that
+    always returns *something*, so taking results[0] on faith made the module
+    docstring's "corroborating, never decisive alone" untrue.
+
+    Deliberately forgiving: MAL titles are romanised and frequently carry a
+    subtitle Plex does not, so one being a prefix of the other counts.
+    """
+    key = _match_key(wanted)
+    if not key:
+        return False
+    for candidate in candidate_titles:
+        other = _match_key(candidate or "")
+        if not other:
+            continue
+        if key == other or key.startswith(other) or other.startswith(key):
+            return True
+    return False
+
+
+def _candidate_titles(entry: dict[str, Any]) -> list[str | None]:
+    """Every name a search hit might be known by, across both backends."""
+    alternatives = entry.get("alternative_titles") or {}
+    synonyms = alternatives.get("synonyms") or []
+    # Jikan v4 also carries a `titles` array of {type, title} pairs.
+    titles = [
+        entry_title.get("title")
+        for entry_title in (entry.get("titles") or [])
+        if isinstance(entry_title, dict)
+    ]
+    return [
+        entry.get("title"),
+        entry.get("title_english"),
+        entry.get("title_japanese"),
+        alternatives.get("en"),
+        alternatives.get("ja"),
+        *synonyms,
+        *titles,
+    ]
+
+
 class MALClient(ProviderClient):
     name = "mal"
 
@@ -66,7 +116,10 @@ class MALClient(ProviderClient):
             headers={"X-MAL-CLIENT-ID": self.client_id},
         )
         nodes = [entry["node"] for entry in (data or {}).get("data", []) if entry.get("node")]
-        return nodes[0] if nodes else None
+        for node in nodes:
+            if _titles_match(title, _candidate_titles(node)):
+                return node
+        return None
 
     async def _mal_details(self, mal_id: int) -> dict[str, Any] | None:
         return await self._get(
@@ -109,7 +162,10 @@ class MALClient(ProviderClient):
                 f"{self.jikan}/anime", params={"q": title[:64], "limit": 5, "sfw": "true"}
             )
             results = (data or {}).get("data") or []
-        return results[0] if results else None
+        for entry in results:
+            if _titles_match(title, _candidate_titles(entry)):
+                return entry
+        return None
 
     async def _jikan_details(self, mal_id: int) -> dict[str, Any] | None:
         data = await self._get(f"{self.jikan}/anime/{mal_id}/full")

@@ -5,6 +5,8 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -78,6 +80,44 @@ class RateLimiter:
             self._last = time.monotonic()
 
 
+# Distinguishes "cached, and the answer was nothing" from "not cached". A plain
+# None could not: the read guard treated it as a miss, so every 404 was
+# re-requested for the life of the process — exactly what the negative cache
+# was written to prevent, and the weekly artwork retry sweeps thousands of
+# titles the providers genuinely do not have.
+_MISS = object()
+
+# After this many consecutive transport failures, stop calling the provider for
+# a while. Without it a provider outage during a large scan costs 3 attempts x
+# 20s timeout plus backoff *per item*, and the sync simply never finishes.
+_BREAKER_THRESHOLD = 5
+_BREAKER_COOLDOWN = 300.0
+
+
+def _retry_after_seconds(raw: str | None, default: float = 2.0) -> float:
+    """Parse Retry-After, which the RFC allows to be an HTTP date.
+
+    `float(raw)` raised ValueError on the date form — which CDNs in front of
+    Jikan do send — and the exception escaped `_get`, losing that provider's
+    whole contribution for the item.
+    """
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return default
+    if when is None:
+        return default
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
+
+
 class ProviderClient:
     """Base class handling retries, rate limiting and a small response cache."""
 
@@ -88,19 +128,21 @@ class ProviderClient:
         self._timeout = timeout
         self._cache: dict[str, tuple[float, Any]] = {}
         self._cache_ttl = 60 * 60 * 6
+        self._consecutive_failures = 0
+        self._breaker_until = 0.0
 
     @property
     def enabled(self) -> bool:
         return True
 
-    def _cache_get(self, key: str) -> Any | None:
+    def _cache_get(self, key: str) -> Any:
         hit = self._cache.get(key)
         if not hit:
-            return None
+            return _MISS
         expires, value = hit
         if expires < time.time():
             self._cache.pop(key, None)
-            return None
+            return _MISS
         return value
 
     def _cache_put(self, key: str, value: Any) -> None:
@@ -118,8 +160,13 @@ class ProviderClient:
         attempts: int = 3,
     ) -> Any | None:
         cache_key = f"{url}?{sorted((params or {}).items())}"
-        if (cached := self._cache_get(cache_key)) is not None:
+        if (cached := self._cache_get(cache_key)) is not _MISS:
             return cached
+
+        if time.monotonic() < self._breaker_until:
+            # Provider is in cooldown after repeated transport failures. Fail
+            # fast rather than spending the full retry budget again per item.
+            return None
 
         # One client for all attempts. Building it inside the loop gave every
         # retry its own connection, and so its own DNS lookup, turning a
@@ -132,11 +179,20 @@ class ProviderClient:
                     resp = await client.get(url, params=params, headers=headers)
                 except (httpx.TransportError, httpx.TimeoutException) as exc:
                     log.debug("%s request failed (%s): %s", self.name, url, exc)
+                    if attempt == attempts - 1:
+                        # Don't sleep after the final attempt — nothing follows
+                        # it, so that backoff was pure delay. Across a large
+                        # scan with a dead provider it added hours.
+                        break
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue
 
+                self._note_success()
+
                 if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", 2))
+                    retry_after = _retry_after_seconds(resp.headers.get("Retry-After"))
+                    if attempt == attempts - 1:
+                        break
                     await asyncio.sleep(min(retry_after, 10))
                     continue
                 if resp.status_code == 404:
@@ -154,4 +210,22 @@ class ProviderClient:
                     return None
                 self._cache_put(cache_key, data)
                 return data
+
+        self._note_failure()
         return None
+
+    def _note_success(self) -> None:
+        self._consecutive_failures = 0
+        self._breaker_until = 0.0
+
+    def _note_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= _BREAKER_THRESHOLD:
+            self._breaker_until = time.monotonic() + _BREAKER_COOLDOWN
+            log.warning(
+                "%s failed %s times in a row; pausing calls to it for %.0fs",
+                self.name,
+                self._consecutive_failures,
+                _BREAKER_COOLDOWN,
+            )
+            self._consecutive_failures = 0
