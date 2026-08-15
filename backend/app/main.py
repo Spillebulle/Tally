@@ -34,6 +34,15 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
+
+# httpx logs the full request URL — query string included — at INFO. Secrets
+# ride in the query on purpose in two places: TMDB takes `?api_key=`, and the
+# Plex artwork transcode requires `X-Plex-Token` there (see CLAUDE.md). At the
+# default INFO level that puts both in `docker logs`, which users paste into
+# issues. Silence it unless someone deliberately asks for DEBUG.
+if settings.log_level.upper() != "DEBUG":
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
 log = logging.getLogger("tally")
 
 
@@ -120,6 +129,31 @@ async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "static"
+# Resolved separately: the containment check has to compare against a real
+# path, or a symlinked static/ would make every candidate look external.
+FRONTEND_ROOT = FRONTEND_DIR.resolve()
+
+
+def static_file_for(full_path: str) -> Path | None:
+    """Resolve a request path to a file inside `static/`, or None.
+
+    Module level rather than inline in the route so the containment rule is
+    testable without a built frontend — the route below only exists when
+    `static/index.html` does, which in a dev checkout it does not.
+
+    `full_path` is attacker-controlled and arrives already percent-decoded, so
+    `%2e%2e%2f` reaches here as a real `../` and Starlette does not collapse
+    it. Without the `is_relative_to` check this returned any file the process
+    could read, unauthenticated — including `/data/.secret_key`, which decrypts
+    every stored Plex token, and the database itself.
+    """
+    if not full_path:
+        return None
+    candidate = (FRONTEND_DIR / full_path).resolve()
+    if not candidate.is_relative_to(FRONTEND_ROOT):
+        return None
+    return candidate if candidate.is_file() else None
+
 
 # Test index.html rather than the directory: an empty or half-written `static/`
 # used to raise at import time, because StaticFiles refuses a missing `assets/`.
@@ -134,8 +168,8 @@ if (FRONTEND_DIR / "index.html").is_file():
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str) -> FileResponse:
         """Serve the SPA, letting client-side routing own unknown paths."""
-        candidate = FRONTEND_DIR / full_path
-        if full_path and candidate.is_file():
+        candidate = static_file_for(full_path)
+        if candidate is not None:
             return FileResponse(candidate)
         return FileResponse(FRONTEND_DIR / "index.html")
 else:  # pragma: no cover - development without a built frontend

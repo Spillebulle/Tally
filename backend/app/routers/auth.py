@@ -220,9 +220,23 @@ async def login(payload: LocalLogin, response: Response, db: DbSession) -> UserO
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(response: Response) -> Response:
-    response.delete_cookie(SESSION_COOKIE, path="/")
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+async def logout() -> Response:
+    # The deletion has to be set on the response that is actually returned.
+    # Writing it to an injected `response` and then returning a fresh Response
+    # threw the header away — FastAPI only merges the injected one when the
+    # handler does not return a Response itself — so logout answered 204 with
+    # no Set-Cookie and the session stayed valid for its full 30 days.
+    resp = Response(status_code=status.HTTP_204_NO_CONTENT)
+    # Mirror the attributes the cookie was set with, or the browser treats this
+    # as a different cookie and leaves the original in place.
+    resp.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.public_url.startswith("https://"),
+    )
+    return resp
 
 
 @router.get("/me", response_model=UserOut)
