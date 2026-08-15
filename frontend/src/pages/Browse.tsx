@@ -10,7 +10,13 @@ import { PosterGrid } from '@/components/Poster'
 import { EmptyState, PageHeader, Segmented } from '@/components/ui'
 import { FilmIcon, SearchIcon } from '@/components/Icons'
 
-export type BrowseMode = 'movies' | 'shows' | 'anime' | 'search'
+/**
+ * `browse` is everything at once — no media type, anime included. It exists for
+ * arriving from somewhere with a filter already applied, which is what clicking
+ * a bar on the stats page does: "titles rated 7" is not a Movies question or a
+ * Shows question.
+ */
+export type BrowseMode = 'movies' | 'shows' | 'anime' | 'search' | 'browse'
 
 const PAGE_SIZE = 60
 
@@ -23,7 +29,9 @@ export function Browse({ mode }: BrowseProps) {
   const queryClient = useQueryClient()
   const { notify } = useToast()
 
-  const filters = useBrowseFilters(mode === 'search' ? 'title' : 'added')
+  const filters = useBrowseFilters(
+    mode === 'search' || mode === 'browse' ? 'title' : 'added',
+  )
   const animeKind = (params.get('kind') ?? 'all') as 'all' | 'movie' | 'show'
 
   const [page, setPage] = useState(0)
@@ -35,7 +43,7 @@ export function Browse({ mode }: BrowseProps) {
 
   const animeFilter: AnimeFilter = useMemo(() => {
     if (mode === 'anime') return 'only'
-    if (mode === 'search') return 'all'
+    if (mode === 'search' || mode === 'browse') return 'all'
     // Anime lives in its own section, so the plain Movies/Shows grids exclude
     // it rather than showing everything twice.
     return 'exclude'
@@ -79,11 +87,19 @@ export function Browse({ mode }: BrowseProps) {
 
   const search = filters.search
 
+  const rated =
+    filters.minRating != null && filters.minRating === filters.maxRating
+      ? `Rated ${filters.minRating}/10`
+      : null
+
   const titles: Record<BrowseMode, string> = {
     movies: 'Movies',
     shows: 'TV shows',
     anime: 'Anime',
     search: search ? `Results for “${search}”` : 'Search',
+    // Name what was clicked, so arriving here from the stats page explains
+    // itself rather than showing an unexplained subset of the library.
+    browse: rated ?? (filters.genre ? filters.genre : 'All titles'),
   }
 
   const total = data?.total ?? 0
@@ -125,11 +141,26 @@ export function Browse({ mode }: BrowseProps) {
       {!isLoading && total === 0 ? (
         <EmptyState
           icon={mode === 'search' ? <SearchIcon /> : <FilmIcon />}
-          title={search ? 'Nothing matched that search' : 'Nothing here yet'}
+          title={
+            search
+              ? 'Nothing matched that search'
+              : filters.active
+                ? 'Nothing matched those filters'
+                : 'Nothing here yet'
+          }
           description={
             search
               ? 'Try a shorter search, or check the spelling.'
-              : 'Run a Plex sync from Settings to import your library.'
+              : filters.active
+                ? 'Try widening them, or clear them to see everything.'
+                : 'Run a Plex sync from Settings to import your library.'
+          }
+          action={
+            !search && filters.active ? (
+              <button type="button" onClick={filters.clear} className="btn-outline mt-2">
+                Clear filters
+              </button>
+            ) : undefined
           }
         />
       ) : (
