@@ -32,7 +32,9 @@ export function Watchlist() {
   const { notify } = useToast()
 
   // "Recently watchlisted" is the one people mean on this page, so it leads.
-  const filters = useBrowseFilters('watchlist_added')
+  // Oldest first: a watchlist is a queue, and the thing you added first is the
+  // one you have been meaning to watch longest.
+  const filters = useBrowseFilters('watchlist_added', 'asc')
   const kind = (params.get('kind') ?? 'all') as Kind
   const [page, setPage] = useState(0)
 
