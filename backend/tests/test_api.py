@@ -1214,3 +1214,63 @@ async def test_genres_endpoint_deduplicates(authed_client, db):
 
     genres = (await authed_client.get("/api/media/genres")).json()
     assert genres == ["Crime", "Drama"]
+
+
+async def test_logout_actually_clears_the_session(authed_client):
+    """Logout used to answer 204 with no Set-Cookie at all.
+
+    `delete_cookie` was written to an injected `response` while the handler
+    returned a different `Response` object, so FastAPI discarded the header and
+    the session stayed valid for its full 30 days — on a shared browser,
+    "Sign out" did nothing.
+    """
+    assert (await authed_client.get("/api/auth/me")).status_code == 200
+
+    response = await authed_client.post("/api/auth/logout")
+    assert response.status_code == 204
+    assert any(
+        "session" in value.lower() for value in response.headers.get_list("set-cookie")
+    ), "logout sent no Set-Cookie header"
+
+    assert (await authed_client.get("/api/auth/me")).status_code == 401
+
+
+async def test_spa_route_cannot_escape_the_static_directory(tmp_path, monkeypatch):
+    """The SPA catch-all used to serve any file the process could read.
+
+    `FRONTEND_DIR / full_path` had no containment check, and the path arrives
+    already percent-decoded, so `%2e%2e%2f` became a real `../`. That exposed
+    `/data/.secret_key` — which decrypts every stored Plex token — and the
+    database itself, to anyone, unauthenticated.
+
+    This drives the helper rather than the route: the route is only registered
+    when a built `static/index.html` exists, which it does not in a checkout,
+    so an HTTP-level test here would pass without proving anything.
+    """
+    from app import main
+
+    static = tmp_path / "static"
+    (static / "assets").mkdir(parents=True)
+    (static / "index.html").write_text("<!doctype html>")
+    (static / "assets" / "app.js").write_text("console.log(1)")
+    secret = tmp_path / "secret_key"
+    secret.write_text("SECRET=leaked")
+
+    monkeypatch.setattr(main, "FRONTEND_DIR", static)
+    monkeypatch.setattr(main, "FRONTEND_ROOT", static.resolve())
+
+    # A real asset still resolves.
+    assert main.static_file_for("assets/app.js") == (static / "assets" / "app.js").resolve()
+
+    # Nothing outside the directory does, however it is spelled. FastAPI hands
+    # the handler a decoded path, so these are what actually arrives.
+    for escape in (
+        "../secret_key",
+        "../../secret_key",
+        "assets/../../secret_key",
+        "./../secret_key",
+    ):
+        assert main.static_file_for(escape) is None, escape
+
+    # And an unknown in-bounds path falls through to the SPA rather than 404ing.
+    assert main.static_file_for("watchlist") is None
