@@ -109,8 +109,22 @@ class PlexServerClient:
     # -- transport --------------------------------------------------------
 
     async def _request(
-        self, method: str, path: str, *, params: dict | None = None, retries: int = 1
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        retries: int = 1,
+        record_failures: bool = True,
     ) -> httpx.Response | None:
+        """Make one call, walking the candidate URIs until one answers.
+
+        `record_failures=False` still *honours* the backoff — a server that is
+        down should fail fast, not re-walk every candidate — but does not add to
+        it. High-volume, best-effort traffic like artwork uses that: dozens of
+        poster requests per page must not be able to declare the server dead and
+        take the sync down with them.
+        """
         params = {**(params or {})}
 
         # A server advertises one URI per address it can see, and a Plex install
@@ -178,16 +192,19 @@ class PlexServerClient:
         # Every candidate failed. Back off before the next full walk, doubling
         # each time, so a server that stays down costs one probe per cooldown
         # rather than one per poll.
-        count += 1
-        delay = min(_COOLDOWN_MAX_SECONDS, _COOLDOWN_BASE_SECONDS * 2 ** (count - 1))
-        _failures[key] = (count, time.monotonic() + delay)
-        log.warning(
-            "Plex server unreachable after trying %s connection URI(s); "
-            "backing off for %.0fs. Last error: %s",
-            len(urls),
-            delay,
-            last_error,
-        )
+        if record_failures:
+            count += 1
+            delay = min(
+                _COOLDOWN_MAX_SECONDS, _COOLDOWN_BASE_SECONDS * 2 ** (count - 1)
+            )
+            _failures[key] = (count, time.monotonic() + delay)
+            log.warning(
+                "Plex server unreachable after trying %s connection URI(s); "
+                "backing off for %.0fs. Last error: %s",
+                len(urls),
+                delay,
+                last_error,
+            )
         raise PlexUnreachable(
             f"No reachable connection for Plex server (tried {len(urls)}): {last_error}"
         )
@@ -441,26 +458,56 @@ class PlexServerClient:
         This deliberately returns bytes rather than a URL. A URL to this server
         carries `X-Plex-Token`, and artwork URLs get stored on rows that every
         Tally account can read — see `routers/images.py`. Going through
-        `_request` also means artwork inherits the connection failover and the
-        unreachable-server backoff instead of the browser hanging on a LAN
-        address it cannot route to.
+        `_request` also means artwork inherits the connection failover instead
+        of the browser hanging on a LAN address it cannot route to.
+
+        Two failure modes are worth knowing about, because both look identical
+        from the browser (a placeholder gradient):
+
+        * The photo transcoder can refuse a request the server can perfectly
+          well answer — it is a separate subsystem with its own limits. So a
+          failed transcode falls back to the stored artwork at its original
+          size, which is served by the ordinary file handler.
+        * A stored path carries a timestamp (`/thumb/1699999999`). When the
+          artwork is replaced in Plex the old path 404s until the next library
+          scan refreshes it. That is why this logs the status: "no artwork" and
+          "Plex said no" need telling apart, and silence made them the same.
         """
         if not path:
             return None
-        resp = await self._request(
-            "GET",
-            "/photo/:/transcode",
-            params={
-                "width": width,
-                "height": height,
-                "minSize": 1,
-                "upscale": 1,
-                "url": path,
-            },
+
+        attempts = (
+            (
+                "/photo/:/transcode",
+                {
+                    "width": width,
+                    "height": height,
+                    "minSize": 1,
+                    "upscale": 1,
+                    "url": path,
+                },
+            ),
+            # The raw asset, untranscoded. Bigger, but it is the same picture.
+            (path, None),
         )
-        if resp is None or resp.status_code >= 400:
-            return None
-        return resp.content, resp.headers.get("content-type", "image/jpeg")
+
+        for endpoint, params in attempts:
+            # record_failures=False: artwork is a passenger on this connection,
+            # not a probe of it. A refused transcode must not trip the
+            # unreachable-server backoff and take the sync down with it.
+            resp = await self._request(
+                "GET", endpoint, params=params, record_failures=False
+            )
+            if resp is not None and resp.status_code < 400:
+                return resp.content, resp.headers.get("content-type", "image/jpeg")
+            if resp is not None:
+                log.info(
+                    "Plex refused artwork %s via %s: HTTP %s",
+                    path,
+                    endpoint,
+                    resp.status_code,
+                )
+        return None
 
 
 __all__ = [
