@@ -797,6 +797,101 @@ async def test_a_missing_artwork_path_is_recovered_from_plex(authed_client, db):
     assert mapping.art_path == "/library/metadata/52589/art/1700"
 
 
+async def test_a_stale_artwork_path_is_refreshed_rather_than_left_blank(
+    authed_client, db
+):
+    """Regression: one title's poster gone for good after Plex replaced it.
+
+    A Plex artwork path carries a timestamp — `/thumb/1699999999` — so changing
+    a poster in Plex makes the stored path 404 while the new one sits there
+    unrecorded. A *missing* path was already repaired on demand; a dead one was
+    not, which left that one title showing a placeholder indefinitely while
+    every title around it was fine. Both are the same fault and the same fix.
+    """
+    from app.models import PlexMapping
+    from app.services import plex_server as plex_server_module
+
+    stale = "/library/metadata/52589/thumb/1600"
+    fresh = "/library/metadata/52589/thumb/1700"
+
+    user = (await db.execute(select(User))).scalars().first()
+    server = PlexServer(
+        machine_identifier="machine-1",
+        name="Basement",
+        base_url="https://plex.example:32400",
+        access_token_encrypted=encrypt_secret("owner-token"),
+        owner_user_id=user.id,
+    )
+    item = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Dune")
+    db.add_all([server, item])
+    await db.flush()
+    mapping = PlexMapping(
+        media_item_id=item.id,
+        server_id=server.id,
+        rating_key="52589",
+        thumb_path=stale,
+    )
+    db.add(mapping)
+    await db.commit()
+
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_request(
+        self, method, path, *, params=None, retries=1, record_failures=True
+    ):
+        wanted = (params or {}).get("url")
+        calls.append((path, wanted))
+
+        class Meta:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "MediaContainer": {
+                        "Metadata": [
+                            {
+                                "type": "movie",
+                                "ratingKey": "52589",
+                                "title": "Dune",
+                                "thumb": fresh,
+                                "art": "/library/metadata/52589/art/1700",
+                            }
+                        ]
+                    }
+                }
+
+        class Jpeg:
+            status_code = 200
+            content = b"fresh-jpeg"
+            headers = {"content-type": "image/jpeg"}
+
+        if path == "/library/metadata/52589":
+            return Meta
+        if fresh in (path, wanted):
+            return Jpeg
+        return None  # the stale path is a 404 now
+
+    original = plex_server_module.PlexServerClient._request
+    plex_server_module.PlexServerClient._request = fake_request  # type: ignore[assignment]
+    try:
+        response = await authed_client.get(f"/api/images/{item.id}/poster")
+    finally:
+        plex_server_module.PlexServerClient._request = original  # type: ignore[assignment]
+
+    assert response.status_code == 200
+    assert response.content == b"fresh-jpeg"
+
+    # It tried what it had first, and only asked Plex once that came back empty.
+    assert calls[0] == ("/photo/:/transcode", stale)
+    assert ("/library/metadata/52589", None) in calls
+
+    # The repair is kept, so the next request costs one call rather than three.
+    await db.refresh(mapping)
+    assert mapping.thumb_path == fresh
+    assert mapping.art_path == "/library/metadata/52589/art/1700"
+
+
 async def test_an_unreachable_server_does_not_500_a_poster(authed_client, db):
     from app.models import PlexMapping
     from app.services import plex_server as plex_server_module

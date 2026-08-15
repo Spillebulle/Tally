@@ -29,15 +29,25 @@ async def _isolate_plex_connection_pool():
 
     Both modules pool: `plex_server` for the media server, `plex_tv` for the
     cloud APIs.
+
+    The same applies to everything else the artwork path remembers between
+    requests — which URI answered, and which mappings have already had their
+    artwork path re-asked. Row ids restart at 1 in every test's private
+    database, so those caches collide across tests unless cleared.
     """
-    from app.services.plex_server import close_pool
+    from app.routers.images import reset_repair_state
+    from app.services.plex_server import close_pool, reset_failure_state
     from app.services.plex_tv import close_pool as close_plex_tv_pool
 
-    await close_pool()
-    await close_plex_tv_pool()
+    async def clear():
+        await close_pool()
+        await close_plex_tv_pool()
+        reset_failure_state()
+        reset_repair_state()
+
+    await clear()
     yield
-    await close_pool()
-    await close_plex_tv_pool()
+    await clear()
 
 
 @pytest_asyncio.fixture

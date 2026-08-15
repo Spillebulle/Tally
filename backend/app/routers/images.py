@@ -24,6 +24,7 @@ caller, so this is not an open proxy.
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response, status
@@ -46,10 +47,37 @@ router = APIRouter(prefix="/api/images", tags=["images"])
 # viewer's credentials and must not land in a shared cache.
 CACHE_CONTROL = "private, max-age=604800"
 
+# A 404 is the ordinary answer for an item nothing has artwork for, and every
+# render of every page it appears on asks again — each one costing two requests
+# to Plex before it can say no. Cache the "no" briefly: the tile shows its
+# placeholder either way, and a sync that finds artwork is minutes from being
+# believed rather than instantly.
+MISSING_CACHE_CONTROL = "private, max-age=600"
+
 POSTER = (400, 600)
 BACKDROP = (1280, 720)
 
 _TIMEOUT = 15.0
+
+# Asking Plex where the artwork went costs a metadata request, so it is worth
+# doing occasionally per mapping rather than on every render. Only items that
+# actually failed to produce artwork ever get an entry here.
+_REPAIR_INTERVAL_SECONDS = 900.0
+_repair_attempts: dict[tuple[int, str], float] = {}
+
+
+def reset_repair_state() -> None:
+    """Forget which mappings have been re-asked. For tests."""
+    _repair_attempts.clear()
+
+
+def _due_a_repair(mapping_id: int, attr: str) -> bool:
+    now = time.monotonic()
+    last = _repair_attempts.get((mapping_id, attr))
+    if last is not None and now - last < _REPAIR_INTERVAL_SECONDS:
+        return False
+    _repair_attempts[(mapping_id, attr)] = now
+    return True
 
 
 async def _from_plex_servers(
@@ -84,38 +112,60 @@ async def _from_plex_servers(
         tried = True
 
         path = getattr(mapping, attr)
-        if path is None:
-            # Nothing stored. Library scans fill these in, but only from what the
-            # scan payload happened to carry — an item Plex had not finished
-            # generating artwork for keeps a null path until something rescans
-            # it, which may be never. Ask Plex directly and keep the answer: this
-            # is the one moment we know for certain the row is wrong, and a
-            # single metadata call fixes it permanently.
+        if path:
             try:
-                meta = await client.metadata(mapping.rating_key)
+                fetched = await client.image_bytes(path, width=width, height=height)
             except PlexServerError as exc:
-                log.info("Could not refresh artwork path on %s: %s", server.name, exc)
+                # An unreachable server is ordinary here — it must not turn a
+                # poster into a 500, and there is nothing to repair while it is
+                # unreachable. Try the next one, then fall through to Discover.
+                log.info("Artwork unavailable on %s: %s", server.name, exc)
                 continue
-            if meta:
-                thumb, art = artwork_paths(meta)
-                mapping.thumb_path = thumb or mapping.thumb_path
-                mapping.art_path = art or mapping.art_path
-                repaired = True
-                path = getattr(mapping, attr)
-            if path is None:
-                continue
-            log.info("Recovered %s for item %s from %s", attr, item_id, server.name)
+            if fetched:
+                return fetched, True
 
+        # Either nothing is stored, or what is stored no longer resolves. Those
+        # are the same repairable fault and were not treated as one:
+        #
+        # * Nothing stored — a library scan only records what its payload
+        #   carried, and an item Plex had not finished generating artwork for
+        #   keeps a null path until something rescans it.
+        # * Stored but dead — a Plex artwork path carries a timestamp, so
+        #   replacing a poster in Plex makes the old path 404 while the new one
+        #   sits there unrecorded.
+        #
+        # Both leave a permanently blank tile for one particular title while
+        # everything around it is fine, and both are answered by the same single
+        # metadata call. Only the first was being asked.
+        if not _due_a_repair(mapping.id, attr):
+            continue
         try:
-            fetched = await client.image_bytes(path, width=width, height=height)
+            meta = await client.metadata(mapping.rating_key)
         except PlexServerError as exc:
-            # An unreachable server is ordinary here — it must not turn a poster
-            # into a 500. Try the next one, then fall through to Discover.
+            log.info("Could not refresh artwork path on %s: %s", server.name, exc)
+            continue
+        if not meta:
+            continue
+
+        thumb, art = artwork_paths(meta)
+        if thumb and thumb != mapping.thumb_path:
+            mapping.thumb_path = thumb
+            repaired = True
+        if art and art != mapping.art_path:
+            mapping.art_path = art
+            repaired = True
+
+        fresh = getattr(mapping, attr)
+        if not fresh or fresh == path:
+            continue
+        log.info("Recovered %s for item %s from %s", attr, item_id, server.name)
+        try:
+            fetched = await client.image_bytes(fresh, width=width, height=height)
+        except PlexServerError as exc:
             log.info("Artwork unavailable on %s: %s", server.name, exc)
             continue
         if fetched:
-            if repaired:
-                await db.commit()
+            await db.commit()
             return fetched, True
 
     if repaired:
@@ -175,7 +225,11 @@ async def _serve(
             if not tried_plex and not discover_path
             else "every source refused it",
         )
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No artwork for this item")
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No artwork for this item",
+            headers={"Cache-Control": MISSING_CACHE_CONTROL},
+        )
 
     content, content_type = fetched
     return Response(
