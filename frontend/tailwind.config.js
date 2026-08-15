@@ -57,10 +57,18 @@ export default {
         shimmer: {
           '100%': { transform: 'translateX(100%)' },
         },
+        // A third-width bar travelling the whole track, for progress whose
+        // total is not known yet. It has to *move* — parked at rest it reads
+        // as "33% done".
+        'progress-slide': {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(300%)' },
+        },
       },
       animation: {
         'fade-up': 'fade-up 0.28s cubic-bezier(0.22, 1, 0.36, 1) both',
         shimmer: 'shimmer 1.6s infinite',
+        'progress-slide': 'progress-slide 1.4s cubic-bezier(0.65, 0, 0.35, 1) infinite',
       },
       transitionTimingFunction: {
         spring: 'cubic-bezier(0.22, 1, 0.36, 1)',

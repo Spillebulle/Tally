@@ -487,6 +487,34 @@ async def test_scan_progress_stays_indeterminate_when_the_total_is_unknown(db):
     assert run.progress_total == 0
 
 
+async def test_the_opening_phases_claim_no_progress(db):
+    """A phase that has not measured anything must report an unknown total.
+
+    Regression: the server loop counted servers, so the single-server case set
+    "1 of 1" and painted a full bar before a single item had been read. Which
+    server it is belongs in the phase text; the bar stays indeterminate until
+    a step can count in its own unit.
+    """
+    from app.models import SyncRun
+    from app.services.sync_service import SyncService
+
+    user = User(username="sam", plex_user_id="1")
+    db.add(user)
+    await db.flush()
+    run = SyncRun(user_id=user.id, kind="full")
+    db.add(run)
+    await db.flush()
+
+    service = SyncService(db)
+    service._run = run
+
+    await service._set_phase("Looking for Plex servers")
+    assert (run.progress_current, run.progress_total) == (0, 0)
+
+    await service._set_phase("Reading libraries on BlarrowTV")
+    assert (run.progress_current, run.progress_total) == (0, 0)
+
+
 async def test_a_failing_request_opens_only_one_connection(monkeypatch):
     """Regression: retries must not each build their own HTTP client.
 
