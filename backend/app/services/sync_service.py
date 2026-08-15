@@ -130,12 +130,18 @@ class SyncService:
         self._run.progress_total = total
         await self.db.commit()
 
-    async def _progress(self, current: int, total: int = 0) -> None:
-        """Update the counter within the current phase."""
+    async def _progress(self, current: int, total: int | None = None) -> None:
+        """Update the counter within the current phase.
+
+        ``total=None`` leaves the denominator alone, which is what the per-page
+        updates want. Passing 0 explicitly clears it — that is how a phase says
+        "I do not know how much work I have", and it has to be distinguishable
+        from "don't touch it" or a stale total from the previous phase survives.
+        """
         if self._run is None:
             return
         self._run.progress_current = current
-        if total:
+        if total is not None:
             self._run.progress_total = total
         await self.db.commit()
 
@@ -337,6 +343,16 @@ class SyncService:
             stats.errors.append(f"{server.name}: {exc}")
             return []
 
+        # Cheap, and it only changes when the owner edits it in Plex, so riding
+        # along with the library pass is enough. Non-owners get None back and
+        # leave whatever the owner's sync recorded alone.
+        try:
+            window = await client.on_deck_window_weeks()
+        except PlexServerError:
+            window = None
+        if window is not None:
+            server.on_deck_window_weeks = window
+
         libraries: list[PlexLibrary] = []
         for section in sections:
             section_type = section.get("type")
@@ -389,6 +405,21 @@ class SyncService:
         types = [TYPE_MOVIE] if library.section_type == "movie" else [TYPE_SHOW]
         if library.section_type == "show" and include_episodes:
             types.append(TYPE_EPISODE)
+
+        # The progress counter for this phase counts *items*, so its total has to
+        # be an item count too. Whoever set the phase was counting libraries, and
+        # leaving that total in place reported nonsense like "45233 of 2".
+        # A show library is walked twice (shows, then episodes) and `count` spans
+        # both, so the denominator is the sum. Zero means the server did not say,
+        # which the UI renders as an indeterminate bar rather than a bad number.
+        item_total = 0
+        for item_type in types:
+            try:
+                item_total += await client.section_total(library.section_key, item_type)
+            except PlexServerError:
+                item_total = 0
+                break
+        await self._progress(0, total=item_total)
 
         count = 0
         shows_touched: set[int] = set()
@@ -1078,10 +1109,13 @@ class SyncService:
                     enabled = [library for library in libraries if library.enabled]
                     for position, library in enumerate(enabled, start=1):
                         await self._checkpoint()
+                        # Which library this is goes in the text, not in the
+                        # counter: the counter belongs to sync_library_items,
+                        # which counts items. Two units, one pair of numbers,
+                        # is what produced "45233 of 2".
                         await self._set_phase(
-                            f"Scanning {library.title} on {server.name}",
-                            current=position,
-                            total=len(enabled),
+                            f"Scanning {library.title} on {server.name}"
+                            + (f" ({position} of {len(enabled)})" if len(enabled) > 1 else "")
                         )
                         await self.sync_library_items(user, server, library, stats)
 

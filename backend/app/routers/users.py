@@ -17,6 +17,9 @@ DEFAULT_PREFERENCES = {
     "separate_anime": True,
     "default_view": "grid",
     "theme": "system",
+    # Weeks before something drops off Continue Watching. None follows the Plex
+    # server's own `onDeckWindow`; 0 keeps everything forever.
+    "continue_watching_weeks": None,
 }
 
 
@@ -42,7 +45,10 @@ async def get_preferences(user: CurrentUser) -> dict:
 async def update_preferences(
     payload: UserPreferences, db: DbSession, user: CurrentUser
 ) -> dict:
-    updates = payload.model_dump(exclude_none=True)
+    # exclude_unset, not exclude_none: `continue_watching_weeks: null` means
+    # "follow Plex" and has to survive the round trip. Omitted fields are still
+    # left alone, so this stays a partial update.
+    updates = payload.model_dump(exclude_unset=True)
     # Reassign rather than mutate: SQLAlchemy won't flag an in-place JSON edit.
     user.preferences = {**DEFAULT_PREFERENCES, **(user.preferences or {}), **updates}
     await db.commit()

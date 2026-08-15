@@ -1,21 +1,62 @@
-import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api'
+import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import type { MediaCard, WatchlistEntry } from '@/lib/types'
-import { Poster, PosterSkeleton } from '@/components/Poster'
+import type { MediaCard, PaginatedWatchlist } from '@/lib/types'
+import {
+  BrowseFilters,
+  useBrowseFilters,
+  WATCHLIST_SORTS,
+} from '@/components/BrowseFilters'
+import { Artwork, Poster, PosterSkeleton } from '@/components/Poster'
 import { EmptyState, PageHeader, Segmented, Spinner } from '@/components/ui'
 import { BookmarkIcon, PlusIcon, SearchIcon } from '@/components/Icons'
 
+const PAGE_SIZE = 60
+
+/** The type split, as one control. "Anime" is a flag, the others are a type. */
+const KINDS = [
+  { value: 'all', label: 'All' },
+  { value: 'movie', label: 'Films' },
+  { value: 'show', label: 'Series' },
+  { value: 'anime', label: 'Anime' },
+] as const
+
+type Kind = (typeof KINDS)[number]['value']
+
 export function Watchlist() {
-  const [filter, setFilter] = useState<'all' | 'anime'>('all')
+  const [params] = useSearchParams()
   const [searchOpen, setSearchOpen] = useState(false)
   const queryClient = useQueryClient()
   const { notify } = useToast()
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['watchlist', filter],
-    queryFn: () => api.watchlist.list(filter === 'anime'),
+  // "Recently watchlisted" is the one people mean on this page, so it leads.
+  const filters = useBrowseFilters('watchlist_added')
+  const kind = (params.get('kind') ?? 'all') as Kind
+  const [page, setPage] = useState(0)
+
+  useEffect(() => {
+    setPage(0)
+  }, [JSON.stringify(filters.query), kind])
+
+  const query: MediaQuery = {
+    ...filters.query,
+    media_type: kind === 'movie' || kind === 'show' ? kind : undefined,
+    anime: kind === 'anime' ? 'only' : undefined,
+    offset: page * PAGE_SIZE,
+    limit: PAGE_SIZE,
+  }
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['watchlist', query],
+    queryFn: () => api.watchlist.list(query),
+    placeholderData: keepPreviousData,
+  })
+
+  const genres = useQuery({
+    queryKey: ['genres', 'all'],
+    queryFn: () => api.media.genres('all'),
   })
 
   const remove = useMutation({
@@ -23,25 +64,36 @@ export function Watchlist() {
     // Removal also has to reach Plex, so the round trip is long enough to feel
     // broken. Drop the row straight away and put it back if the write fails.
     onMutate: async (mediaItemId: number) => {
-      await queryClient.cancelQueries({ queryKey: ['watchlist', filter] })
-      const previous = queryClient.getQueryData<WatchlistEntry[]>(['watchlist', filter])
-      queryClient.setQueryData<WatchlistEntry[]>(['watchlist', filter], (old) =>
-        old?.filter((entry) => entry.media_item_id !== mediaItemId),
+      await queryClient.cancelQueries({ queryKey: ['watchlist', query] })
+      const previous = queryClient.getQueryData<PaginatedWatchlist>(['watchlist', query])
+      queryClient.setQueryData<PaginatedWatchlist>(['watchlist', query], (old) =>
+        old
+          ? {
+              ...old,
+              entries: old.entries.filter(
+                (entry) => entry.media_item_id !== mediaItemId,
+              ),
+              total: Math.max(0, old.total - 1),
+            }
+          : old,
       )
       return { previous }
     },
     onSuccess: () => notify('Removed from watchlist — also removed on Plex', 'info'),
     onError: (error: Error, _mediaItemId, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(['watchlist', filter], context.previous)
+        queryClient.setQueryData(['watchlist', query], context.previous)
       }
       notify(error.message, 'error')
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['watchlist'] }),
   })
 
-  const entries = data ?? []
+  const entries = data?.entries ?? []
+  const total = data?.total ?? 0
+  const pageCount = Math.ceil(total / PAGE_SIZE)
   const syncedCount = entries.filter((entry) => entry.synced_with_plex).length
+  const narrowed = filters.active || kind !== 'all' || Boolean(filters.search)
 
   return (
     <div>
@@ -50,18 +102,19 @@ export function Watchlist() {
         subtitle={
           isLoading
             ? 'Loading…'
-            : `${entries.length} ${entries.length === 1 ? 'title' : 'titles'} · ${syncedCount} in sync with Plex`
+            : `${total} ${total === 1 ? 'title' : 'titles'}${
+                filters.genre ? ` in ${filters.genre}` : ''
+              } · ${syncedCount} of ${entries.length} shown in sync with Plex`
         }
         actions={
           <>
             <Segmented
               label="Filter watchlist"
-              value={filter}
-              onChange={setFilter}
-              options={[
-                { value: 'all', label: 'All' },
-                { value: 'anime', label: 'Anime' },
-              ]}
+              value={kind}
+              onChange={(value) =>
+                filters.update('kind', value === 'all' ? null : value)
+              }
+              options={KINDS.map((option) => ({ ...option }))}
             />
             <button
               type="button"
@@ -76,6 +129,13 @@ export function Watchlist() {
 
       {searchOpen && <DiscoverSearch onClose={() => setSearchOpen(false)} />}
 
+      <BrowseFilters
+        state={filters}
+        genres={genres.data ?? []}
+        sorts={WATCHLIST_SORTS}
+        busy={isFetching && !isLoading}
+      />
+
       {isLoading ? (
         <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
           {Array.from({ length: 12 }, (_, index) => (
@@ -83,16 +143,32 @@ export function Watchlist() {
           ))}
         </div>
       ) : entries.length === 0 ? (
-        <EmptyState
-          icon={<BookmarkIcon />}
-          title="Your watchlist is empty"
-          description="Anything you add here shows up on your Plex watchlist too — and anything you add in Plex appears here after the next sync."
-          action={
-            <button type="button" onClick={() => setSearchOpen(true)} className="btn-primary mt-2">
-              <PlusIcon /> Find something to watch
-            </button>
-          }
-        />
+        // An empty page means two different things now: nothing watchlisted at
+        // all, or nothing matching the filters. Telling the user to go add
+        // something when they have 200 titles and a narrow filter would be daft.
+        narrowed ? (
+          <EmptyState
+            icon={<BookmarkIcon />}
+            title="Nothing on your watchlist matches"
+            description="Try widening the filters, or clear them to see everything you have saved."
+            action={
+              <button type="button" onClick={filters.clear} className="btn-outline mt-2">
+                Clear filters
+              </button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={<BookmarkIcon />}
+            title="Your watchlist is empty"
+            description="Anything you add here shows up on your Plex watchlist too — and anything you add in Plex appears here after the next sync."
+            action={
+              <button type="button" onClick={() => setSearchOpen(true)} className="btn-primary mt-2">
+                <PlusIcon /> Find something to watch
+              </button>
+            }
+          />
+        )
       ) : (
         <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
           {entries.map((entry) =>
@@ -120,6 +196,30 @@ export function Watchlist() {
             ) : null,
           )}
         </div>
+      )}
+
+      {pageCount > 1 && (
+        <nav className="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">
+          <button
+            type="button"
+            onClick={() => setPage((value) => Math.max(0, value - 1))}
+            disabled={page === 0}
+            className="btn-outline h-9 px-3 text-sm"
+          >
+            Previous
+          </button>
+          <span className="px-3 text-sm tabular-nums text-muted">
+            Page {page + 1} of {pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
+            disabled={page >= pageCount - 1}
+            className="btn-outline h-9 px-3 text-sm"
+          >
+            Next
+          </button>
+        </nav>
       )}
     </div>
   )
@@ -188,11 +288,12 @@ function DiscoverSearch({ onClose }: { onClose: () => void }) {
               key={card.id}
               className="flex items-center gap-3 rounded-xl border border-line p-2"
             >
-              <div className="h-16 w-11 shrink-0 overflow-hidden rounded-md bg-raised">
-                {card.poster_url && (
-                  <img src={card.poster_url} alt="" className="h-full w-full object-cover" />
-                )}
-              </div>
+              <Artwork
+                src={card.poster_url}
+                title={card.title}
+                showTitle={false}
+                className="h-16 w-11 shrink-0 rounded-md bg-raised"
+              />
               <div className="min-w-0 flex-1">
                 <p className="line-clamp-1 text-sm font-medium text-ink">{card.title}</p>
                 <p className="text-xs text-muted">

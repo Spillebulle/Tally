@@ -4,14 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { MediaCard, WatchStatus } from '@/lib/types'
-import {
-  cn,
-  formatDate,
-  formatRuntime,
-  posterFallbackGradient,
-  relativeTime,
-  STATUS_LABELS,
-} from '@/lib/utils'
+import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/lib/utils'
+import { Artwork } from '@/components/Poster'
 import {
   BookmarkIcon,
   CheckIcon,
@@ -173,19 +167,13 @@ export function ItemDetail() {
   return (
     <div className="-mt-6 sm:-mt-8">
       {/* Backdrop hero */}
-      <div className="relative -mx-4 h-[220px] overflow-hidden sm:-mx-6 sm:h-[320px]">
-        {item.backdrop_url ? (
-          <img
-            src={item.backdrop_url}
-            alt=""
-            className="h-full w-full object-cover object-top"
-          />
-        ) : (
-          <div
-            className="h-full w-full"
-            style={{ background: posterFallbackGradient(item.title) }}
-          />
-        )}
+      <Artwork
+        src={item.backdrop_url}
+        title={item.title}
+        showTitle={false}
+        imgClassName="object-top"
+        className="-mx-4 h-[220px] sm:-mx-6 sm:h-[320px]"
+      >
         {/* Scrim so the title below stays readable over any artwork. */}
         <div className="absolute inset-0 bg-gradient-to-t from-canvas via-canvas/70 to-canvas/20" />
 
@@ -198,20 +186,17 @@ export function ItemDetail() {
         >
           <ChevronLeftIcon /> Back
         </button>
-      </div>
+      </Artwork>
 
       <div className="relative -mt-24 sm:-mt-32">
         <div className="flex flex-col gap-6 sm:flex-row sm:gap-8">
           {/* Poster */}
           <div className="w-32 shrink-0 sm:w-52">
-            <div
-              className="aspect-[2/3] overflow-hidden rounded-2xl bg-raised shadow-lift ring-1 ring-line"
-              style={item.poster_url ? undefined : { background: posterFallbackGradient(item.title) }}
-            >
-              {item.poster_url && (
-                <img src={item.poster_url} alt="" className="h-full w-full object-cover" />
-              )}
-            </div>
+            <Artwork
+              src={item.poster_url}
+              title={item.title}
+              className="aspect-[2/3] rounded-2xl bg-raised shadow-lift ring-1 ring-line"
+            />
           </div>
 
           {/* Headline block */}

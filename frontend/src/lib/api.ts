@@ -16,6 +16,7 @@ import type {
   User,
   UserState,
   WatchEvent,
+  PaginatedWatchlist,
   WatchlistEntry,
   WatchStatus,
 } from './types'
@@ -175,8 +176,9 @@ export const api = {
   },
 
   watchlist: {
-    list: (anime_only = false) =>
-      get<WatchlistEntry[]>('/api/watchlist', { anime_only }),
+    // Same filter surface as /api/media, plus its own "watchlist_added" sort.
+    list: (query: MediaQuery = {}) =>
+      get<PaginatedWatchlist>('/api/watchlist', query),
     add: (media_item_id: number) =>
       post<WatchlistEntry>('/api/watchlist', { media_item_id }),
     addDiscovered: (plex_guid: string) =>

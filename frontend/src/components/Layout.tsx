@@ -126,8 +126,8 @@ export function syncLabel(status: SyncStatus | undefined, starting = false): str
   if (!status?.running) return 'Sync with Plex now'
   if (status.cancel_requested) return 'Cancelling after the current step'
   if (!status.phase) return 'Sync in progress'
-  return status.progress_total > 1
-    ? `${status.phase} (${status.progress_current} of ${status.progress_total})`
+  return status.progress_total > 0
+    ? `${status.phase} — ${status.progress_current} of ${status.progress_total}`
     : status.phase
 }
 
@@ -137,7 +137,8 @@ export function syncLabel(status: SyncStatus | undefined, starting = false): str
  * percentage would be worse than admitting that.
  */
 export function SyncProgress({ status }: { status: SyncStatus }) {
-  const determinate = status.progress_total > 1
+  // A phase with no total reports 0, meaning "unknown" — never divide by it.
+  const determinate = status.progress_total > 0
   const percent = determinate
     ? Math.min(100, Math.round((status.progress_current / status.progress_total) * 100))
     : null
@@ -161,8 +162,11 @@ export function SyncProgress({ status }: { status: SyncStatus }) {
         />
       </div>
       {determinate && (
-        <p className="mt-1 text-[11px] text-muted">
-          {status.progress_current} of {status.progress_total}
+        <p className="mt-1 text-[11px] tabular-nums text-muted">
+          {/* Separators, not compact notation: a counter ticking through
+              "45.2K" for thousands of items looks stuck. */}
+          {status.progress_current.toLocaleString()} of{' '}
+          {status.progress_total.toLocaleString()}
         </p>
       )}
     </div>

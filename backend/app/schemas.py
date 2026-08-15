@@ -69,6 +69,9 @@ class UserPreferences(BaseModel):
     separate_anime: bool | None = None
     default_view: str | None = None
     theme: str | None = None
+    # None is a real value here — "follow the Plex server's onDeckWindow" — so
+    # this endpoint keys off which fields were *sent*, not which are non-null.
+    continue_watching_weeks: int | None = Field(None, ge=0, le=520)
 
 
 class UserUpdate(BaseModel):
@@ -230,6 +233,16 @@ class WatchlistEntryOut(ORMModel):
     item: MediaCard | None = None
 
 
+class PaginatedWatchlist(BaseModel):
+    """Same envelope as PaginatedMedia, but the rows carry watchlist metadata
+    (when it was added, whether Plex has it yet) alongside the card."""
+
+    entries: list[WatchlistEntryOut]
+    total: int
+    offset: int
+    limit: int
+
+
 class WatchlistAdd(BaseModel):
     media_item_id: int | None = None
     # Plex Discover ratingKey, for adding something not on any local server.
@@ -273,6 +286,7 @@ class ServerOut(ORMModel):
     enabled: bool
     last_seen_at: datetime | None
     reachable: bool | None = None
+    on_deck_window_weeks: int | None = None
     libraries: list[LibraryOut] = []
 
 
@@ -309,6 +323,11 @@ class SettingsOut(BaseModel):
     webhook_url: str
     public_url: str
     version: str
+    # What Plex says its own Continue Watching window is, so Settings can name
+    # the number behind "Follow Plex". None until a sync has read it.
+    plex_on_deck_weeks: int | None = None
+    # The window actually in force for this user, in weeks. 0 means no cutoff.
+    continue_watching_weeks: int
 
 
 # --- stats ----------------------------------------------------------------

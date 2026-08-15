@@ -12,7 +12,17 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .db import init_db
-from .routers import auth, history, library, stats, sync, users, watchlist, webhooks
+from .routers import (
+    auth,
+    history,
+    images,
+    library,
+    stats,
+    sync,
+    users,
+    watchlist,
+    webhooks,
+)
 from .services.plex_tv import PlexTVError, PlexUnreachableError
 from .services.scheduler import shutdown_scheduler, start_scheduler
 
@@ -63,6 +73,7 @@ for router in (
     stats.router,
     sync.router,
     webhooks.router,
+    images.router,
 ):
     app.include_router(router)
 

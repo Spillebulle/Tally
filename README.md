@@ -25,7 +25,7 @@ watching now, and syncs ratings and your watchlist in *both* directions.
 | **Sign in with Plex** | OAuth through plex.tv. Tally never sees your password. |
 | **Imports everything** | Your full watch history, libraries, ratings and watchlist. |
 | **Two-way ratings** | Rate here, it appears in Plex. Rate in Plex, it appears here. |
-| **Two-way watchlist** | Add or remove in either place; the other follows. |
+| **Two-way watchlist** | Add or remove in either place; the other follows. Filter and sort it like any other page, including by when you watchlisted something. |
 | **Live "continue watching"** | Picks up mid-episode playback, and the next unwatched episode of anything you have started. |
 | **Anime, separated** | Anime gets its own section, detected from your library layout, metadata agent, genres and MyAnimeList — not just "is it a cartoon". |
 | **Multi-user** | Each account links its own Plex identity and sees its own history and ratings. |
@@ -148,6 +148,22 @@ saw on Plex. That is what lets it tell *which side changed*:
 Watchlist removals are **tombstoned** rather than deleted, so something you remove
 stays removed instead of being re-added by the next pull from Plex.
 
+### Continue Watching
+
+Plex drops an item off On Deck once you have not touched it for a while —
+**Settings → Library → "Weeks to consider for On Deck and Continue Watching"**,
+16 weeks by default. Tally reads that setting from your server and applies the
+same window, so a show you stopped watching three years ago does not sit at the
+top of the dashboard forever.
+
+**Settings → Continue Watching** lets you pick your own window instead, or turn
+the cut-off off entirely. Nothing is deleted either way: an item that drops off
+the shelf keeps its progress, and stays in your library, history and stats.
+
+Only the server owner's token may read the setting from Plex, so on a server
+shared with you Tally falls back to Plex's own default of 16 weeks until the
+owner syncs.
+
 ### Live updates (optional, needs Plex Pass)
 
 Plex can notify Tally the instant something is played instead of waiting for the
@@ -261,6 +277,18 @@ the host.
 
 **Posters are missing or low quality**
 Add a `TMDB_API_KEY` and restart, then run a full re-import from Settings.
+
+Artwork from Plex is fetched through Tally rather than linked to directly, so it
+works from anywhere Tally itself is reachable — a poster no longer breaks because
+it was saved with a LAN address. Images are cached by your browser for a week.
+
+Note that the Movies and Shows grids sort by **Added, newest first** by default,
+so anything imported in one early batch sits together on the last pages — which
+is why missing artwork tends to look like "one whole page is blank". Titles that
+are on no Plex server (watchlist entries, things you watched before the file was
+removed) have no artwork on your server to borrow, so they lean on Plex Discover
+and TMDB. Tally retries the metadata providers once a week for anything still
+without a poster.
 
 **A show is in the wrong section**
 Cycle the library's *Anime* override in Settings, or press **Re-detect** under

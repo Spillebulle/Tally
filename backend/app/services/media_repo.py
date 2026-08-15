@@ -8,7 +8,7 @@ by different agents, and also show up on the plex.tv watchlist with only a
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -21,6 +21,10 @@ from .metadata.anime import library_looks_like_anime
 from .plex_server import PlexServerClient
 
 log = logging.getLogger(__name__)
+
+# How long to leave an item alone before asking the metadata providers again
+# about artwork they did not have last time.
+ARTWORK_RETRY_INTERVAL = timedelta(days=7)
 
 _PLEX_TYPE_TO_MEDIA = {
     "movie": MediaType.MOVIE,
@@ -45,6 +49,18 @@ def _parse_date(value: Any) -> date | None:
 
 def _plex_genres(meta: dict[str, Any]) -> list[str]:
     return [g["tag"] for g in meta.get("Genre") or [] if isinstance(g, dict) and g.get("tag")]
+
+
+def _artwork_paths(meta: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(thumb, art) paths for a Plex item, inheriting from its parents.
+
+    An episode with no artwork of its own borrows its season's, then its show's
+    — the same chain Plex's own clients walk. These are paths, not URLs: see
+    `routers/images.py` for why a URL would be wrong.
+    """
+    thumb = meta.get("thumb") or meta.get("parentThumb") or meta.get("grandparentThumb")
+    art = meta.get("art") or meta.get("grandparentArt")
+    return (str(thumb) if thumb else None, str(art) if art else None)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -194,15 +210,11 @@ class MediaRepository:
             else:
                 item.parent_id = show.id
 
-        # Plex artwork is a good fallback but requires a token, so external
-        # provider art is preferred when available.
-        if client is not None:
-            thumb = meta.get("thumb") or meta.get("parentThumb") or meta.get("grandparentThumb")
-            if not item.poster_url and thumb:
-                item.poster_url = client.image_url(thumb)
-            art = meta.get("art") or meta.get("grandparentArt")
-            if not item.backdrop_url and art:
-                item.backdrop_url = client.image_url(art, width=1280, height=720)
+        # Plex artwork is not stored as a URL: one to this server carries a
+        # token, and every Tally account reads the same MediaItem row. The path
+        # lives on the PlexMapping (it is per-server) and is fetched per viewer
+        # by `routers/images.py`. External provider art still wins when there is
+        # any, because it needs no token and no reachable server.
 
         await self.db.flush()
         self._by_guid_key[guid_key] = item
@@ -210,14 +222,39 @@ class MediaRepository:
         # --- external enrichment -----------------------------------------
         should_enrich = self.enrich if enrich is None else enrich
         if should_enrich and media_type in (MediaType.MOVIE, MediaType.SHOW):
-            needs_refresh = created or item.metadata_updated_at is None
-            if needs_refresh:
+            plex_thumb, _ = _artwork_paths(meta)
+            if self._needs_enrichment(item, created, plex_thumb=plex_thumb):
                 await self._apply_enrichment(item, ids=ids, library=library, genres=genres)
         elif created and media_type == MediaType.SHOW and library is not None:
             item.is_anime = library_looks_like_anime(library.title)
 
         await self._link_mapping(item, meta, server=server, library=library, ids=ids)
         return item
+
+    @staticmethod
+    def _needs_enrichment(
+        item: MediaItem, created: bool, *, plex_thumb: str | None = None
+    ) -> bool:
+        """Whether it is worth asking the external providers about this item.
+
+        Enrichment stamps ``metadata_updated_at`` even when it comes back with
+        nothing, so a pass made while TMDB was unconfigured — or while it was
+        rate-limiting — used to mark an item done forever with no artwork. An
+        item that still has no artwork from *any* source is therefore worth one
+        more try: for anything outside a scanned library, the providers are its
+        only source.
+
+        ``plex_thumb`` is the artwork path from the payload being imported. It
+        counts as artwork, so a library that Plex has posters for does not drag
+        the whole catalogue through a provider lookup every week.
+        """
+        if created or item.metadata_updated_at is None:
+            return True
+        if item.poster_url or item.discover_thumb_path or plex_thumb:
+            return False
+        # Bounded, though: a title the providers genuinely have nothing for
+        # would otherwise be re-queried on every sync, forever. Once a week.
+        return item.metadata_updated_at < utcnow() - ARTWORK_RETRY_INTERVAL
 
     async def _apply_enrichment(
         self,
@@ -394,8 +431,9 @@ class MediaRepository:
         mapping.library_id = library.id if library else mapping.library_id
         mapping.guid = meta.get("guid") or mapping.guid
         mapping.plex_guid = ids.plex_guid or mapping.plex_guid
-        mapping.thumb_path = meta.get("thumb") or mapping.thumb_path
-        mapping.art_path = meta.get("art") or mapping.art_path
+        thumb, art = _artwork_paths(meta)
+        mapping.thumb_path = thumb or mapping.thumb_path
+        mapping.art_path = art or mapping.art_path
 
         from .plex_server import _ts
 
@@ -438,15 +476,29 @@ class MediaRepository:
         item.imdb_id = item.imdb_id or ids.imdb_id
         if genres := _plex_genres(meta):
             item.genres = sorted({*(item.genres or []), *genres})
-        # Discover artwork is served from plex.tv and needs no server token.
-        if not item.poster_url and meta.get("thumb"):
-            thumb = str(meta["thumb"])
-            item.poster_url = thumb if thumb.startswith("http") else None
+        # Discover artwork comes back as a path relative to the host that served
+        # the payload, not an absolute URL, and fetching it needs a plex.tv
+        # token. Keep the bare path — it is proxied per viewer by
+        # `routers/images.py`. Dropping it (which this used to do) left every
+        # watchlist-only title with no artwork at all, permanently: nothing
+        # re-visits an item that no library scan can see.
+        for key, url_attr, path_attr in (
+            ("thumb", "poster_url", "discover_thumb_path"),
+            ("art", "backdrop_url", "discover_art_path"),
+        ):
+            value = meta.get(key)
+            if not value or getattr(item, url_attr) or getattr(item, path_attr):
+                continue
+            value = str(value)
+            if value.startswith("http"):
+                setattr(item, url_attr, value)
+            else:
+                setattr(item, path_attr, value)
 
         await self.db.flush()
         self._by_guid_key[guid_key] = item
 
-        if self.enrich and (created or item.metadata_updated_at is None):
+        if self.enrich and self._needs_enrichment(item, created):
             await self._apply_enrichment(item, ids=ids, library=None, genres=item.genres or [])
         return item
 

@@ -220,10 +220,61 @@ class PlexServerClient:
         """Server-side account list. Maps plex.tv users to server accountIDs."""
         return (await self._container("/accounts")).get("Account", []) or []
 
+    async def preferences(self) -> dict[str, Any]:
+        """Server settings, keyed by their Plex id.
+
+        Only the owner's token may read these. A shared user gets a 403 with an
+        HTML body, which `_get_json` turns into an empty container — so an empty
+        dict means "not allowed to ask" as much as "nothing set".
+        """
+        raw = (await self._container("/:/prefs")).get("Setting", []) or []
+        return {entry["id"]: entry.get("value") for entry in raw if entry.get("id")}
+
+    async def on_deck_window_weeks(self) -> int | None:
+        """Plex's "Weeks to consider for On Deck and Continue Watching".
+
+        This is the setting that makes a show you stopped watching two years ago
+        fall off the Plex hub; Tally mirrors it so Continue Watching agrees with
+        Plex. Defaults to 16 on the server side. `None` means the server did not
+        tell us, usually because this is not the owner's token.
+        """
+        prefs = await self.preferences()
+        value = prefs.get("onDeckWindow")
+        if value is None:
+            # Ids are stable but the casing is not documented anywhere.
+            value = next(
+                (v for k, v in prefs.items() if k.lower() == "ondeckwindow"), None
+            )
+        try:
+            weeks = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return weeks if weeks >= 0 else None
+
     # -- libraries --------------------------------------------------------
 
     async def sections(self) -> list[dict[str, Any]]:
         return (await self._container("/library/sections")).get("Directory", []) or []
+
+    async def section_total(self, section_key: str, item_type: int) -> int:
+        """How many items of one type a section holds, without fetching any.
+
+        Asking for a zero-length container still reports `totalSize`, so this is
+        one cheap request. Returns 0 when the server does not say — the caller
+        must treat that as "unknown", not as "empty".
+        """
+        container = await self._container(
+            f"/library/sections/{section_key}/all",
+            {
+                "type": item_type,
+                "X-Plex-Container-Start": 0,
+                "X-Plex-Container-Size": 0,
+            },
+        )
+        try:
+            return max(0, int(container.get("totalSize")))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
 
     async def iter_section_items(
         self, section_key: str, item_type: int, page_size: int = 200
@@ -382,27 +433,34 @@ class PlexServerClient:
 
     # -- helpers ----------------------------------------------------------
 
-    def image_url(self, path: str | None, *, width: int = 400, height: int = 600) -> str | None:
-        """Build a transcoded image URL so we serve right-sized posters."""
+    async def image_bytes(
+        self, path: str | None, *, width: int = 400, height: int = 600
+    ) -> tuple[bytes, str] | None:
+        """Fetch a right-sized image, returning (bytes, content-type).
+
+        This deliberately returns bytes rather than a URL. A URL to this server
+        carries `X-Plex-Token`, and artwork URLs get stored on rows that every
+        Tally account can read — see `routers/images.py`. Going through
+        `_request` also means artwork inherits the connection failover and the
+        unreachable-server backoff instead of the browser hanging on a LAN
+        address it cannot route to.
+        """
         if not path:
             return None
-        base = self.working_url or self.base_url
-        if not base:
-            return None
-        from urllib.parse import quote, urlencode
-
-        query = urlencode(
-            {
+        resp = await self._request(
+            "GET",
+            "/photo/:/transcode",
+            params={
                 "width": width,
                 "height": height,
                 "minSize": 1,
                 "upscale": 1,
                 "url": path,
-                "X-Plex-Token": self.token,
             },
-            quote_via=quote,
         )
-        return f"{base}/photo/:/transcode?{query}"
+        if resp is None or resp.status_code >= 400:
+            return None
+        return resp.content, resp.headers.get("content-type", "image/jpeg")
 
 
 __all__ = [
