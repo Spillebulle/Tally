@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  AppVersion,
   AuthStatus,
   ContinueWatchingItem,
   HistoryPage,
@@ -231,6 +232,7 @@ export const api = {
   },
 
   settings: {
+    version: () => get<AppVersion>('/api/version'),
     get: () => get<AppSettings>('/api/settings'),
     preferences: () => get<Record<string, unknown>>('/api/users/me/preferences'),
     updatePreferences: (body: Record<string, unknown>) =>

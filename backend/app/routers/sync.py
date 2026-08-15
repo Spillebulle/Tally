@@ -29,6 +29,7 @@ from ..schemas import (
     SettingsOut,
     SyncRequest,
     SyncRunOut,
+    VersionOut,
 )
 from ..services import on_deck
 from ..services.metadata import get_metadata_service
@@ -375,6 +376,27 @@ async def scan_library(
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
+
+
+# Where this build came from. Properties of the project rather than of the
+# deployment, so they are constants — there is nothing here an operator would
+# want to point somewhere else.
+GITHUB_URL = "https://github.com/Spillebulle/Tally"
+DOCKERHUB_URL = "https://hub.docker.com/r/spillebulle/tally"
+
+
+@router.get("/version", response_model=VersionOut)
+async def app_version() -> VersionOut:
+    """Version and project links, for the footer.
+
+    Public, like `/api/health`: the footer renders before anything is signed in,
+    and none of this is private — the version is already in the health payload.
+    """
+    return VersionOut(
+        version=VERSION,
+        github_url=GITHUB_URL,
+        dockerhub_url=DOCKERHUB_URL,
+    )
 
 
 @router.get("/settings", response_model=SettingsOut)

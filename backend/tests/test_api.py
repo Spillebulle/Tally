@@ -967,6 +967,20 @@ async def test_an_api_key_cannot_be_revoked_by_another_account(authed_client, cl
     assert (await client.get("/api/keys")).json() == []
 
 
+async def test_version_endpoint_is_public_and_matches_the_package(bare_client):
+    """The footer renders before sign-in, so this must not need a session."""
+    from app import __version__
+
+    response = await bare_client.get("/api/version")
+    assert response.status_code == 200
+
+    body = response.json()
+    # The one source of truth — a drifting copy here would be worse than none.
+    assert body["version"] == __version__
+    assert body["github_url"].startswith("https://github.com/")
+    assert body["dockerhub_url"].startswith("https://hub.docker.com/")
+
+
 async def test_preferences_round_trip(authed_client):
     updated = await authed_client.put(
         "/api/users/me/preferences", json={"sync_ratings": False}

@@ -337,6 +337,12 @@ class ProvidersStatus(BaseModel):
     jikan: bool
 
 
+class VersionOut(BaseModel):
+    version: str
+    github_url: str
+    dockerhub_url: str
+
+
 class SettingsOut(BaseModel):
     providers: ProvidersStatus
     sync_interval_minutes: int
