@@ -146,6 +146,17 @@ underneath. That is why the placeholder is a *layer* and not an else-branch.
 `PlexServerClient` therefore has `image_bytes()`, not an `image_url()`. Do not
 reintroduce one.
 
+The rule is about URLs **stored and handed to a browser**. A server-side request
+from Tally to Plex may carry the token in its query, and `/photo/:/transcode`
+requires it there: the transcoder resolves its `url=` parameter with a fetch of
+its own, which does not inherit the outer request's headers. Header-only auth
+gets the transcode refused.
+
+Artwork also passes `record_failures=False` to `_request`. It is high-volume and
+best-effort — dozens of requests per page — and must not be able to trip the
+unreachable-server backoff and take the sync down with it. It still *honours* an
+existing backoff, so a server that is genuinely down fails fast.
+
 ### `progress_current` and `progress_total` must be the same unit
 
 A `SyncRun` has exactly one counter pair, shared by every phase. Whoever sets the
@@ -275,7 +286,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 63 tests
+cd backend && .venv/bin/python -m pytest -q     # 66 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
