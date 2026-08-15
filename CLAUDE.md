@@ -23,7 +23,9 @@ backend/app/
 ├── db.py              engine, session, create_all + light migrations
 ├── security.py        JWT sessions, Fernet token encryption, bcrypt
 ├── serializers.py     ORM → API payloads (bulk helpers avoid N+1)
+├── media_filters.py   browse filters + sorting, shared by grid and watchlist
 ├── routers/           HTTP layer, thin
+│   └── images.py      artwork proxy — Plex art needs a token, URLs must not
 └── services/
     ├── plex_tv.py     plex.tv cloud: OAuth PINs, resources, Discover watchlist
     ├── plex_server.py one Plex Media Server: libraries, history, sessions, writes
@@ -32,10 +34,11 @@ backend/app/
     ├── sync_service.py the two-way engine
     ├── webhooks.py    Plex Pass webhook ingestion
     ├── scheduler.py   APScheduler jobs
+    ├── on_deck.py     how long something stays in Continue Watching
     └── metadata/      TMDB, TVDB, MAL/Jikan + anime classifier
 frontend/src/
 ├── pages/             one file per screen
-├── components/        Poster, Charts, Layout, Icons, ui
+├── components/        Poster/Artwork, BrowseFilters, Charts, Layout, Icons, ui
 └── lib/               api client, types, contexts, utils
 ```
 
@@ -120,6 +123,63 @@ Seasons and episodes copy `is_anime` / `anime_source` from their show. Anything
 that reclassifies must cascade to children — see `_reclassify_library` and the
 admin reclassify job.
 
+### A token must never be stored in an artwork URL
+
+`MediaItem` rows are **global** — one row serves every Tally account. Anything
+written into `poster_url` / `backdrop_url` is handed to every user and ends up in
+their browser history, so a URL carrying `X-Plex-Token` leaks that token across
+accounts. `poster_url` is for **credential-free external URLs only** (TMDB and
+friends). Everything from Plex is stored as a bare path and fetched per viewer by
+`routers/images.py`:
+
+| Source | Where the path lives | Token used |
+|---|---|---|
+| Plex Media Server | `PlexMapping.thumb_path` / `art_path` | that viewer's server token |
+| Plex Discover | `MediaItem.discover_thumb_path` / `discover_art_path` | that viewer's plex.tv token |
+
+Build payload URLs through `serializers.poster_for()` / `backdrop_for()` rather
+than reading `item.poster_url` directly. They always return a URL, because
+whether artwork exists is not knowable without a query per card — the proxy
+answers 404 and the frontend `Artwork` component reveals the placeholder
+underneath. That is why the placeholder is a *layer* and not an else-branch.
+
+`PlexServerClient` therefore has `image_bytes()`, not an `image_url()`. Do not
+reintroduce one.
+
+### `progress_current` and `progress_total` must be the same unit
+
+A `SyncRun` has exactly one counter pair, shared by every phase. Whoever sets the
+phase owns both numbers, and a step that later reports its own count must set its
+own denominator with it — `_progress(n, total=…)`. Setting only the numerator
+leaves the previous phase's total in place, which is how the library scan came to
+report **"45233 of 2"**: the phase counted libraries, the scan counted items.
+
+Anything that belongs to the phase rather than to the counter — which library of
+how many — goes in the phase *text*.
+
+`total=0` means "unknown" and renders as an indeterminate bar; that is why
+`_progress` takes `total: int | None` and treats `None` (leave alone) as
+different from `0` (clear it).
+
+### The browse filters live in one place, on both sides
+
+The media grid and the watchlist browse the same rows with the same controls.
+The query building is shared in `media_filters.py` (`MediaFilters` is a FastAPI
+dependency, so declaring it gives an endpoint the whole parameter set), and the
+UI in `components/BrowseFilters.tsx`. Add a filter to those and both pages get
+it; add it to one router and the pages silently disagree.
+
+Each page still owns its own `sort`/`order`, because the valid sorts and the
+sensible default differ — the watchlist has `watchlist_added` (when *you*
+watchlisted it, `WatchlistEntry.added_at`) and opens on it, which is a different
+date from `added` (when it reached your library, `MediaItem.created_at`). Keep
+them distinct; collapsing them loses the only ordering that page actually wants.
+
+`media_filters.py` must **not** get `from __future__ import annotations` —
+FastAPI resolves `MediaFilters.__init__`'s annotations at import time to build
+the query parameters, and stringised annotations leave it with unresolvable
+forward references at request time.
+
 ### Tokens are encrypted at rest
 
 Plex auth tokens grant full account access, so they are Fernet-encrypted with a
@@ -149,6 +209,13 @@ re-link. Never log a decrypted token.
 * **Writes are GETs** with `identifier=com.plexapp.plugins.library`:
   `/:/scrobble`, `/:/unscrobble`, `/:/rate?rating=0-10`, `/:/progress`.
   Ratings are 0–10; the Plex UI renders 5 stars. There is no "unrate" — send 0.
+* **`/:/prefs` is owner-only.** Server settings come back as `Setting` elements
+  keyed by `id`; a non-owner token gets a 403 with an HTML body, which
+  `_get_json` quietly turns into `{}`. So "empty" means "not allowed to ask" as
+  much as "nothing set" — treat a missing value as unknown, never as zero.
+  `onDeckWindow` (weeks, default 16) is the Continue Watching cut-off; Plex reads
+  0 as "switch On Deck off", Tally reads it as "no cut-off", because an empty
+  shelf reads as a broken page. See `services/on_deck.py`.
 * **Discover / watchlist is reverse-engineered.** `discover.provider.plex.tv`
   for `/library/sections/watchlist/all`, `/actions/addToWatchlist`,
   `/actions/removeFromWatchlist` (they want the bare ratingKey from a `plex://`
@@ -208,7 +275,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 38 tests
+cd backend && .venv/bin/python -m pytest -q     # 63 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
@@ -277,6 +344,11 @@ the built-in `GITHUB_TOKEN`.
   for additive columns. A single-file SQLite database the user owns does not
   justify the dependency. If a destructive migration ever becomes necessary,
   revisit — but additive columns go in that list.
+  The one non-additive step is `_scrub_token_bearing_artwork()`, which clears
+  the old token-carrying `poster_url` values so the proxy can take over. It is
+  idempotent and rebuilt by the next library scan; anything else that has to
+  *change* data needs the same treatment — a named function, a reason, and no
+  dependence on running exactly once.
 * **`create_all()` at startup**, not a migration step.
 * **bcrypt pinned to 4.0.1** — passlib 1.7.4 reads `bcrypt.__about__`, which
   bcrypt ≥ 4.1 removed. Unpinning brings back a traceback on every hash.

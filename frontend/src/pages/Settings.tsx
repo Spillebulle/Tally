@@ -56,6 +56,10 @@ export function Settings() {
     mutationFn: (body: Record<string, unknown>) => api.settings.updatePreferences(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['preferences'] })
+      // The Continue Watching window is a preference, so both the settings
+      // payload that reports it and the shelf itself are now stale.
+      queryClient.invalidateQueries({ queryKey: ['app-settings'] })
+      queryClient.invalidateQueries({ queryKey: ['continue-watching'] })
       void refresh()
     },
     onError: (error: Error) => notify(error.message, 'error'),
@@ -264,6 +268,23 @@ export function Settings() {
         </p>
       </Section>
 
+      {/* --- Continue Watching ------------------------------------------ */}
+      <Section
+        title="Continue Watching"
+        description="How long a half-finished film or a show you stopped mid-season keeps its place on the dashboard."
+      >
+        <ContinueWatchingWindow
+          value={
+            typeof prefs.continue_watching_weeks === 'number'
+              ? prefs.continue_watching_weeks
+              : null
+          }
+          plexWeeks={settings.data?.plex_on_deck_weeks ?? null}
+          effectiveWeeks={settings.data?.continue_watching_weeks ?? null}
+          onChange={(weeks) => updatePreference.mutate({ continue_watching_weeks: weeks })}
+        />
+      </Section>
+
       {/* --- Anime ------------------------------------------------------ */}
       <Section
         title="Anime"
@@ -363,6 +384,69 @@ export function Settings() {
           </div>
         </dl>
       </Section>
+    </div>
+  )
+}
+
+/** Weeks offered as an explicit override, alongside "follow Plex" and "never". */
+const WINDOW_CHOICES = [2, 4, 8, 16, 26, 52]
+
+const weekLabel = (weeks: number) => `${weeks} ${weeks === 1 ? 'week' : 'weeks'}`
+
+function plexSummary(plexWeeks: number | null) {
+  if (plexWeeks === null) {
+    return 'Plex has not told Tally its own setting yet — only the server owner can read it, and it arrives with the next sync. Until then Tally uses Plex’s default of 16 weeks.'
+  }
+  if (plexWeeks === 0) {
+    return 'Plex has On Deck switched off entirely (0 weeks). Tally reads that as no cut-off rather than an empty shelf.'
+  }
+  return `Plex’s “Weeks to consider for On Deck and Continue Watching” is set to ${weekLabel(plexWeeks)}.`
+}
+
+function inForceSummary(effectiveWeeks: number | null) {
+  if (effectiveWeeks === null) return ''
+  if (effectiveWeeks === 0) return 'Nothing is being hidden.'
+  return `Anything you have not touched in ${weekLabel(effectiveWeeks)} drops off the shelf — it stays in your library and history.`
+}
+
+function ContinueWatchingWindow({
+  value,
+  plexWeeks,
+  effectiveWeeks,
+  onChange,
+}: {
+  /** null = follow the Plex server, 0 = never hide anything. */
+  value: number | null
+  plexWeeks: number | null
+  effectiveWeeks: number | null
+  onChange: (weeks: number | null) => void
+}) {
+  return (
+    <div>
+      <label htmlFor="cw-window" className="label">
+        Drop off after
+      </label>
+      <select
+        id="cw-window"
+        className="input mt-1.5"
+        value={value === null ? 'plex' : String(value)}
+        onChange={(event) =>
+          onChange(event.target.value === 'plex' ? null : Number(event.target.value))
+        }
+      >
+        <option value="plex">
+          Match Plex{plexWeeks !== null ? ` — ${plexWeeks} weeks` : ''}
+        </option>
+        {WINDOW_CHOICES.map((weeks) => (
+          <option key={weeks} value={weeks}>
+            {weeks} weeks
+          </option>
+        ))}
+        <option value="0">Never — keep everything</option>
+      </select>
+      <p className="mt-2 text-xs text-muted">
+        {plexSummary(plexWeeks)} {inForceSummary(effectiveWeeks)}
+      </p>
     </div>
   )
 }

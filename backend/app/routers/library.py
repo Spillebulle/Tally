@@ -1,12 +1,19 @@
 """Browsing, searching and per-item state changes."""
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
-from sqlalchemy import String, and_, cast, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import and_, func, or_, select, true
 
 from ..deps import CurrentUser, DbSession
+from ..media_filters import (
+    AnimeFilter,
+    MediaFilters,
+    SortField,
+    SortOrder,
+    apply_filters,
+)
 from ..models import (
     MediaItem,
     MediaType,
@@ -27,6 +34,7 @@ from ..schemas import (
 )
 from ..serializers import (
     episode_progress,
+    poster_for,
     progress_percent,
     show_titles_for,
     states_for,
@@ -34,121 +42,32 @@ from ..serializers import (
     to_detail,
     watchlist_ids,
 )
+from ..services import on_deck
 from ..services.sync_service import SyncService
 
 router = APIRouter(prefix="/api/media", tags=["media"])
-
-AnimeFilter = Literal["all", "only", "exclude"]
-SortField = Literal["title", "year", "added", "watched", "rating", "release"]
 
 
 @router.get("", response_model=PaginatedMedia)
 async def list_media(
     db: DbSession,
     user: CurrentUser,
-    q: str | None = None,
-    media_type: MediaType | None = None,
-    anime: AnimeFilter = "all",
-    watch_status: WatchStatus | None = None,
-    genre: str | None = None,
-    year: int | None = None,
-    unwatched: bool = False,
-    favorites: bool = False,
-    on_plex: bool | None = None,
-    # Your own rating, on Plex's 0-10 scale. Both bounds are inclusive, so
-    # min_rating=8 is "8 and up" and min=max=10 is "only tens".
-    min_rating: float | None = Query(None, ge=0, le=10),
-    max_rating: float | None = Query(None, ge=0, le=10),
+    filters: Annotated[MediaFilters, Depends()],
     sort: SortField = "title",
-    order: Literal["asc", "desc"] = "asc",
+    order: SortOrder = "asc",
     offset: int = Query(0, ge=0),
     limit: int = Query(60, ge=1, le=200),
 ) -> PaginatedMedia:
     """Main browse endpoint. Seasons and episodes are excluded by default —
     they're reached through a show's detail page instead of the top-level grid."""
-    conditions = []
-    if media_type is not None:
-        conditions.append(MediaItem.media_type == media_type)
-    else:
-        conditions.append(MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]))
-
-    if anime == "only":
-        conditions.append(MediaItem.is_anime.is_(True))
-    elif anime == "exclude":
-        conditions.append(MediaItem.is_anime.is_(False))
-
-    if q:
-        pattern = f"%{q.strip()}%"
-        conditions.append(
-            or_(
-                MediaItem.title.ilike(pattern),
-                MediaItem.original_title.ilike(pattern),
-                MediaItem.sort_title.ilike(pattern),
-            )
-        )
-    if genre:
-        # genres is a JSON array; a LIKE on its text form is the portable filter
-        # for SQLite and is fast enough at self-hosted library sizes.
-        conditions.append(cast(MediaItem.genres, String).ilike(f'%"{genre}"%'))
-    if year:
-        conditions.append(MediaItem.year == year)
-
-    stmt = select(MediaItem).where(and_(*conditions))
-    count_stmt = select(func.count(MediaItem.id)).where(and_(*conditions))
-
-    rated = min_rating is not None or max_rating is not None
-    needs_state_join = bool(
-        watch_status or unwatched or favorites or rated or sort in ("watched", "rating")
+    stmt, count_stmt = apply_filters(
+        select(MediaItem),
+        select(func.count(MediaItem.id)),
+        filters,
+        user.id,
+        sort=sort,
+        order=order,
     )
-    if needs_state_join:
-        join_on = and_(
-            UserMediaState.media_item_id == MediaItem.id,
-            UserMediaState.user_id == user.id,
-        )
-        # LEFT JOIN so "unwatched" can match rows with no state at all.
-        stmt = stmt.outerjoin(UserMediaState, join_on)
-        count_stmt = count_stmt.outerjoin(UserMediaState, join_on)
-
-        extra = []
-        if watch_status is not None:
-            extra.append(UserMediaState.status == watch_status)
-        if unwatched:
-            extra.append(
-                or_(
-                    UserMediaState.id.is_(None),
-                    UserMediaState.view_count == 0,
-                )
-            )
-        if favorites:
-            extra.append(UserMediaState.is_favorite.is_(True))
-        if min_rating is not None:
-            extra.append(UserMediaState.rating >= min_rating)
-        if max_rating is not None:
-            extra.append(UserMediaState.rating <= max_rating)
-        if rated:
-            # The LEFT JOIN above lets unrated rows through with a NULL rating,
-            # and NULL comparisons are neither true nor false, so say it plainly.
-            extra.append(UserMediaState.rating.is_not(None))
-        if extra:
-            stmt = stmt.where(and_(*extra))
-            count_stmt = count_stmt.where(and_(*extra))
-
-    if on_plex is not None:
-        exists = select(PlexMapping.id).where(PlexMapping.media_item_id == MediaItem.id)
-        clause = exists.exists() if on_plex else ~exists.exists()
-        stmt = stmt.where(clause)
-        count_stmt = count_stmt.where(clause)
-
-    sort_columns = {
-        "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
-        "year": MediaItem.year,
-        "added": MediaItem.created_at,
-        "release": MediaItem.first_aired,
-        "watched": UserMediaState.last_watched_at if needs_state_join else MediaItem.created_at,
-        "rating": UserMediaState.rating if needs_state_join else MediaItem.community_rating,
-    }
-    column = sort_columns[sort]
-    stmt = stmt.order_by(column.desc().nulls_last() if order == "desc" else column.asc())
 
     total = int(await db.scalar(count_stmt) or 0)
     result = await db.execute(stmt.offset(offset).limit(limit))
@@ -184,7 +103,22 @@ async def list_genres(db: DbSession, user: CurrentUser, anime: AnimeFilter = "al
 async def continue_watching(
     db: DbSession, user: CurrentUser, limit: int = Query(20, ge=1, le=50)
 ) -> list[ContinueWatchingItem]:
-    """Partially-watched items plus the next unwatched episode of started shows."""
+    """Partially-watched items plus the next unwatched episode of started shows.
+
+    Anything last touched before the On Deck window falls off, the way it does
+    on Plex — see `services/on_deck.py`.
+    """
+    stale_before = await on_deck.cutoff(db, user)
+    # A row with no timestamp at all cannot be judged stale, so it stays.
+    fresh_enough = (
+        true()
+        if stale_before is None
+        else or_(
+            UserMediaState.last_watched_at.is_(None),
+            UserMediaState.last_watched_at >= stale_before,
+        )
+    )
+
     result = await db.execute(
         select(UserMediaState, MediaItem)
         .join(MediaItem, MediaItem.id == UserMediaState.media_item_id)
@@ -193,6 +127,7 @@ async def continue_watching(
             UserMediaState.progress_ms.is_not(None),
             UserMediaState.progress_ms > 0,
             MediaItem.media_type.in_([MediaType.MOVIE, MediaType.EPISODE]),
+            fresh_enough,
         )
         .order_by(UserMediaState.last_watched_at.desc().nulls_last())
         .limit(limit)
@@ -231,6 +166,7 @@ async def continue_watching(
                 UserMediaState.user_id == user.id,
                 UserMediaState.status == WatchStatus.WATCHING,
                 MediaItem.media_type == MediaType.SHOW,
+                fresh_enough,
             )
             .order_by(UserMediaState.last_watched_at.desc().nulls_last())
             .limit(remaining * 3)
@@ -389,7 +325,7 @@ async def get_children(
                 media_type=MediaType.SEASON,
                 title=f"Season {number}" if number else "Specials",
                 year=None,
-                poster_url=item.poster_url,
+                poster_url=poster_for(item),
                 is_anime=item.is_anime,
                 season_number=number,
                 show_id=item.id,

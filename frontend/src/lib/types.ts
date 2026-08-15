@@ -120,6 +120,13 @@ export interface WatchlistEntry {
   item: MediaCard | null
 }
 
+export interface PaginatedWatchlist {
+  entries: WatchlistEntry[]
+  total: number
+  offset: number
+  limit: number
+}
+
 export interface StatCount {
   label: string
   value: number
@@ -197,6 +204,10 @@ export interface AppSettings {
   webhook_url: string
   public_url: string
   version: string
+  /** What Plex reports as its own On Deck window. Null until a sync has read it. */
+  plex_on_deck_weeks: number | null
+  /** The window actually in force, in weeks. 0 means nothing is ever aged out. */
+  continue_watching_weeks: number
 }
 
 export interface AuthStatus {

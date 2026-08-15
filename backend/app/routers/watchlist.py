@@ -1,12 +1,20 @@
 """Watchlist endpoints, mirrored to the Plex Discover watchlist."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
-from sqlalchemy import select
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import and_, func, select
 
 from ..deps import CurrentUser, DbSession
+from ..media_filters import (
+    MediaFilters,
+    SortOrder,
+    WatchlistSortField,
+    apply_filters,
+)
 from ..models import MediaItem, WatchlistEntry
-from ..schemas import MediaCard, WatchlistAdd, WatchlistEntryOut
+from ..schemas import MediaCard, PaginatedWatchlist, WatchlistAdd, WatchlistEntryOut
 from ..security import decrypt_secret
 from ..serializers import states_for, to_card
 from ..services.media_repo import MediaRepository
@@ -16,33 +24,50 @@ from ..services.sync_service import SyncService
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
 
-@router.get("", response_model=list[WatchlistEntryOut])
+@router.get("", response_model=PaginatedWatchlist)
 async def list_watchlist(
     db: DbSession,
     user: CurrentUser,
-    anime_only: bool = False,
-    limit: int = Query(200, ge=1, le=500),
-) -> list[WatchlistEntryOut]:
-    stmt = (
-        select(WatchlistEntry, MediaItem)
-        .join(MediaItem, MediaItem.id == WatchlistEntry.media_item_id)
-        .where(WatchlistEntry.user_id == user.id, WatchlistEntry.active.is_(True))
-        .order_by(WatchlistEntry.added_at.desc())
-        .limit(limit)
-    )
-    if anime_only:
-        stmt = stmt.where(MediaItem.is_anime.is_(True))
+    filters: Annotated[MediaFilters, Depends()],
+    sort: WatchlistSortField = "watchlist_added",
+    order: SortOrder = "desc",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(60, ge=1, le=200),
+) -> PaginatedWatchlist:
+    """The same browse surface as `/api/media`, over watchlisted titles only.
 
-    rows = (await db.execute(stmt)).all()
+    Adds one sort of its own: when you put it on the watchlist, which is a
+    different question from when it landed in your library, and the one people
+    actually mean on this page. It is the default here for that reason.
+    """
+    active = and_(
+        WatchlistEntry.user_id == user.id,
+        # Removals are tombstoned, so "on my watchlist" is an explicit flag.
+        WatchlistEntry.active.is_(True),
+    )
+    joined = MediaItem.id == WatchlistEntry.media_item_id
+
+    stmt, count_stmt = apply_filters(
+        select(WatchlistEntry, MediaItem).join(MediaItem, joined).where(active),
+        select(func.count(WatchlistEntry.id)).join(MediaItem, joined).where(active),
+        filters,
+        user.id,
+        sort=sort,
+        order=order,
+        sort_columns={"watchlist_added": WatchlistEntry.added_at},
+    )
+
+    total = int(await db.scalar(count_stmt) or 0)
+    rows = (await db.execute(stmt.offset(offset).limit(limit))).all()
     states = await states_for(db, user.id, [item.id for _, item in rows])
 
-    out = []
+    entries = []
     for entry, item in rows:
         payload = WatchlistEntryOut.model_validate(entry)
         payload.synced_with_plex = bool(entry.plex_active)
         payload.item = to_card(item, states.get(item.id), on_watchlist=True)
-        out.append(payload)
-    return out
+        entries.append(payload)
+    return PaginatedWatchlist(entries=entries, total=total, offset=offset, limit=limit)
 
 
 @router.post("", response_model=WatchlistEntryOut, status_code=status.HTTP_201_CREATED)

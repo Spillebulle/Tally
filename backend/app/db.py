@@ -49,17 +49,21 @@ async def _run_light_migrations() -> None:
     Tally ships as a single-file SQLite database that users own; dragging in
     Alembic for a handful of additive columns costs more than it's worth. Each
     entry is idempotent — SQLite raises on a duplicate column and we skip it.
+
+    `_scrub_token_bearing_artwork` is the one exception to "additive only" —
+    it clears data rather than adding a column, for a reason set out there.
     """
     additions: list[tuple[str, str, str]] = [
         # (table, column, DDL type + default)
         ("plex_servers", "manual_url", "TEXT"),
+        ("plex_servers", "on_deck_window_weeks", "INTEGER"),
+        ("media_items", "discover_thumb_path", "TEXT"),
+        ("media_items", "discover_art_path", "TEXT"),
         ("sync_runs", "phase", "VARCHAR(255)"),
         ("sync_runs", "progress_current", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "progress_total", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "cancel_requested", "BOOLEAN NOT NULL DEFAULT 0"),
     ]
-    if not additions:
-        return
     async with engine.begin() as conn:
         for table, column, ddl in additions:
             result = await conn.execute(text(f"PRAGMA table_info({table})"))
@@ -67,6 +71,41 @@ async def _run_light_migrations() -> None:
             if column not in existing:
                 log.info("Migrating: adding %s.%s", table, column)
                 await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+
+    await _scrub_token_bearing_artwork()
+
+
+async def _scrub_token_bearing_artwork() -> None:
+    """Drop artwork URLs that carry a Plex token.
+
+    Tally used to store `…/photo/:/transcode?…&X-Plex-Token=…` in
+    `media_items.poster_url`. A MediaItem row is read by every Tally account, so
+    that handed one user's Plex token to all of them — and the URL was baked
+    with whatever address answered during the sync, so it also broke whenever
+    the library was opened from a different network.
+
+    Artwork is proxied per viewer now (`routers/images.py`), which only engages
+    when the stored URL is empty. These have to go, so this clears data rather
+    than adding a column. Nothing is lost: the path itself lives on
+    `plex_mappings`, and the affected items show their placeholder gradient
+    until the next library scan — within one sync interval.
+
+    Idempotent: once cleared, the UPDATE matches nothing.
+    """
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            text(
+                "UPDATE media_items SET poster_url = NULL, backdrop_url = NULL "
+                "WHERE poster_url LIKE '%X-Plex-Token%' "
+                "   OR backdrop_url LIKE '%X-Plex-Token%'"
+            )
+        )
+        if result.rowcount:
+            log.info(
+                "Migrating: cleared token-bearing artwork URLs on %s item(s); "
+                "they are served through /api/images from now on",
+                result.rowcount,
+            )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

@@ -10,6 +10,56 @@ import {
 import { CheckIcon, SparkIcon, StarIcon } from './Icons'
 import { Spinner } from './ui'
 
+/**
+ * Artwork with its placeholder underneath, rather than instead of it.
+ *
+ * Artwork that needs a Plex token is proxied through Tally, so whether an image
+ * actually exists is only known once the request comes back. Layering means a
+ * 404 simply reveals the placeholder, and there is no second code path to keep
+ * in step with the first. `children` render above the artwork.
+ */
+export function Artwork({
+  src,
+  title,
+  className,
+  imgClassName,
+  showTitle = true,
+  children,
+}: {
+  src: string | null
+  title: string
+  className?: string
+  imgClassName?: string
+  showTitle?: boolean
+  children?: React.ReactNode
+}) {
+  return (
+    <div
+      className={cn('relative overflow-hidden', className)}
+      style={{ background: posterFallbackGradient(title) }}
+    >
+      {showTitle && (
+        <div className="absolute inset-0 flex items-end p-3">
+          <span className="line-clamp-4 text-sm font-semibold text-white/90">{title}</span>
+        </div>
+      )}
+      {src && (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className={cn('absolute inset-0 h-full w-full object-cover', imgClassName)}
+          onError={(event) => {
+            event.currentTarget.style.display = 'none'
+          }}
+        />
+      )}
+      {children}
+    </div>
+  )
+}
+
 interface PosterProps {
   card: MediaCard
   showProgress?: boolean
@@ -49,38 +99,16 @@ export function Poster({
         className="block focus-visible:outline-none"
         aria-label={subtitle ? `${title} — ${subtitle}` : title}
       >
-        <div
-          className="relative aspect-[2/3] w-full overflow-hidden rounded-xl bg-raised shadow-card
+        <Artwork
+          src={card.poster_url}
+          title={title}
+          className="aspect-[2/3] w-full rounded-xl bg-raised shadow-card
                      ring-1 ring-line transition-all duration-300 ease-spring
                      group-hover/poster:-translate-y-1 group-hover/poster:shadow-lift
                      group-focus-within/poster:-translate-y-1 group-focus-within/poster:ring-accent"
-          style={card.poster_url ? undefined : { background: posterFallbackGradient(title) }}
+          imgClassName="transition-transform duration-500 ease-spring
+                        group-hover/poster:scale-[1.04]"
         >
-          {card.poster_url ? (
-            <img
-              src={card.poster_url}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              className="h-full w-full object-cover transition-transform duration-500 ease-spring
-                         group-hover/poster:scale-[1.04]"
-              onError={(event) => {
-                const img = event.currentTarget
-                img.style.display = 'none'
-                img.parentElement?.style.setProperty(
-                  'background',
-                  posterFallbackGradient(title),
-                )
-              }}
-            />
-          ) : (
-            <div className="flex h-full items-end p-3">
-              <span className="line-clamp-4 text-sm font-semibold text-white/90">
-                {title}
-              </span>
-            </div>
-          )}
-
           {/* Badges */}
           <div className="pointer-events-none absolute left-2 top-2 flex flex-wrap gap-1.5">
             {card.is_anime && (
@@ -156,7 +184,7 @@ export function Poster({
               <div className="h-full bg-accent" style={{ width: `${progress}%` }} />
             </div>
           )}
-        </div>
+        </Artwork>
       </Link>
 
       <div className="mt-2 px-0.5">

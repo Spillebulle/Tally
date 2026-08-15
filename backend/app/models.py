@@ -177,6 +177,12 @@ class PlexServer(Base):
     version: Mapped[str | None] = mapped_column(String(64), default=None)
     platform: Mapped[str | None] = mapped_column(String(64), default=None)
 
+    # Mirror of the server's own "Weeks to consider for On Deck and Continue
+    # Watching" (`onDeckWindow`), so Tally's Continue Watching ages items out
+    # the way Plex does. None means the server never told us — only the owner's
+    # token may read `/:/prefs`.
+    on_deck_window_weeks: Mapped[int | None] = mapped_column(Integer, default=None)
+
     owner_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), default=None
     )
@@ -276,6 +282,12 @@ class MediaItem(Base):
     tagline: Mapped[str | None] = mapped_column(Text, default=None)
     poster_url: Mapped[str | None] = mapped_column(Text, default=None)
     backdrop_url: Mapped[str | None] = mapped_column(Text, default=None)
+    # Artwork on Plex Discover is a path relative to the host that served the
+    # payload, and fetching it needs the viewer's own plex.tv token. The token
+    # must never be baked into a URL: a MediaItem row is shared by every Tally
+    # account, so the path is stored bare and `routers/images.py` proxies it.
+    discover_thumb_path: Mapped[str | None] = mapped_column(Text, default=None)
+    discover_art_path: Mapped[str | None] = mapped_column(Text, default=None)
 
     runtime_minutes: Mapped[int | None] = mapped_column(Integer, default=None)
     content_rating: Mapped[str | None] = mapped_column(String(32), default=None)

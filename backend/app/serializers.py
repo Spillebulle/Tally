@@ -14,6 +14,25 @@ from .models import (
 from .schemas import MediaCard, MediaItemDetail, UserStateOut
 
 
+def poster_for(item: MediaItem) -> str:
+    """Where the browser should fetch this item's poster.
+
+    A stored URL is an external one (TMDB and friends) that needs no credentials
+    and is used directly. Everything else — Plex Discover art, and artwork on a
+    Plex server — is fetched through Tally, because both need a token that must
+    not appear in a URL. See `routers/images.py`.
+
+    This deliberately does not look up whether artwork actually exists: that
+    would be a query per card. The proxy answers 404 when there is none, and the
+    poster tile falls back to its gradient exactly as it does for a null.
+    """
+    return item.poster_url or f"/api/images/{item.id}/poster"
+
+
+def backdrop_for(item: MediaItem) -> str:
+    return item.backdrop_url or f"/api/images/{item.id}/backdrop"
+
+
 def progress_percent(state: UserMediaState | None) -> float | None:
     if state is None or not state.progress_ms or not state.duration_ms:
         return None
@@ -34,7 +53,7 @@ def to_card(
         media_type=item.media_type,
         title=item.title,
         year=item.year,
-        poster_url=item.poster_url,
+        poster_url=poster_for(item),
         is_anime=item.is_anime,
         season_number=item.season_number,
         episode_number=item.episode_number,
@@ -111,6 +130,10 @@ async def to_detail(
         watched_episodes, total_episodes = await episode_progress(db, user_id, item.id)
 
     detail = MediaItemDetail.model_validate(item)
+    # model_validate reads the columns straight off the row, so the proxied
+    # forms have to be put back over them.
+    detail.poster_url = poster_for(item)
+    detail.backdrop_url = backdrop_for(item)
     detail.state = UserStateOut.model_validate(state) if state else None
     detail.on_watchlist = on_watchlist
     detail.available_on_plex = available

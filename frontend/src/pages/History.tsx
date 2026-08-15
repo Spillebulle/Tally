@@ -4,13 +4,8 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { HistoryPage, WatchEvent } from '@/lib/types'
-import {
-  cn,
-  compactNumber,
-  displaySubtitle,
-  formatDateTime,
-  posterFallbackGradient,
-} from '@/lib/utils'
+import { cn, compactNumber, displaySubtitle, formatDateTime } from '@/lib/utils'
+import { Artwork } from '@/components/Poster'
 import { EmptyState, PageHeader, Segmented } from '@/components/ui'
 import { ClockIcon, XIcon } from '@/components/Icons'
 
@@ -202,14 +197,13 @@ function HistoryRow({ event, onRemove }: { event: WatchEvent; onRemove: () => vo
 
   return (
     <li className="group card flex items-center gap-3 p-2.5 transition-colors hover:bg-raised/60">
-      <Link
-        to={card ? `/item/${card.id}` : '#'}
-        className="h-14 w-10 shrink-0 overflow-hidden rounded-md bg-raised"
-        style={card?.poster_url ? undefined : { background: posterFallbackGradient(title) }}
-      >
-        {card?.poster_url && (
-          <img src={card.poster_url} alt="" loading="lazy" className="h-full w-full object-cover" />
-        )}
+      <Link to={card ? `/item/${card.id}` : '#'} className="shrink-0">
+        <Artwork
+          src={card?.poster_url ?? null}
+          title={title}
+          showTitle={false}
+          className="h-14 w-10 rounded-md bg-raised"
+        />
       </Link>
 
       <div className="min-w-0 flex-1">

@@ -30,6 +30,7 @@ from ..schemas import (
     SyncRequest,
     SyncRunOut,
 )
+from ..services import on_deck
 from ..services.metadata import get_metadata_service
 from ..services.metadata.anime import library_looks_like_anime
 from ..services.plex_server import reset_failure_state
@@ -340,7 +341,7 @@ async def scan_library(
 
 
 @router.get("/settings", response_model=SettingsOut)
-async def get_app_settings(user: CurrentUser) -> SettingsOut:
+async def get_app_settings(db: DbSession, user: CurrentUser) -> SettingsOut:
     providers = get_metadata_service().providers_configured
     return SettingsOut(
         providers=ProvidersStatus(**providers),
@@ -348,6 +349,8 @@ async def get_app_settings(user: CurrentUser) -> SettingsOut:
         webhook_url=f"{settings.public_url.rstrip('/')}/api/webhooks/plex",
         public_url=settings.public_url,
         version=VERSION,
+        plex_on_deck_weeks=await on_deck.plex_weeks(db, user),
+        continue_watching_weeks=await on_deck.effective_weeks(db, user),
     )
 
 
