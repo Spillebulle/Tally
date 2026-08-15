@@ -1382,6 +1382,84 @@ async def test_the_backfill_revisits_rows_that_nothing_else_looks_at(db, monkeyp
     assert asked == []
 
 
+async def test_the_backfill_finishes_the_heal_without_waiting_for_a_restart(
+    db, monkeypatch
+):
+    """The duplicate has to go in the same pass that makes it matchable.
+
+    `merge_duplicates` can only pair rows on an external id, so before the
+    backfill runs there is nothing for it to see. Left to the startup call
+    alone the heal stops half done: the poster comes back and the phantom row
+    sits next to it still saying it is not on your server, until the next
+    restart — weeks away on a box that is only restarted to upgrade.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import WatchEvent, WatchSource
+    from app.services.sync_service import SyncService as Service
+
+    real = MediaItem(
+        guid_key="tmdb:movie:10113",
+        media_type=MediaType.MOVIE,
+        title="101 Dalmatians",
+        year=1996,
+        tmdb_id=10113,
+        poster_url="https://image.tmdb.org/t/p/w500/dalmatians.jpg",
+    )
+    ghost = MediaItem(
+        guid_key="title:movie:101-dalmatians",
+        media_type=MediaType.MOVIE,
+        title="101 Dalmatians",
+        first_aired=date(1996, 11, 16),
+    )
+    user = User(username="sam")
+    db.add_all([real, ghost, user])
+    await db.flush()
+
+    # The play the user actually made, stranded on the phantom.
+    db.add(
+        WatchEvent(
+            user_id=user.id,
+            media_item_id=ghost.id,
+            watched_at=utcnow() - timedelta(days=900),
+            source=WatchSource.PLEX_HISTORY,
+            dedupe_key="plex:abc123:/status/sessions/history/7",
+            completed=True,
+        )
+    )
+    await db.commit()
+    ghost_id = ghost.id
+
+    async def fake_apply(self, item, *, ids, library, genres):
+        item.tmdb_id = 10113
+        item.poster_url = "https://image.tmdb.org/t/p/w500/dalmatians.jpg"
+        item.metadata_updated_at = utcnow()
+
+    monkeypatch.setattr(
+        "app.services.media_repo.MediaRepository._apply_enrichment", fake_apply
+    )
+
+    service = Service(db)
+    assert await service.backfill_missing_metadata(SyncStats()) == 1
+
+    # One row left, and it is the one Plex is mapped to.
+    assert await db.scalar(select(func.count(MediaItem.id))) == 1
+    survivor = await db.scalar(select(MediaItem))
+    assert survivor.id == real.id
+
+    # The watch went with it rather than disappearing alongside the phantom.
+    assert await db.scalar(select(func.count(WatchEvent.id))) == 1
+    assert await db.scalar(
+        select(WatchEvent.media_item_id).where(WatchEvent.media_item_id == real.id)
+    ) == real.id
+    assert (
+        await db.scalar(
+            select(func.count(MediaItem.id)).where(MediaItem.id == ghost_id)
+        )
+        == 0
+    )
+
+
 async def test_a_webhook_and_the_history_import_do_not_double_count(db, monkeypatch):
     """Regression: the same play was recorded twice, and counted twice.
 
