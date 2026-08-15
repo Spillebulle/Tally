@@ -51,7 +51,7 @@ def _plex_genres(meta: dict[str, Any]) -> list[str]:
     return [g["tag"] for g in meta.get("Genre") or [] if isinstance(g, dict) and g.get("tag")]
 
 
-def _artwork_paths(meta: dict[str, Any]) -> tuple[str | None, str | None]:
+def artwork_paths(meta: dict[str, Any]) -> tuple[str | None, str | None]:
     """(thumb, art) paths for a Plex item, inheriting from its parents.
 
     An episode with no artwork of its own borrows its season's, then its show's
@@ -222,7 +222,7 @@ class MediaRepository:
         # --- external enrichment -----------------------------------------
         should_enrich = self.enrich if enrich is None else enrich
         if should_enrich and media_type in (MediaType.MOVIE, MediaType.SHOW):
-            plex_thumb, _ = _artwork_paths(meta)
+            plex_thumb, _ = artwork_paths(meta)
             if self._needs_enrichment(item, created, plex_thumb=plex_thumb):
                 await self._apply_enrichment(item, ids=ids, library=library, genres=genres)
         elif created and media_type == MediaType.SHOW and library is not None:
@@ -431,7 +431,7 @@ class MediaRepository:
         mapping.library_id = library.id if library else mapping.library_id
         mapping.guid = meta.get("guid") or mapping.guid
         mapping.plex_guid = ids.plex_guid or mapping.plex_guid
-        thumb, art = _artwork_paths(meta)
+        thumb, art = artwork_paths(meta)
         mapping.thumb_path = thumb or mapping.thumb_path
         mapping.art_path = art or mapping.art_path
 
