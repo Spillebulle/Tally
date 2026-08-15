@@ -148,9 +148,17 @@ export function ColumnChart({
   const max = Math.max(...data.map((d) => d.value), 1)
 
   return (
+    // `items-stretch` is load-bearing, not a default worth "tidying" away: the
+    // bars are sized as a percentage, and a percentage height needs a parent
+    // with a definite height to resolve against. `items-end` here made each
+    // column shrink to its content instead of filling h-44, which left the
+    // bar's flex-1 wrapper zero-tall — so every bar computed to zero and the
+    // charts rendered as a row of numbers with nothing under them. The bars are
+    // bottom-aligned by the wrapper below, not by this.
+    //
     // Tighter gap on narrow screens: the rating chart went from five columns to
     // ten, and a fixed 8px gutter ate most of the width on a phone.
-    <div className="flex h-44 items-end gap-1 sm:gap-2">
+    <div className="flex h-44 items-stretch gap-1 sm:gap-2">
       {data.map((entry) => {
         const height = (entry.value / max) * 100
         const active = activeLabel === entry.label
