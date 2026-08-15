@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, useTheme, useToast, type Theme } from '@/lib/app-context'
 import type { ApiKeyCreated, Library, Server } from '@/lib/types'
-import { cn, formatDateTime, relativeTime } from '@/lib/utils'
+import { cn, copyText, formatDateTime, relativeTime } from '@/lib/utils'
 import { EmptyState, PageHeader, Segmented, Spinner, Toggle } from '@/components/ui'
 import { SyncProgress, syncLabel } from '@/components/Layout'
 import {
@@ -60,6 +60,20 @@ export function Settings() {
 
   const updatePreference = useMutation({
     mutationFn: (body: Record<string, unknown>) => api.settings.updatePreferences(body),
+    // Move the switch on click, not two round trips later. `checked` is read
+    // straight from the query cache, so without this the knob stayed put until
+    // a PUT *and* a follow-up GET had both returned — long enough that people
+    // click again and send a second, conflicting write. Same pattern as
+    // `updateLibrary` below.
+    onMutate: async (body: Record<string, unknown>) => {
+      await queryClient.cancelQueries({ queryKey: ['preferences'] })
+      const previous = queryClient.getQueryData<Record<string, unknown>>(['preferences'])
+      queryClient.setQueryData<Record<string, unknown>>(['preferences'], (old) => ({
+        ...(old ?? {}),
+        ...body,
+      }))
+      return { previous }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['preferences'] })
       // The Continue Watching window is a preference, so both the settings
@@ -68,7 +82,13 @@ export function Settings() {
       queryClient.invalidateQueries({ queryKey: ['continue-watching'] })
       void refresh()
     },
-    onError: (error: Error) => notify(error.message, 'error'),
+    onError: (error: Error, _body, context) => {
+      // Put the real value back; the optimistic one was a guess that lost.
+      const previous = (context as { previous?: Record<string, unknown> } | undefined)
+        ?.previous
+      if (previous) queryClient.setQueryData(['preferences'], previous)
+      notify(error.message, 'error')
+    },
   })
 
   const discover = useMutation({
@@ -269,9 +289,14 @@ export function Settings() {
           />
           <button
             type="button"
-            onClick={() => {
-              void navigator.clipboard?.writeText(settings.data?.webhook_url ?? '')
-              notify('Webhook URL copied', 'success')
+            onClick={async () => {
+              const copied = await copyText(settings.data?.webhook_url ?? '')
+              notify(
+                copied
+                  ? 'Webhook URL copied'
+                  : 'Could not copy — select the address and press Ctrl+C',
+                copied ? 'success' : 'error',
+              )
             }}
             className="btn-outline shrink-0"
           >
@@ -482,9 +507,14 @@ function ApiKeys() {
             />
             <button
               type="button"
-              onClick={() => {
-                void navigator.clipboard?.writeText(issued.key)
-                notify('API key copied', 'success')
+              onClick={async () => {
+                const copied = await copyText(issued.key)
+                notify(
+                  copied
+                    ? 'API key copied'
+                    : 'Could not copy — select the key and press Ctrl+C before closing',
+                  copied ? 'success' : 'error',
+                )
               }}
               className="btn-outline shrink-0"
             >
@@ -642,6 +672,14 @@ function ServerCard({ server }: { server: Server }) {
   const { notify } = useToast()
 
   const [urlDraft, setUrlDraft] = useState(server.manual_url ?? '')
+  // `useState` seeds once, so a refetch that brings a new address left the
+  // field showing the old one. Re-seed when the server's own value changes,
+  // but not while the user is mid-edit.
+  const [seededFrom, setSeededFrom] = useState(server.manual_url ?? '')
+  if (seededFrom !== (server.manual_url ?? '')) {
+    setSeededFrom(server.manual_url ?? '')
+    setUrlDraft(server.manual_url ?? '')
+  }
 
   const test = useMutation({
     mutationFn: () => api.servers.test(server.id),
@@ -837,6 +875,7 @@ function ServerCard({ server }: { server: Server }) {
                 updateLibrary.mutate({ id: library.id, body: { anime_override: next } })
               }}
               onScan={() => scan.mutate(library.id)}
+              scanning={scan.isPending && scan.variables === library.id}
             />
           ))}
         </ul>
@@ -850,13 +889,15 @@ function LibraryRow({
   onToggleEnabled,
   onCycleAnime,
   onScan,
+  scanning,
 }: {
   library: Library
   onToggleEnabled: (enabled: boolean) => void
   onCycleAnime: () => void
   onScan: () => void
+  /** True while *this* row's scan request is in flight. */
+  scanning: boolean
 }) {
-  const [busy, setBusy] = useState(false)
   const animeLabel =
     library.anime_override === null
       ? 'Anime: auto'
@@ -886,15 +927,17 @@ function LibraryRow({
 
       <button
         type="button"
-        onClick={() => {
-          setBusy(true)
-          onScan()
-          window.setTimeout(() => setBusy(false), 1500)
-        }}
-        disabled={busy}
+        // Busy state comes from the request, not from a 1500ms timer unrelated
+        // to it — which also leaked, since nothing cleared it on unmount.
+        onClick={onScan}
+        disabled={scanning}
         className="chip shrink-0"
       >
-        {busy ? <Spinner className="text-[11px]" /> : <RefreshIcon className="text-[11px]" />}
+        {scanning ? (
+          <Spinner className="text-[11px]" />
+        ) : (
+          <RefreshIcon className="text-[11px]" />
+        )}
         Scan
       </button>
 

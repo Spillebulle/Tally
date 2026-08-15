@@ -7,7 +7,7 @@ import type { AnimeFilter, MediaCard } from '@/lib/types'
 import { compactNumber } from '@/lib/utils'
 import { BrowseFilters, useBrowseFilters } from '@/components/BrowseFilters'
 import { PosterGrid } from '@/components/Poster'
-import { EmptyState, PageHeader, Segmented } from '@/components/ui'
+import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { FilmIcon, SearchIcon } from '@/components/Icons'
 
 /**
@@ -64,7 +64,7 @@ export function Browse({ mode }: BrowseProps) {
     limit: PAGE_SIZE,
   }
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: ['media', query],
     queryFn: () => api.media.list(query),
     placeholderData: keepPreviousData,
@@ -138,7 +138,9 @@ export function Browse({ mode }: BrowseProps) {
         busy={isFetching && !isLoading}
       />
 
-      {!isLoading && total === 0 ? (
+      {isError ? (
+        <ErrorState error={error} onRetry={() => void refetch()} />
+      ) : !isLoading && total === 0 ? (
         <EmptyState
           icon={mode === 'search' ? <SearchIcon /> : <FilmIcon />}
           title={

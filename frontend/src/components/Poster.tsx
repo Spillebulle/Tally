@@ -45,6 +45,13 @@ export function Artwork({
       )}
       {src && (
         <img
+          // Keyed by src so a failed load cannot outlive the URL that failed.
+          // The failure used to be recorded by setting `display: none` on the
+          // DOM node, which nothing reset — and since `poster_for()` always
+          // returns a URL, a 404 is the *normal* path for an artwork-less item.
+          // React then reused that same hidden <img> for the next item, hiding
+          // a poster that existed.
+          key={src}
           src={src}
           alt=""
           loading="lazy"

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { cn, formatRating, RATING_SCALE, STATUS_DOT, STATUS_LABELS } from '@/lib/utils'
 import type { WatchStatus } from '@/lib/types'
-import { StarIcon } from './Icons'
+import { StarIcon, WarningIcon } from './Icons'
 
 export function PageHeader({
   title,
@@ -48,6 +48,41 @@ export function EmptyState({
         <p className="max-w-sm text-balance text-sm text-muted">{description}</p>
       )}
       {action}
+    </div>
+  )
+}
+
+/**
+ * A request that failed, said so.
+ *
+ * Distinct from `EmptyState` on purpose. Every list page used to fall through
+ * to "Nothing here yet — run a Plex sync from Settings" whenever a request
+ * errored, which confidently tells the user their library is empty and hides
+ * the real problem. A 500 and an empty library need different reactions.
+ */
+export function ErrorState({
+  error,
+  onRetry,
+  title = 'Could not load this',
+}: {
+  error: unknown
+  onRetry?: () => void
+  title?: string
+}) {
+  const message =
+    error instanceof Error && error.message ? error.message : 'Something went wrong.'
+  return (
+    <div className="card flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+      <span className="grid h-12 w-12 place-items-center rounded-2xl bg-bad/10 text-xl text-bad">
+        <WarningIcon />
+      </span>
+      <h3 className="text-base font-semibold text-ink">{title}</h3>
+      <p className="max-w-sm text-balance text-sm text-muted">{message}</p>
+      {onRetry && (
+        <button type="button" onClick={onRetry} className="btn-outline mt-2">
+          Try again
+        </button>
+      )}
     </div>
   )
 }

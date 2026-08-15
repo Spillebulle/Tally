@@ -10,9 +10,9 @@
  * labelled at the data end, which also satisfies the relief rule for the
  * lighter steps.
  */
-import { useId, useState } from 'react'
+import { useState } from 'react'
 import type { StatCount } from '@/lib/types'
-import { cn, compactNumber } from '@/lib/utils'
+import { cn, compactNumber, localDateKey } from '@/lib/utils'
 
 interface Tooltip {
   x: number
@@ -231,16 +231,18 @@ interface HeatmapProps {
 }
 
 /**
- * Sequential single-hue ramp: light (near zero) to dark (busiest). Empty days
- * are the surface's line colour so "nothing watched" reads as absence rather
- * than as a low value.
+ * Steps in the sequential heatmap ramp. The colours themselves are
+ * `--heat-0`…`--heat-4` in index.css, light and dark defined alongside every
+ * other token — they used to be hex literals here, injected into the document
+ * as a runtime <style> block from inside this component.
+ *
+ * Empty days use the surface's line colour instead, so "nothing watched" reads
+ * as absence rather than as a low value.
  */
-const RAMP = ['#cde2fb', '#9ec5f4', '#5598e7', '#2a78d6', '#184f95']
-const RAMP_DARK = ['#1c5cab', '#256abf', '#3987e5', '#6da7ec', '#9ec5f4']
+const HEAT_STEPS = 5
 
 export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
   const [tip, setTip] = useState<Tooltip | null>(null)
-  const gradientId = useId()
 
   const byDate = new Map(data.map((d) => [d.label, d.value]))
   const max = Math.max(...data.map((d) => d.value), 1)
@@ -258,7 +260,9 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
   for (let week = 0; week < weeks; week += 1) {
     const column: Array<{ date: Date; value: number; future: boolean }> = []
     for (let day = 0; day < 7; day += 1) {
-      const iso = cursor.toISOString().slice(0, 10)
+      // Local key, not toISOString(): `cursor` is a local midnight, and the
+      // UTC conversion shifted every lookup a day earlier east of Greenwich.
+      const iso = localDateKey(cursor)
       column.push({
         date: new Date(cursor),
         value: byDate.get(iso) ?? 0,
@@ -289,7 +293,7 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
 
   const level = (value: number): number => {
     if (value <= 0) return -1
-    return Math.min(RAMP.length - 1, Math.floor((value / max) * RAMP.length))
+    return Math.min(HEAT_STEPS - 1, Math.floor((value / max) * HEAT_STEPS))
   }
 
   return (
@@ -303,9 +307,6 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
           aria-label="Watch activity by day"
           className="block"
         >
-          <defs>
-            <linearGradient id={gradientId} />
-          </defs>
           {monthLabels.map(({ index, label }) => (
             <text
               key={`${label}-${index}`}
@@ -320,6 +321,15 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
             column.map((day, dayIndex) => {
               if (day.future) return null
               const tier = level(day.value)
+              const dayLabel = day.date.toLocaleDateString(undefined, {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+              })
+              const valueLabel =
+                day.value === 0
+                  ? 'Nothing watched'
+                  : `${day.value} ${day.value === 1 ? 'play' : 'plays'}`
               return (
                 <rect
                   key={`${columnIndex}-${dayIndex}`}
@@ -346,19 +356,16 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
                     setTip({
                       x: rect.left - (parent?.left ?? 0) + rect.width / 2,
                       y: rect.top - (parent?.top ?? 0),
-                      label: day.date.toLocaleDateString(undefined, {
-                        weekday: 'short',
-                        month: 'short',
-                        day: 'numeric',
-                      }),
-                      value:
-                        day.value === 0
-                          ? 'Nothing watched'
-                          : `${day.value} ${day.value === 1 ? 'play' : 'plays'}`,
+                      label: dayLabel,
+                      value: valueLabel,
                     })
                   }}
                   onMouseLeave={() => setTip(null)}
-                />
+                >
+                  {/* Native tooltip, so the value is reachable without a
+                      mouse — the rects carry only mouse handlers. */}
+                  <title>{`${dayLabel}: ${valueLabel}`}</title>
+                </rect>
               )
             }),
           )}
@@ -368,7 +375,7 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
       <div className="mt-3 flex items-center justify-end gap-1.5 text-[11px] text-muted">
         <span>Less</span>
         <span className="h-3 w-3 rounded-[3px] bg-line/60" />
-        {RAMP.map((_, index) => (
+        {Array.from({ length: HEAT_STEPS }, (_, index) => (
           <span
             key={index}
             className="h-3 w-3 rounded-[3px]"
@@ -379,16 +386,6 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
       </div>
 
       <TooltipBubble tip={tip} />
-
-      {/* Ramp steps as variables so the dark set is a deliberate re-step, not a flip. */}
-      <style>{`
-        :root {
-          ${RAMP.map((hex, index) => `--heat-${index}: ${hex};`).join('\n')}
-        }
-        .dark {
-          ${RAMP_DARK.map((hex, index) => `--heat-${index}: ${hex};`).join('\n')}
-        }
-      `}</style>
     </div>
   )
 }
