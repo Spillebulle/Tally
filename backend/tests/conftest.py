@@ -2,8 +2,6 @@ import os
 import tempfile
 from pathlib import Path
 
-import pytest
-
 # The settings object is cached and reads DATA_DIR at import time, so this must
 # be set before anything under `app` is imported.
 _TMP = Path(tempfile.mkdtemp(prefix="tally-tests-"))
@@ -19,11 +17,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from app.db import get_session  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
-
-
-@pytest.fixture(scope="session")
-def anyio_backend() -> str:
-    return "asyncio"
 
 
 @pytest_asyncio.fixture(autouse=True)

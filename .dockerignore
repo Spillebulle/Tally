@@ -6,6 +6,13 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 
+# The preview workflow in CLAUDE.md builds the frontend straight into
+# backend/app/static/. `COPY backend/app ./app` would then drag that host build
+# into the image, and while `COPY --from=frontend` overwrites index.html, the
+# orphaned hashed assets beside it survive — a stale bundle shipped inside a
+# fresh image.
+backend/app/static/
+
 # Python virtualenvs are host-specific and would bloat the build context.
 .venv/
 venv/
