@@ -9,7 +9,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .config import get_settings
-from .models import Base
+from .models import Base, utcnow
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -40,8 +40,41 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_light_migrations()
+    await _close_interrupted_sync_runs()
     await _merge_duplicates()
     log.info("Database ready at %s", settings.db_path)
+
+
+async def _close_interrupted_sync_runs() -> None:
+    """Fail any sync that was still running when the process last stopped.
+
+    A run is marked finished in `full_sync`'s `finally`, which a hard kill —
+    `docker stop` past its timeout, an OOM, a power cut — never reaches. The
+    row then stays `finished_at IS NULL` forever, and since that is exactly
+    what `trigger_sync` treats as "already running", the user's sync button
+    answers `already_running` for the rest of the install's life with no UI
+    path to recover. Cancelling does not help either: it sets a flag that no
+    worker is left to read.
+
+    Nothing can be running yet at this point in startup, so every open row is
+    by definition an orphan.
+    """
+    from sqlalchemy import select
+
+    from .models import SyncRun, SyncStatus
+
+    async with session_scope() as db:
+        result = await db.execute(select(SyncRun).where(SyncRun.finished_at.is_(None)))
+        orphans = list(result.scalars())
+        for run in orphans:
+            run.status = SyncStatus.FAILED
+            run.finished_at = utcnow()
+            run.error = run.error or "Interrupted by a restart"
+            run.phase = None
+    if orphans:
+        log.warning(
+            "Closed %s sync run(s) left open by an unclean shutdown", len(orphans)
+        )
 
 
 async def _merge_duplicates() -> None:
