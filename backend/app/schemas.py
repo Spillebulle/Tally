@@ -233,6 +233,26 @@ class WatchlistEntryOut(ORMModel):
     item: MediaCard | None = None
 
 
+class ApiKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+
+
+class ApiKeyOut(ORMModel):
+    id: int
+    name: str
+    # The visible half only. The rest exists nowhere but the owner's copy.
+    prefix: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class ApiKeyCreated(ApiKeyOut):
+    """Carries the plaintext key. Returned by the create call and never again."""
+
+    key: str = ""
+
+
 class PaginatedWatchlist(BaseModel):
     """Same envelope as PaginatedMedia, but the rows carry watchlist metadata
     (when it was added, whether Plex has it yet) alongside the card."""

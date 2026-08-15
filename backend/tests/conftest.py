@@ -25,6 +25,20 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _isolate_plex_connection_pool():
+    """Plex connections are pooled process-wide, so they outlive a test.
+
+    A test that monkeypatches httpx would otherwise leave its stub in the pool
+    for whatever runs next.
+    """
+    from app.services.plex_server import close_pool
+
+    await close_pool()
+    yield
+    await close_pool()
+
+
 @pytest_asyncio.fixture
 async def engine():
     # Each test gets a private file-backed database. In-memory SQLite would give
@@ -60,6 +74,20 @@ async def client(session_factory):
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def bare_client(client):
+    """A second client with no cookies, sharing the same app and database.
+
+    `authed_client` *is* `client` with a session cookie attached, so anything
+    testing credentials other than that cookie needs a genuinely anonymous
+    caller — otherwise the cookie answers the request and the test proves
+    nothing.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        yield c
 
 
 @pytest_asyncio.fixture

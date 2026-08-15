@@ -1,4 +1,4 @@
-﻿"""End-to-end checks against the HTTP surface."""
+"""End-to-end checks against the HTTP surface."""
 import httpx
 import pytest
 from sqlalchemy import select
@@ -895,6 +895,76 @@ async def test_triggering_a_sync_reports_running_immediately(authed_client, monk
     assert len(runs) == 1
     # Only the first click scheduled work.
     assert len(started) == 1
+
+
+async def test_api_key_lifecycle_and_authentication(authed_client, bare_client, db):
+    """A key is shown once, works as its owner, and stops working when revoked."""
+    from app.models import ApiKey
+
+    created = await authed_client.post("/api/keys", json={"name": "Home Assistant"})
+    assert created.status_code == 201
+    body = created.json()
+    raw = body["key"]
+    assert raw.startswith("tally_")
+    assert body["prefix"] == raw[:14]
+    assert body["last_used_at"] is None
+
+    # The plaintext exists nowhere on the server — only its hash.
+    stored = (await db.execute(select(ApiKey))).scalars().one()
+    assert stored.key_hash != raw
+    assert raw not in stored.key_hash
+    # And it is never handed out again.
+    listed = (await authed_client.get("/api/keys")).json()
+    assert len(listed) == 1
+    assert "key" not in listed[0]
+
+    # bare_client has no session cookie, so these exercise the key alone.
+    assert (await bare_client.get("/api/media")).status_code == 401
+
+    for headers in (
+        {"X-API-Key": raw},
+        {"Authorization": f"Bearer {raw}"},
+    ):
+        response = await bare_client.get("/api/media", headers=headers)
+        assert response.status_code == 200, headers
+
+    # Using it recorded that it was used, which is what makes a key auditable.
+    await db.refresh(stored)
+    assert stored.last_used_at is not None
+
+    assert (
+        await bare_client.get("/api/media", headers={"X-API-Key": raw + "x"})
+    ).status_code == 401
+    assert (
+        await bare_client.get("/api/media", headers={"X-API-Key": "tally_nonsense"})
+    ).status_code == 401
+
+    revoked = await authed_client.delete(f"/api/keys/{body['id']}")
+    assert revoked.status_code == 204
+    assert (
+        await bare_client.get("/api/media", headers={"X-API-Key": raw})
+    ).status_code == 401
+
+    # Revoked, not deleted: the record of its use survives.
+    remaining = (await authed_client.get("/api/keys")).json()
+    assert len(remaining) == 1
+    assert remaining[0]["revoked_at"] is not None
+
+
+async def test_an_api_key_cannot_be_revoked_by_another_account(authed_client, client, db):
+    """Keys are per-account, and one account may not touch another's."""
+    created = await authed_client.post("/api/keys", json={"name": "mine"})
+    key_id = created.json()["id"]
+
+    await client.post("/api/auth/logout")
+    await client.post(
+        "/api/auth/register", json={"username": "someone-else", "password": "password123"}
+    )
+
+    # 404 rather than 403: whether that id exists is not their business.
+    assert (await client.delete(f"/api/keys/{key_id}")).status_code == 404
+    # And it is not in their list.
+    assert (await client.get("/api/keys")).json() == []
 
 
 async def test_preferences_round_trip(authed_client):

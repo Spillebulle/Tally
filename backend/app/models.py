@@ -536,6 +536,32 @@ class PlexPin(Base):
     consumed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ApiKey(Base):
+    """A long-lived credential that acts as its owning user.
+
+    Only the hash is stored, so a leaked database does not hand over working
+    keys, and the plaintext is shown exactly once at creation. Revocation is a
+    timestamp rather than a delete, so `last_used_at` survives to answer "was
+    this key being used before I killed it?".
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(128))
+    # The visible half, stored plainly so a key can be looked up without
+    # scanning every row — and so the UI can tell two keys apart.
+    prefix: Mapped[str] = mapped_column(String(32), index=True)
+    key_hash: Mapped[str] = mapped_column(String(64))
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 

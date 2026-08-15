@@ -8,6 +8,7 @@ so we try them in order and remember the one that worked.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -88,6 +89,48 @@ def reset_failure_state() -> None:
     _failures.clear()
 
 
+# One HTTP client for the whole process, so connections stay alive *between*
+# calls and not just within one.
+#
+# A client per call means a connection per call, and a connection per call means
+# a DNS lookup per call. A history import asks Plex about every entry it has not
+# seen before, which on a first run is hundreds of requests in a few seconds —
+# enough to trip a rate-limiting resolver (Pi-hole's default is 1000 queries a
+# minute, shared by every container behind the same bridge address). Once
+# tripped, name resolution fails for *everything*: the observed symptom was the
+# Plex server and plex.tv both becoming unresolvable mid-sync, seconds apart.
+#
+# Keep-alive turns those hundreds of lookups into one per host.
+_pooled_client: httpx.AsyncClient | None = None
+
+
+def _pool() -> httpx.AsyncClient:
+    global _pooled_client
+    if _pooled_client is None or _pooled_client.is_closed:
+        _pooled_client = httpx.AsyncClient(
+            # Plex servers routinely present self-signed certificates.
+            verify=False,
+            follow_redirects=True,
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=40,
+                # Comfortably longer than the gap between polls, so an idle
+                # Tally does not re-resolve on every scheduled sync.
+                keepalive_expiry=120.0,
+            ),
+        )
+    return _pooled_client
+
+
+async def close_pool() -> None:
+    """Drop the shared client. Called on shutdown, and by tests for isolation."""
+    global _pooled_client
+    client, _pooled_client = _pooled_client, None
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await client.aclose()
+
+
 class PlexServerClient:
     def __init__(
         self,
@@ -149,45 +192,37 @@ class PlexServerClient:
 
         last_error: Exception | None = None
 
-        # One client for the whole call, not one per attempt. Each AsyncClient
-        # opens its own connection, and every connection costs a DNS lookup, so
-        # building one inside the loop meant a single failing request could fire
-        # `len(urls) * (retries + 1)` lookups — eight or more against a server
-        # advertising the usual set of candidate URIs. Under a resolver with a
-        # query rate limit that is enough to get the whole container throttled,
-        # at which point every request fails and triggers the full fan-out
-        # again. Pooling here lets retries against a host reuse its connection.
-        async with httpx.AsyncClient(
-            timeout=self._timeout, verify=False, follow_redirects=True
-        ) as client:
-            for url in urls:
-                if not url:
+        # One pooled client for the whole process — see `_pool()`.
+        client = _pool()
+        for url in urls:
+            if not url:
+                continue
+            for attempt in range(retries + 1):
+                try:
+                    resp = await client.request(
+                        method,
+                        f"{url}{path}",
+                        headers=plex_headers(self.token),
+                        params=params,
+                        timeout=self._timeout,
+                    )
+                except (httpx.TransportError, httpx.TimeoutException) as exc:
+                    last_error = exc
+                    if attempt < retries:
+                        await asyncio.sleep(0.5 * (attempt + 1))
                     continue
-                for attempt in range(retries + 1):
-                    try:
-                        resp = await client.request(
-                            method,
-                            f"{url}{path}",
-                            headers=plex_headers(self.token),
-                            params=params,
-                        )
-                    except (httpx.TransportError, httpx.TimeoutException) as exc:
-                        last_error = exc
-                        if attempt < retries:
-                            await asyncio.sleep(0.5 * (attempt + 1))
-                        continue
 
-                    if resp.status_code == 401:
-                        raise PlexServerError("Server rejected the access token")
-                    if resp.status_code == 404:
-                        return None
-                    if resp.status_code >= 500:
-                        last_error = PlexServerError(f"Server error {resp.status_code}")
-                        break  # try the next URI rather than hammering a sick server
+                if resp.status_code == 401:
+                    raise PlexServerError("Server rejected the access token")
+                if resp.status_code == 404:
+                    return None
+                if resp.status_code >= 500:
+                    last_error = PlexServerError(f"Server error {resp.status_code}")
+                    break  # try the next URI rather than hammering a sick server
 
-                    self.working_url = url
-                    _failures.pop(key, None)
-                    return resp
+                self.working_url = url
+                _failures.pop(key, None)
+                return resp
 
         # Every candidate failed. Back off before the next full walk, doubling
         # each time, so a server that stays down costs one probe per cooldown

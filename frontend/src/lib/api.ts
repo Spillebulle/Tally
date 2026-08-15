@@ -16,6 +16,8 @@ import type {
   User,
   UserState,
   WatchEvent,
+  ApiKey,
+  ApiKeyCreated,
   PaginatedWatchlist,
   WatchlistEntry,
   WatchStatus,
@@ -186,6 +188,12 @@ export const api = {
     remove: (mediaItemId: number) => del<void>(`/api/watchlist/${mediaItemId}`),
     searchDiscover: (q: string) =>
       get<MediaCard[]>('/api/watchlist/search', { q }),
+  },
+
+  apiKeys: {
+    list: () => get<ApiKey[]>('/api/keys'),
+    create: (name: string) => post<ApiKeyCreated>('/api/keys', { name }),
+    revoke: (id: number) => del<void>(`/api/keys/${id}`),
   },
 
   stats: {
