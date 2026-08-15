@@ -1272,10 +1272,12 @@ class SyncService:
 
             for index, server in enumerate(servers, start=1):
                 await self._checkpoint()
+                # Which server this is goes in the text, like the library scan
+                # below. As a counter it was "1 of 1" on the common one-server
+                # setup — a full bar before any work had been done.
                 await self._set_phase(
-                    f"Reading libraries on {server.name}",
-                    current=index,
-                    total=len(servers),
+                    f"Reading libraries on {server.name}"
+                    + (f" ({index} of {len(servers)})" if len(servers) > 1 else "")
                 )
                 libraries = await self.sync_libraries(user, server, stats)
 

@@ -174,7 +174,14 @@ export function SyncProgress({ status }: { status?: SyncStatus }) {
         <div
           className={cn(
             'h-full rounded-full bg-accent',
-            !determinate && 'w-1/3 animate-pulse',
+            // Indeterminate: a third-width bar sliding the length of the track.
+            // It must travel — a stationary partial bar is indistinguishable
+            // from a real percentage, and the sync opens on exactly this state,
+            // so every run used to start by claiming it was a third done.
+            // Reduced motion cannot slide, so it fills the track dimmed instead;
+            // still not a percentage.
+            !determinate &&
+              'w-1/3 animate-progress-slide motion-reduce:w-full motion-reduce:animate-none motion-reduce:opacity-40',
           )}
           style={determinate ? { width: `${percent}%` } : undefined}
         />
