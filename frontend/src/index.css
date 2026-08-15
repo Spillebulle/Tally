@@ -31,6 +31,16 @@
     --series-2: 235 104 52;
     --series-3: 27 175 122;
 
+    /* Heatmap ramp: light (near zero) to dark (busiest). Sequential single
+       hue, matching the chart palette. Lived as raw hex in Charts.tsx and was
+       injected as a runtime <style> block, which is exactly what "never a raw
+       hex in a component" exists to prevent. */
+    --heat-0: #cde2fb;
+    --heat-1: #9ec5f4;
+    --heat-2: #5598e7;
+    --heat-3: #2a78d6;
+    --heat-4: #184f95;
+
     --good: 0 131 0;
     --warn: 237 161 0;
     --danger: 227 73 72;
@@ -55,6 +65,13 @@
     --series-1: 57 135 229;
     --series-2: 217 89 38;
     --series-3: 25 158 112;
+
+    /* A deliberate re-step for dark, not an inversion of the light ramp. */
+    --heat-0: #1c5cab;
+    --heat-1: #256abf;
+    --heat-2: #3987e5;
+    --heat-3: #6da7ec;
+    --heat-4: #9ec5f4;
 
     --good: 0 131 0;
     --warn: 201 133 0;

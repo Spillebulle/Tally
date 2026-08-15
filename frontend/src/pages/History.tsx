@@ -6,7 +6,7 @@ import { useToast } from '@/lib/app-context'
 import type { HistoryPage, WatchEvent } from '@/lib/types'
 import { cn, compactNumber, displaySubtitle, formatDateTime } from '@/lib/utils'
 import { Artwork } from '@/components/Poster'
-import { EmptyState, PageHeader, Segmented } from '@/components/ui'
+import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { ClockIcon, XIcon } from '@/components/Icons'
 
 const PAGE_SIZE = 50
@@ -62,7 +62,7 @@ export function History() {
     limit: PAGE_SIZE,
   }
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['history', query],
     queryFn: () => api.history.list(query),
     placeholderData: keepPreviousData,
@@ -133,6 +133,8 @@ export function History() {
             <div key={index} className="skeleton h-16 rounded-xl" />
           ))}
         </div>
+      ) : isError ? (
+        <ErrorState error={error} onRetry={() => void refetch()} />
       ) : total === 0 ? (
         <EmptyState
           icon={<ClockIcon />}

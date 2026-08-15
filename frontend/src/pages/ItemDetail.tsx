@@ -31,6 +31,15 @@ export function ItemDetail() {
   const queryClient = useQueryClient()
   const { notify } = useToast()
   const [openSeason, setOpenSeason] = useState<number | null>(null)
+  // React Router keeps this component mounted across /item/:id changes, so
+  // without resetting, navigating from one show to another opened the new one
+  // with the previous show's season expanded — and an empty episode list when
+  // that show has fewer seasons.
+  const [seasonForItem, setSeasonForItem] = useState(itemId)
+  if (seasonForItem !== itemId) {
+    setSeasonForItem(itemId)
+    setOpenSeason(null)
+  }
 
   const { data: item, isLoading } = useQuery({
     queryKey: ['item', itemId],
@@ -277,7 +286,10 @@ export function ItemDetail() {
                 {item.genres.slice(0, 8).map((genre) => (
                   <Link
                     key={genre}
-                    to={`/${item.media_type === 'movie' ? 'movies' : 'shows'}?genre=${encodeURIComponent(genre)}`}
+                    // /browse, not /movies or /shows: those force
+                    // `anime: 'exclude'`, so an anime title's own genre chip
+                    // led to a grid guaranteed not to contain it.
+                    to={`/browse?genre=${encodeURIComponent(genre)}`}
                     className="chip"
                   >
                     {genre}
@@ -478,6 +490,12 @@ export function ItemDetail() {
                                           ? markUnwatched.mutate(target)
                                           : markWatched.mutate(target)
                                       }
+                                      pending={
+                                        (markWatched.isPending &&
+                                          markWatched.variables === episode.id) ||
+                                        (markUnwatched.isPending &&
+                                          markUnwatched.variables === episode.id)
+                                      }
                                     />
                                   ))}
                                 </ul>
@@ -525,9 +543,12 @@ export function ItemDetail() {
 function EpisodeRow({
   episode,
   onToggle,
+  pending = false,
 }: {
   episode: MediaCard
   onToggle: (id: number, watched: boolean) => void
+  /** True while this row's own request is in flight. */
+  pending?: boolean
 }) {
   const watched = episode.status === 'completed'
   return (
@@ -535,16 +556,27 @@ function EpisodeRow({
       <button
         type="button"
         onClick={() => onToggle(episode.id, watched)}
+        // The tick is derived from `episode.status`, which only changes after
+        // the write *and* a refetch. With no pending state the box sat
+        // unchanged for a second, so people clicked again — logging a
+        // duplicate play. Every other write on this page already showed one.
+        disabled={pending}
         className={cn(
           'grid h-6 w-6 shrink-0 place-items-center rounded-md border transition-colors',
           watched
             ? 'border-good bg-good text-white'
             : 'border-line text-transparent hover:border-accent',
+          pending && 'opacity-60',
         )}
         aria-label={watched ? `Mark ${episode.title} unwatched` : `Mark ${episode.title} watched`}
         aria-pressed={watched}
+        aria-busy={pending}
       >
-        <CheckIcon className="text-xs" />
+        {pending ? (
+          <Spinner className="text-[10px] text-muted" />
+        ) : (
+          <CheckIcon className="text-xs" />
+        )}
       </button>
       <span className="w-10 shrink-0 text-xs tabular-nums text-muted">
         E{String(episode.episode_number ?? 0).padStart(2, '0')}

@@ -323,7 +323,9 @@ export function Dashboard() {
             {stats.data.top_genres.slice(0, 10).map((genre, index) => (
               <Link
                 key={genre.label}
-                to={`/movies?genre=${encodeURIComponent(genre.label)}`}
+                // /browse: the counts behind these chips include shows and
+                // episodes, and /movies would also drop anime entirely.
+                to={`/browse?genre=${encodeURIComponent(genre.label)}`}
                 className={cn('chip', index === 0 && 'chip-active')}
               >
                 {genre.label}

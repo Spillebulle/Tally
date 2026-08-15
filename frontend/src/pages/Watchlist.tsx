@@ -10,7 +10,7 @@ import {
   WATCHLIST_SORTS,
 } from '@/components/BrowseFilters'
 import { Artwork, Poster, PosterSkeleton } from '@/components/Poster'
-import { EmptyState, PageHeader, Segmented, Spinner } from '@/components/ui'
+import { EmptyState, ErrorState, PageHeader, Segmented, Spinner } from '@/components/ui'
 import { BookmarkIcon, PlusIcon, SearchIcon } from '@/components/Icons'
 
 const PAGE_SIZE = 60
@@ -48,7 +48,7 @@ export function Watchlist() {
     limit: PAGE_SIZE,
   }
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: ['watchlist', query],
     queryFn: () => api.watchlist.list(query),
     placeholderData: keepPreviousData,
@@ -142,6 +142,8 @@ export function Watchlist() {
             <PosterSkeleton key={index} />
           ))}
         </div>
+      ) : isError ? (
+        <ErrorState error={error} onRetry={() => void refetch()} />
       ) : entries.length === 0 ? (
         // An empty page means two different things now: nothing watchlisted at
         // all, or nothing matching the filters. Telling the user to go add
@@ -236,7 +238,12 @@ function DiscoverSearch({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient()
   const { notify } = useToast()
 
-  const { data, isFetching } = useQuery({
+  const {
+    data,
+    isFetching,
+    isError: searchFailed,
+    error: searchError,
+  } = useQuery({
     queryKey: ['discover', submitted],
     queryFn: () => api.watchlist.searchDiscover(submitted),
     enabled: submitted.length > 1,
@@ -317,6 +324,18 @@ function DiscoverSearch({ onClose }: { onClose: () => void }) {
             </li>
           ))}
         </ul>
+      )}
+
+      {/* The error was never read, and "nothing found" required `data` to be
+          truthy — so a 401 "Link a Plex account first" cleared the spinner and
+          left the panel completely blank, which reads as broken rather than as
+          unauthorised. */}
+      {searchFailed && !isFetching && (
+        <p className="mt-4 text-sm text-danger">
+          {searchError instanceof Error
+            ? searchError.message
+            : 'Discover search failed.'}
+        </p>
       )}
 
       {data && data.length === 0 && submitted && !isFetching && (

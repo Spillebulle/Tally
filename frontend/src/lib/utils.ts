@@ -150,3 +150,51 @@ export function initials(name: string): string {
     .map((part) => part[0]?.toUpperCase() ?? '')
     .join('')
 }
+
+/**
+ * `YYYY-MM-DD` for a date, in the *viewer's* timezone.
+ *
+ * Not `toISOString().slice(0, 10)`: that converts to UTC first, so a local
+ * midnight east of Greenwich lands on the previous day. The stats API labels
+ * its buckets with plain local dates, so keying them off a UTC conversion made
+ * the activity heatmap show every day's plays one square early.
+ */
+export function localDateKey(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
+/**
+ * Parse a `YYYY-MM` or `YYYY-MM-DD` label as a *local* date.
+ *
+ * `new Date('2026-08-01')` is parsed as UTC midnight by spec, which then formats
+ * as July for anyone west of Greenwich — the "plays by month" axis was labelled
+ * a month early across the Americas.
+ */
+export function parseLocalDateLabel(label: string): Date {
+  const [year, month, day] = label.split('-').map(Number)
+  return new Date(year, (month ?? 1) - 1, day ?? 1)
+}
+
+/**
+ * Copy text, reporting whether it actually worked.
+ *
+ * `navigator.clipboard` is undefined outside a secure context, and Tally is
+ * self-hosted — typically reached at `http://192.168.x.x:8080`, where it simply
+ * does not exist. The old `void navigator.clipboard?.writeText(...)` followed by
+ * an unconditional success toast therefore reported "API key copied" while
+ * copying nothing, and the key is unrecoverable once dismissed. It also left
+ * the promise's rejection unhandled when permission was denied.
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // Permission denied, or a browser that rejects outside a user gesture.
+  }
+  return false
+}

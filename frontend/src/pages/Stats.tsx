@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { compactNumber, formatWatchTime } from '@/lib/utils'
+import { compactNumber, formatWatchTime, parseLocalDateLabel } from '@/lib/utils'
 import {
   ActivityHeatmap,
   BarList,
@@ -10,7 +10,7 @@ import {
   DataTable,
   StatTile,
 } from '@/components/Charts'
-import { EmptyState, PageHeader, Segmented } from '@/components/ui'
+import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { ChartIcon, ClockIcon, FilmIcon, SparkIcon, StarIcon, TvIcon } from '@/components/Icons'
 
 type Range = '90' | '365' | '1825'
@@ -50,7 +50,7 @@ export function Stats() {
   const [range, setRange] = useState<Range>('365')
   const [scope, setScope] = useState<'all' | 'anime'>('all')
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['stats', range, scope],
     queryFn: () => api.stats.get(Number(range), scope === 'anime'),
   })
@@ -69,6 +69,17 @@ export function Stats() {
     )
   }
 
+  // Before the empty branch: a failed request is not an empty history, and
+  // telling the user they have watched nothing hides the actual problem.
+  if (isError) {
+    return (
+      <div>
+        <PageHeader title="Stats" />
+        <ErrorState error={error} onRetry={() => void refetch()} />
+      </div>
+    )
+  }
+
   if (!data || data.watch_events === 0) {
     return (
       <div>
@@ -83,7 +94,11 @@ export function Stats() {
   }
 
   const monthly = data.activity_by_month.slice(-12).map((entry) => ({
-    label: new Date(`${entry.label}-01`).toLocaleDateString(undefined, { month: 'short' }),
+    // Parsed as a local date: `new Date('2026-08-01')` is UTC midnight by spec,
+    // which formats as the previous month anywhere west of Greenwich.
+    label: parseLocalDateLabel(entry.label).toLocaleDateString(undefined, {
+      month: 'short',
+    }),
     value: entry.value,
   }))
 
@@ -162,6 +177,16 @@ export function Stats() {
       <ChartCard
         title="Watch activity"
         description="Plays per day. Darker means a heavier viewing day."
+        // The heatmap was the one chart with no table fallback, and its cells
+        // carry only mouse handlers — so its numbers were unreachable by
+        // keyboard, screen reader or touch. Every chart ships one.
+        table={
+          <DataTable
+            caption="Plays by day"
+            rows={data.activity_by_day.filter((entry) => entry.value > 0)}
+            valueHeader="Plays"
+          />
+        }
       >
         <ActivityHeatmap data={data.activity_by_day} />
       </ChartCard>
