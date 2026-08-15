@@ -192,8 +192,13 @@ export function Segmented<T extends string>({
   label?: string
 }) {
   return (
+    // radiogroup, not tablist: these pick a filter, they do not switch between
+    // panels. `role="tab"` promises `aria-controls` and arrow-key navigation
+    // with a roving tabindex, none of which was here — so the markup described
+    // a widget that did not behave like one. A radio group is what this
+    // actually is, and it needs neither.
     <div
-      role="tablist"
+      role="radiogroup"
       aria-label={label}
       className="inline-flex rounded-xl border border-line bg-raised p-1"
     >
@@ -201,8 +206,8 @@ export function Segmented<T extends string>({
         <button
           key={option.value}
           type="button"
-          role="tab"
-          aria-selected={value === option.value}
+          role="radio"
+          aria-checked={value === option.value}
           onClick={() => onChange(option.value)}
           className={cn(
             'rounded-lg px-3 py-1.5 text-sm font-medium transition-all duration-200 ease-spring',

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type MediaQuery } from '@/lib/api'
@@ -36,10 +36,17 @@ export function Browse({ mode }: BrowseProps) {
 
   const [page, setPage] = useState(0)
 
-  // Any filter change invalidates the current offset.
-  useEffect(() => {
+  // Any filter change invalidates the current offset. Done during render
+  // rather than in an effect: an effect runs *after* the render that already
+  // fired a query at the stale offset, so changing a filter while on page 3
+  // cost one wasted request every time. React re-renders immediately on a
+  // set-state during render, before anything is committed.
+  const filterKey = `${JSON.stringify(filters.query)}|${animeKind}|${mode}`
+  const [lastFilterKey, setLastFilterKey] = useState(filterKey)
+  if (lastFilterKey !== filterKey) {
+    setLastFilterKey(filterKey)
     setPage(0)
-  }, [JSON.stringify(filters.query), animeKind, mode])
+  }
 
   const animeFilter: AnimeFilter = useMemo(() => {
     if (mode === 'anime') return 'only'

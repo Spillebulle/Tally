@@ -55,7 +55,20 @@ export interface UserState {
   notes: string | null
 }
 
-export interface MediaDetail extends MediaCard {
+/**
+ * The detail payload (`MediaItemDetail` in schemas.py).
+ *
+ * Deliberately *not* `extends MediaCard`. A card carries the viewer's own
+ * status, rating, progress and last-watched date flattened onto it; the detail
+ * endpoint does not send those at the top level — they live under `state`.
+ * Inheriting them typed them as present and non-null, so passing a MediaDetail
+ * to anything expecting a card type-checked and then rendered wrong.
+ */
+export interface MediaDetail
+  extends Omit<
+    MediaCard,
+    'status' | 'rating' | 'progress_percent' | 'last_watched_at'
+  > {
   overview: string | null
   tagline: string | null
   backdrop_url: string | null

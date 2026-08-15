@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type MediaQuery } from '@/lib/api'
@@ -36,9 +36,14 @@ export function Watchlist() {
   const kind = (params.get('kind') ?? 'all') as Kind
   const [page, setPage] = useState(0)
 
-  useEffect(() => {
+  // Reset during render, not in an effect — see the note in Browse: an effect
+  // lets one request go out at the previous page's offset first.
+  const filterKey = `${JSON.stringify(filters.query)}|${kind}`
+  const [lastFilterKey, setLastFilterKey] = useState(filterKey)
+  if (lastFilterKey !== filterKey) {
+    setLastFilterKey(filterKey)
     setPage(0)
-  }, [JSON.stringify(filters.query), kind])
+  }
 
   const query: MediaQuery = {
     ...filters.query,

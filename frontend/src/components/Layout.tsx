@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import {
+  Link,
+  NavLink,
+  Outlet,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, useTheme, useToast } from '@/lib/app-context'
@@ -201,7 +208,18 @@ function ThemeToggle() {
 
 function SearchBox() {
   const navigate = useNavigate()
-  const [value, setValue] = useState('')
+  const [params] = useSearchParams()
+  // Reflect the term in the URL, so arriving at /search?q=dune from a link, a
+  // reload or the back button shows results *and* the box that produced them.
+  // Held purely in local state, the field sat empty next to a page full of
+  // results, and refining the search meant retyping it.
+  const urlTerm = params.get('q') ?? ''
+  const [value, setValue] = useState(urlTerm)
+  const [lastUrlTerm, setLastUrlTerm] = useState(urlTerm)
+  if (lastUrlTerm !== urlTerm) {
+    setLastUrlTerm(urlTerm)
+    setValue(urlTerm)
+  }
   const inputRef = useRef<HTMLInputElement>(null)
 
   // "/" focuses search from anywhere, the way media apps behave.

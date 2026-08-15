@@ -230,6 +230,13 @@ export function BrowseFilters({
           className="input h-9 w-auto min-w-[9rem] py-0 text-sm"
         >
           <option value="">All genres</option>
+          {/* The active genre, even before the list has loaded. Without it the
+              select renders with nothing selected while a genre filter is in
+              force — the control saying one thing and the grid another, which
+              is what the rating options below go out of their way to avoid. */}
+          {state.genre && !genres.includes(state.genre) && (
+            <option value={state.genre}>{state.genre}</option>
+          )}
           {genres.map((name) => (
             <option key={name} value={name}>
               {name}
