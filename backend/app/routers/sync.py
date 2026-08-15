@@ -33,7 +33,6 @@ from ..schemas import (
 )
 from ..services import on_deck
 from ..services.metadata import get_metadata_service
-from ..services.metadata.anime import library_looks_like_anime
 from ..services.plex_server import reset_failure_state
 from ..services.sync_service import SyncService
 
@@ -332,13 +331,17 @@ async def _reclassify_library_task(library_id: int) -> None:
 
 
 async def _reclassify_library(db: AsyncSession, library: PlexLibrary) -> None:
-    """Re-apply the anime flag to everything in a library after an override change."""
-    from ..models import PlexMapping
+    """Re-apply the anime flag to everything in a library after an override change.
 
-    target = library.anime_override
-    if target is None:
-        target = library_looks_like_anime(library.title)
-    values = {"is_anime": bool(target), "anime_source": "library_override"}
+    An explicit override is a blanket statement, so it is written straight
+    across. Returning to *auto* is not: it means "work it out again", and
+    stamping `library_looks_like_anime(title)` over every row instead threw away
+    per-item detection — a handful of correctly-detected anime films in a
+    "Movies" library were all forced to False, with an `anime_source` claiming
+    an override that no longer existed. Cycling the chip yes -> no -> auto to
+    undo a mistake destroyed exactly what the user was trying to restore.
+    """
+    from ..models import PlexMapping
 
     # Kept as a subquery rather than a list of ids: a large library would blow
     # past SQLite's bound-parameter limit, and this avoids loading every row
@@ -347,12 +350,53 @@ async def _reclassify_library(db: AsyncSession, library: PlexLibrary) -> None:
         PlexMapping.library_id == library.id
     )
 
-    await db.execute(update(MediaItem).where(MediaItem.id.in_(mapped_items)).values(**values))
-    # Seasons and episodes inherit from their show. One statement, where this
-    # used to run a separate query for every single show in the library.
-    await db.execute(
-        update(MediaItem).where(MediaItem.show_id.in_(mapped_items)).values(**values)
+    if library.anime_override is not None:
+        values = {
+            "is_anime": bool(library.anime_override),
+            "anime_source": "library_override",
+        }
+        await db.execute(
+            update(MediaItem).where(MediaItem.id.in_(mapped_items)).values(**values)
+        )
+        # Seasons and episodes inherit from their show. One statement, where
+        # this used to run a separate query for every single show.
+        await db.execute(
+            update(MediaItem).where(MediaItem.show_id.in_(mapped_items)).values(**values)
+        )
+        await db.commit()
+        return
+
+    # Back to auto: re-run the classifier per item, using what each item already
+    # knows. This is metadata Tally has locally, so it costs no API calls.
+    from ..services.guids import ExternalIds
+    from ..services.metadata.anime import classify
+
+    result = await db.execute(
+        select(MediaItem).where(
+            MediaItem.id.in_(mapped_items),
+            MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
+        )
     )
+    for item in result.scalars():
+        verdict = classify(
+            genres=item.genres or [],
+            ids=ExternalIds(
+                tmdb_id=item.tmdb_id,
+                tvdb_id=item.tvdb_id,
+                imdb_id=item.imdb_id,
+                mal_id=item.mal_id,
+            ),
+            library_title=library.title,
+            library_override=None,
+            mal_matched=item.mal_id is not None,
+        )
+        item.is_anime = verdict.is_anime
+        item.anime_source = verdict.source
+        await db.execute(
+            update(MediaItem)
+            .where(MediaItem.show_id == item.id)
+            .values(is_anime=verdict.is_anime, anime_source=verdict.source)
+        )
     await db.commit()
 
 
@@ -437,10 +481,27 @@ async def reclassify_anime(background: BackgroundTasks, admin: AdminUser) -> dic
 
     async def run() -> None:
         async with session_scope() as db:
+            from ..models import PlexMapping
             from ..services.guids import ExternalIds
             from ..services.metadata import get_metadata_service as get_service
 
             service = get_service()
+            # Which library each item came from, so the user's override and the
+            # library name still count. Without them this re-ran a *weaker*
+            # classification than the original import and wrote the result over
+            # the top: a user who marked their Anime library "yes", added a TMDB
+            # key and pressed Re-detect — the exact sequence the README
+            # recommends — had every title whose TMDB record lacks a JP origin
+            # silently reclassified as not-anime. Overrides always win.
+            library_result = await db.execute(
+                select(PlexMapping.media_item_id, PlexLibrary.title, PlexLibrary.anime_override)
+                .join(PlexLibrary, PlexLibrary.id == PlexMapping.library_id)
+            )
+            libraries_by_item = {
+                item_id: (lib_title, override)
+                for item_id, lib_title, override in library_result
+            }
+
             result = await db.execute(
                 select(MediaItem).where(
                     MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW])
@@ -453,6 +514,9 @@ async def reclassify_anime(background: BackgroundTasks, admin: AdminUser) -> dic
                     imdb_id=item.imdb_id,
                     mal_id=item.mal_id,
                 )
+                library_title, library_override = libraries_by_item.get(
+                    item.id, (None, None)
+                )
                 try:
                     enrichment = await service.enrich(
                         title=item.title,
@@ -460,6 +524,8 @@ async def reclassify_anime(background: BackgroundTasks, admin: AdminUser) -> dic
                         is_show=item.media_type == MediaType.SHOW,
                         ids=ids,
                         plex_genres=item.genres or [],
+                        library_title=library_title,
+                        library_override=library_override,
                     )
                 except Exception:
                     continue

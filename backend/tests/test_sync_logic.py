@@ -1026,3 +1026,110 @@ async def test_ratings_are_read_in_pages_not_one_request_per_item(db, monkeypatc
 
     assert calls == [], "ratings still make a per-item metadata request"
     assert fake.section_pages > 0
+
+
+class FakeHistoryClient(FakePlexClient):
+    """A Plex client that serves one page of watch history."""
+
+    def __init__(self, entries, metadata=None):
+        super().__init__(metadata)
+        self._entries = entries
+        self.history_calls = 0
+
+    async def iter_history(self, *, account_id=None, since=None, page_size=500):
+        self.history_calls += 1
+        yield list(self._entries)
+
+
+async def test_importing_the_same_history_twice_adds_one_event(db, monkeypatch):
+    """`dedupe_key` is what stops a re-sync duplicating the whole history.
+
+    CLAUDE.md calls it load-bearing, but nothing exercised it — the key appears
+    once in the whole suite, as fixture data.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import WatchEvent
+
+    user, server, item, _ = await _fixture_world(db)
+    entries = [
+        {
+            "ratingKey": "42",
+            "historyKey": "/status/sessions/history/9",
+            "viewedAt": int(utcnow().timestamp()),
+            "duration": 8880000,
+        }
+    ]
+    fake = FakeHistoryClient(entries, {"42": {"ratingKey": "42"}})
+
+    service = SyncService(db)
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+
+    await service.sync_history(user, server, SyncStats())
+    await service.sync_history(user, server, SyncStats())
+
+    count = await db.scalar(
+        select(func.count(WatchEvent.id)).where(WatchEvent.user_id == user.id)
+    )
+    assert count == 1, "re-importing the same history duplicated the event"
+
+
+async def test_a_webhook_and_the_history_import_do_not_double_count(db, monkeypatch):
+    """Regression: the same play was recorded twice, and counted twice.
+
+    A webhook's dedupe key is a minute bucket; the history import's is
+    `plex:<historyKey>`. Neither could ever match the other, so on a Plex Pass
+    instance every scrobble produced two history rows and a view_count of 2.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import UserMediaState, WatchEvent, WatchSource
+
+    user, server, item, _ = await _fixture_world(db)
+    watched_at = utcnow()
+
+    # The webhook got there first.
+    service = SyncService(db)
+    db.add(
+        WatchEvent(
+            user_id=user.id,
+            media_item_id=item.id,
+            watched_at=watched_at,
+            source=WatchSource.PLEX_WEBHOOK,
+            dedupe_key=f"webhook:{server.machine_identifier}:42:"
+            f"{int(watched_at.timestamp() // 60)}",
+            completed=True,
+            server_id=server.id,
+        )
+    )
+    await db.flush()
+    await service.record_watch_state(user, item, watched_at)
+    await db.commit()
+
+    # Now the periodic import sees the same play.
+    entries = [
+        {
+            "ratingKey": "42",
+            "historyKey": "/status/sessions/history/9",
+            "viewedAt": int(watched_at.timestamp()),
+        }
+    ]
+    fake = FakeHistoryClient(entries, {"42": {"ratingKey": "42"}})
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+
+    await service.sync_history(user, server, SyncStats())
+
+    count = await db.scalar(
+        select(func.count(WatchEvent.id)).where(WatchEvent.user_id == user.id)
+    )
+    assert count == 1, "the same play was recorded as two events"
+
+    state = (
+        await db.execute(
+            select(UserMediaState).where(
+                UserMediaState.user_id == user.id,
+                UserMediaState.media_item_id == item.id,
+            )
+        )
+    ).scalar_one()
+    assert state.view_count == 1, "the same play was counted twice"

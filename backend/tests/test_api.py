@@ -1278,3 +1278,119 @@ async def test_spa_route_cannot_escape_the_static_directory(tmp_path, monkeypatc
 
     # And an unknown in-bounds path falls through to the SPA rather than 404ing.
     assert main.static_file_for("watchlist") is None
+
+
+async def _library_with_items(db, *, anime_override=None):
+    """A library holding one show with an episode, plus a film, all mapped.
+
+    The existing override tests assert only that the column round-trips — they
+    would pass with `_reclassify_library_task` deleted entirely, because none
+    of them creates a MediaItem. That is why two real reclassification bugs
+    were invisible to CI.
+    """
+    from app.models import PlexMapping
+
+    library = await _library_with_access(db, anime_override=anime_override)
+
+    show = MediaItem(
+        guid_key="tmdb:show:100",
+        media_type=MediaType.SHOW,
+        title="Cowboy Bebop",
+        genres=["Animation"],
+    )
+    film = MediaItem(
+        guid_key="tmdb:movie:200",
+        media_type=MediaType.MOVIE,
+        title="Heat",
+        genres=["Crime"],
+    )
+    db.add_all([show, film])
+    await db.flush()
+
+    episode = MediaItem(
+        guid_key="tmdb:show:100/s1e1",
+        media_type=MediaType.EPISODE,
+        title="Asteroid Blues",
+        show_id=show.id,
+    )
+    db.add(episode)
+    await db.flush()
+
+    db.add_all(
+        [
+            PlexMapping(
+                media_item_id=show.id,
+                server_id=library.server_id,
+                library_id=library.id,
+                rating_key="1",
+            ),
+            PlexMapping(
+                media_item_id=film.id,
+                server_id=library.server_id,
+                library_id=library.id,
+                rating_key="2",
+            ),
+        ]
+    )
+    await db.commit()
+    return library, show, episode, film
+
+
+async def test_an_override_cascades_to_items_and_their_episodes(authed_client, db):
+    """Setting the chip must reach the items, not just the library row.
+
+    Driven through `_reclassify_library` rather than the endpoint: the endpoint
+    hands this to a BackgroundTask that opens its own `session_scope()`, which
+    is bound to the real engine rather than the test database, so nothing it
+    writes would be visible here.
+    """
+    from app.routers.sync import _reclassify_library
+
+    library, show, episode, film = await _library_with_items(db, anime_override=True)
+
+    await _reclassify_library(db, library)
+
+    for row in (show, episode, film):
+        await db.refresh(row)
+        assert row.is_anime is True, f"{row.title} did not inherit the override"
+        assert row.anime_source == "library_override"
+
+
+async def test_returning_to_auto_reclassifies_instead_of_flattening(authed_client, db):
+    """Regression: clearing the override wrote one boolean over every item.
+
+    `library_looks_like_anime(title)` was stamped across the whole library with
+    an `anime_source` of "library_override" even though no override existed. A
+    "Films" library holding a correctly-detected anime show had it forced to
+    False — so cycling the chip yes -> no -> auto to undo a mistake destroyed
+    exactly what the user was trying to restore.
+    """
+    from app.routers.sync import _reclassify_library
+
+    library, show, episode, film = await _library_with_items(db, anime_override=True)
+
+    # Starting point: the override applied to everything, including the film.
+    await _reclassify_library(db, library)
+    await db.refresh(show)
+    await db.refresh(film)
+    assert show.is_anime is True
+    assert film.is_anime is True
+
+    # The show carries a signal of its own that the classifier can find.
+    show.genres = ["Animation", "Anime"]
+    library.anime_override = None
+    await db.commit()
+
+    await _reclassify_library(db, library)
+
+    await db.refresh(show)
+    await db.refresh(episode)
+    await db.refresh(film)
+
+    # Re-classified per item rather than flattened: the anime show keeps its
+    # flag, and the crime film loses the one the override gave it.
+    assert show.is_anime is True, "auto discarded a genuine per-item classification"
+    assert episode.is_anime is True, "the episode did not follow its show"
+    assert film.is_anime is False
+    # And nothing claims an override that no longer exists.
+    assert show.anime_source != "library_override"

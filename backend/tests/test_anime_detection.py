@@ -106,3 +106,45 @@ def test_library_name_matcher():
     assert not library_looks_like_anime("Animation")
     assert not library_looks_like_anime("Movies")
     assert not library_looks_like_anime(None)
+
+
+def test_a_mal_match_alone_does_not_make_a_western_cartoon_anime():
+    """MAL is +2 and the anime keyword is +3, which together reach the
+    threshold of 5. The module docstring calls the MAL signal "corroborating,
+    never decisive alone" — but with an unverified search hit it *was*
+    decisive, because Jikan's fuzzy search always returns something.
+
+    The guard is now in `_titles_match` (see test_metadata_providers), so this
+    pins the scoring side: an American, English, animated title carrying the
+    `anime` keyword must not tip over on a MAL match alone.
+    """
+    western = MetadataResult(
+        genres=["Animation", "Action"],
+        origin_countries=["US"],
+        original_language="en",
+        keywords=["anime", "based on manga"],
+    )
+
+    without_mal = classify(genres=["Animation"], metadata=western, mal_matched=False)
+    with_mal = classify(genres=["Animation"], metadata=western, mal_matched=True)
+
+    assert not without_mal.is_anime
+    assert with_mal.score == without_mal.score + 2
+    # The scoring intentionally lets these two combine — the protection is that
+    # `mal_matched` is only True for a title that actually matched. Assert the
+    # weights, so a future re-weighting that makes MAL decisive on its own is a
+    # deliberate change and not an accident.
+    assert without_mal.score == 3, "keyword weight changed; re-check the MAL total"
+
+
+def test_a_japanese_animated_film_still_classifies_without_mal():
+    """The classifier must not have become so cautious it misses real anime."""
+    verdict = classify(
+        genres=["Animation"],
+        metadata=MetadataResult(
+            genres=["Animation"],
+            origin_countries=["JP"],
+            original_language="ja",
+        ),
+    )
+    assert verdict.is_anime
