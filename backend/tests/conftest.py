@@ -13,6 +13,7 @@ os.environ.setdefault("PUBLIC_URL", "http://testserver")
 
 import httpx  # noqa: E402
 import pytest_asyncio  # noqa: E402
+from sqlalchemy import event  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
 from app.db import get_session  # noqa: E402
@@ -52,6 +53,18 @@ async def engine():
     # every connection its own empty schema.
     path = _TMP / f"test-{os.urandom(6).hex()}.db"
     eng = create_async_engine(f"sqlite+aiosqlite:///{path}")
+
+    # Production turns foreign keys on (see db.py); SQLite leaves them off by
+    # default. Without this the test database silently accepts rows that
+    # reference nothing, so a missing existence check passes here and returns
+    # 500 in the real app — which is exactly how the favorite/notes endpoints
+    # kept their bug.
+    @event.listens_for(eng.sync_engine, "connect")
+    def _fk_pragma(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng

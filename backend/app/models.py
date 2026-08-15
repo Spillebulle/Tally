@@ -327,7 +327,11 @@ class MediaItem(Base):
     metadata_updated_at: Mapped[datetime | None] = mapped_column(
         UtcDateTime, default=None
     )
-    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    # Indexed: this is the `added` sort in media_filters, and every other
+    # sortable column here already is.
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=utcnow, index=True
+    )
 
     mappings: Mapped[list[PlexMapping]] = relationship(
         back_populates="item", cascade="all, delete-orphan"
@@ -354,8 +358,9 @@ class PlexMapping(Base):
     plex_guid: Mapped[str | None] = mapped_column(String(128), default=None, index=True)
     thumb_path: Mapped[str | None] = mapped_column(Text, default=None)
     art_path: Mapped[str | None] = mapped_column(Text, default=None)
+    # Indexed: orders "recently added" on the dashboard.
     added_at: Mapped[datetime | None] = mapped_column(
-        UtcDateTime, default=None
+        UtcDateTime, default=None, index=True
     )
     updated_at: Mapped[datetime | None] = mapped_column(
         UtcDateTime, default=None

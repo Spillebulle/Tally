@@ -1394,3 +1394,24 @@ async def test_returning_to_auto_reclassifies_instead_of_flattening(authed_clien
     assert film.is_anime is False
     # And nothing claims an override that no longer exists.
     assert show.anime_source != "library_override"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/media/999999/favorite", {"is_favorite": True}),
+        ("/api/media/999999/notes", {"notes": "hello"}),
+        ("/api/media/999999/rating", {"rating": 5.0, "push_to_plex": False}),
+        ("/api/media/999999/status", {"status": "completed"}),
+    ],
+)
+async def test_writing_state_for_an_unknown_item_is_a_404(authed_client, path, payload):
+    """favorite and notes lacked the existence check rating and status had.
+
+    With `PRAGMA foreign_keys=ON` — which production sets and the test engine
+    now does too — the insert tripped the foreign key and answered 500. Without
+    the pragma it "worked", writing an orphan row, which is why the test suite
+    never noticed.
+    """
+    response = await authed_client.put(path, json=payload)
+    assert response.status_code == 404, response.text
