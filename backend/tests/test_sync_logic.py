@@ -808,3 +808,135 @@ def _async(value):
         return value
 
     return _inner()
+
+
+class FakePlexTV:
+    """Stands in for plex.tv Discover, with a controllable watchlist read."""
+
+    def __init__(self, items=None, *, complete=True):
+        from app.services.plex_tv import WatchlistFetch
+
+        self._fetch = WatchlistFetch(items=list(items or []), complete=complete)
+        self.removed: list[str] = []
+        self.added: list[str] = []
+
+    async def get_watchlist(self, token: str):
+        return self._fetch
+
+    async def remove_from_watchlist(self, token: str, guid: str) -> bool:
+        self.removed.append(guid)
+        return True
+
+    async def add_to_watchlist(self, token: str, guid: str) -> bool:
+        self.added.append(guid)
+        return True
+
+
+async def _watchlisted_user(db):
+    user = User(
+        username="sam",
+        preferences={"sync_watchlist": True},
+        plex_token_encrypted=encrypt_secret("plex-token"),
+    )
+    item = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Dune")
+    db.add_all([user, item])
+    await db.flush()
+    return user, item
+
+
+async def test_a_partial_discover_read_does_not_tombstone_the_watchlist(db):
+    """Regression: a failed Discover page wiped the user's watchlist.
+
+    `get_watchlist` returned the pages it had managed to fetch, and the push
+    pass treated "absent from that list" as "the user removed it" — so a 500 on
+    page two silently tombstoned every entry after it. Discover is the piece
+    most likely to break, so this is the failure that matters most.
+    """
+    user, item = await _watchlisted_user(db)
+    db.add(
+        WatchlistEntry(
+            user_id=user.id, media_item_id=item.id, active=True, plex_active=True
+        )
+    )
+    await db.commit()
+
+    service = SyncService(db)
+    service.plex_tv = FakePlexTV(items=[], complete=False)
+    stats = SyncStats()
+    await service.sync_watchlist(user, stats)
+
+    from sqlalchemy import select
+
+    entry = (
+        await db.execute(
+            select(WatchlistEntry).where(WatchlistEntry.media_item_id == item.id)
+        )
+    ).scalar_one()
+
+    assert entry.active is True, "an incomplete read removed a watchlist entry"
+    assert stats.watchlist_removed_local == 0
+    assert any("part" in message for message in stats.errors)
+
+
+async def test_a_complete_discover_read_still_mirrors_removals(db):
+    """The guard above must not disable the real removal path."""
+    user, item = await _watchlisted_user(db)
+    db.add(
+        WatchlistEntry(
+            user_id=user.id, media_item_id=item.id, active=True, plex_active=True
+        )
+    )
+    await db.commit()
+
+    service = SyncService(db)
+    service.plex_tv = FakePlexTV(items=[], complete=True)
+    stats = SyncStats()
+    await service.sync_watchlist(user, stats)
+
+    from sqlalchemy import select
+
+    entry = (
+        await db.execute(
+            select(WatchlistEntry).where(WatchlistEntry.media_item_id == item.id)
+        )
+    ).scalar_one()
+
+    assert entry.active is False
+    assert entry.removed_at is not None
+    assert stats.watchlist_removed_local == 1
+
+
+async def test_a_local_removal_is_retried_not_reverted(db):
+    """Regression: removing a watchlist-only title was undone by the next sync.
+
+    `remove_from_watchlist` left `plex_active` True whenever it had no Discover
+    guid to push with — the common case, since a watchlist-only title has no
+    PlexMapping at all. The next sync then read the tombstone as "gone from
+    Plex last time, present now" and reactivated it.
+    """
+    user, item = await _watchlisted_user(db)
+
+    service = SyncService(db)
+    service.plex_tv = FakePlexTV(items=[])
+    await service.add_to_watchlist(user, item)
+    await service.remove_from_watchlist(user, item)
+
+    from sqlalchemy import select
+
+    entry = (
+        await db.execute(
+            select(WatchlistEntry).where(WatchlistEntry.media_item_id == item.id)
+        )
+    ).scalar_one()
+    assert entry.active is False
+    assert entry.plex_active is False, "the removal was not recorded against Plex"
+
+    # Now Plex still reports it — the removal never reached them. The sync must
+    # retry the removal, not resurrect the entry.
+    service.plex_tv = FakePlexTV(
+        items=[{"guid": "plex://movie/abc", "ratingKey": "abc", "title": "Dune"}]
+    )
+    await service.sync_watchlist(user, SyncStats())
+
+    await db.refresh(entry)
+    assert entry.active is False, "a local removal was reverted by the next sync"
