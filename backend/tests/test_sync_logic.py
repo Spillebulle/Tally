@@ -764,6 +764,114 @@ async def test_artwork_falls_back_to_the_raw_asset_when_transcoding_fails(monkey
     assert tried == ["/photo/:/transcode", "/library/metadata/1/thumb/9"]
 
 
+async def test_a_transcoder_500_still_falls_back_to_the_raw_asset(monkeypatch):
+    """Regression: the "random" missing posters.
+
+    The photo transcoder is a subsystem with limits of its own, and a page that
+    asks for forty posters at once exhausts them — at which point it refuses
+    with a 5xx, not the 4xx the test above covers. `_request` turns a 5xx into
+    an exception, so the raw-asset fallback that exists for exactly this was
+    never reached: the browser got a placeholder for a picture the plain file
+    handler would have served, and a different scatter of titles each reload.
+    """
+    from app.services import plex_server as ps
+
+    ps.reset_failure_state()
+    await ps.close_pool()
+    tried: list[str] = []
+
+    class Resp:
+        def __init__(self, status: int, body: bytes = b"") -> None:
+            self.status_code = status
+            self.content = body
+            self.headers = {"content-type": "image/jpeg"}
+
+    class OverloadedTranscoder:
+        is_closed = False
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def request(self, method, url, **kwargs):
+            tried.append(url)
+            if "/photo/:/transcode" in url:
+                return Resp(500)
+            return Resp(200, b"jpeg")
+
+    monkeypatch.setattr(ps.httpx, "AsyncClient", OverloadedTranscoder)
+    client = ps.PlexServerClient("https://plex.example:32400", "token")
+
+    assert await client.image_bytes("/library/metadata/1/thumb/9") == (
+        b"jpeg",
+        "image/jpeg",
+    )
+    assert [u.rsplit(":32400", 1)[1] for u in tried] == [
+        "/photo/:/transcode",
+        "/library/metadata/1/thumb/9",
+    ]
+    # And a server that answered — badly — is not a server that is unreachable.
+    assert ps._failures == {}
+    await ps.close_pool()
+
+
+async def test_the_working_connection_uri_is_remembered_across_clients(monkeypatch):
+    """One walk of the candidate list per server, not one per poster.
+
+    A PlexServerClient is built per request by the artwork proxy, so keeping the
+    answer only on the instance meant a grid of forty posters walked the
+    candidate list forty times — paying a connect timeout on every dead URI
+    before reaching the one that works, forty times over.
+    """
+    import httpx
+
+    from app.services import plex_server as ps
+
+    ps.reset_failure_state()
+    await ps.close_pool()
+    tried: list[str] = []
+
+    class Flaky:
+        is_closed = False
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def request(self, method, url, **kwargs):
+            tried.append(url)
+            if url.startswith("https://dead"):
+                raise httpx.ConnectError("no route to host")
+
+            class Resp:
+                status_code = 200
+
+            return Resp()
+
+    monkeypatch.setattr(ps.httpx, "AsyncClient", Flaky)
+    monkeypatch.setattr(ps.asyncio, "sleep", lambda _delay: _async(None))
+
+    def build():
+        return ps.PlexServerClient(
+            "https://dead.plex.direct:32400",
+            "token",
+            candidate_urls=[
+                "https://dead.plex.direct:32400",
+                "https://live.plex.direct:32400",
+            ],
+        )
+
+    await build()._request("GET", "/identity")
+    dead_attempts = len([u for u in tried if u.startswith("https://dead")])
+    assert dead_attempts > 0
+
+    for _ in range(5):
+        await build()._request("GET", "/identity")
+
+    # Five more requests, none of which went near the dead URI again.
+    assert len([u for u in tried if u.startswith("https://dead")]) == dead_attempts
+    assert len([u for u in tried if u.startswith("https://live")]) == 6
+    await ps.close_pool()
+
+
 async def test_artwork_failures_do_not_trip_the_unreachable_backoff(monkeypatch):
     """Regression: a poster must not be able to declare the server dead.
 

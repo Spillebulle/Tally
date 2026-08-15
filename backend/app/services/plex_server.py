@@ -83,10 +83,23 @@ _COOLDOWN_BASE_SECONDS = 30.0
 _COOLDOWN_MAX_SECONDS = 300.0
 _failures: dict[str, tuple[int, float]] = {}
 
+# The URI that last answered, per server, shared by the whole process for the
+# same reason the connection pool is.
+#
+# `working_url` on the instance only helps a client that makes several calls.
+# The artwork proxy builds a *fresh* client per request, and a grid of posters
+# is forty requests at once — so forty walks of the candidate list, every one of
+# them starting at a URI that may not be the one that works. Plex advertises a
+# URI per address it can see, so the walk is long, and each dead candidate costs
+# a connect timeout before the next is tried. Remembering the answer across
+# clients turns that back into one connection.
+_working_urls: dict[str, str] = {}
+
 
 def reset_failure_state() -> None:
     """Forget every recorded failure. For tests and for an explicit retry."""
     _failures.clear()
+    _working_urls.clear()
 
 
 # One HTTP client for the whole process, so connections stay alive *between*
@@ -185,12 +198,19 @@ class PlexServerClient:
                 f"{retry_after - now:.0f}s ({count} consecutive failures)"
             )
 
-        urls = [self.working_url] if self.working_url else list(self.candidates)
-        if self.working_url and self.working_url in self.candidates:
-            # Keep the rest as fallbacks in case the cached URI has gone away.
-            urls += [u for u in self.candidates if u != self.working_url]
+        # Whichever URI last answered goes first, then the rest as fallbacks in
+        # case it has gone away.
+        remembered = self.working_url or _working_urls.get(key)
+        urls = list(self.candidates) or [self.base_url]
+        if remembered:
+            urls = [remembered] + [u for u in urls if u != remembered]
 
         last_error: Exception | None = None
+        # True once some URI has answered with a status we could read. "The
+        # server said no" and "nothing was reachable" look the same to a caller
+        # that only sees an exception, and they call for opposite responses:
+        # one is worth a different request, the other is not worth any.
+        answered = False
 
         # One pooled client for the whole process — see `_pool()`.
         client = _pool()
@@ -217,10 +237,12 @@ class PlexServerClient:
                 if resp.status_code == 404:
                     return None
                 if resp.status_code >= 500:
+                    answered = True
                     last_error = PlexServerError(f"Server error {resp.status_code}")
                     break  # try the next URI rather than hammering a sick server
 
                 self.working_url = url
+                _working_urls[key] = url
                 _failures.pop(key, None)
                 return resp
 
@@ -240,6 +262,11 @@ class PlexServerClient:
                 delay,
                 last_error,
             )
+        if answered:
+            # Reached the server; it just answered badly. Not `PlexUnreachable`,
+            # because a caller with a second thing to ask — the artwork proxy has
+            # the untranscoded asset to fall back on — should still ask it.
+            raise PlexServerError(f"Plex server returned an error: {last_error}")
         raise PlexUnreachable(
             f"No reachable connection for Plex server (tried {len(urls)}): {last_error}"
         )
@@ -534,12 +561,29 @@ class PlexServerClient:
         )
 
         for endpoint, params in attempts:
-            # record_failures=False: artwork is a passenger on this connection,
-            # not a probe of it. A refused transcode must not trip the
-            # unreachable-server backoff and take the sync down with it.
-            resp = await self._request(
-                "GET", endpoint, params=params, record_failures=False
-            )
+            try:
+                # record_failures=False: artwork is a passenger on this
+                # connection, not a probe of it. A refused transcode must not
+                # trip the unreachable-server backoff and take the sync down
+                # with it.
+                resp = await self._request(
+                    "GET", endpoint, params=params, record_failures=False
+                )
+            except PlexUnreachable:
+                # Nothing answered. The raw asset lives on the same server, so
+                # a second walk of the same dead candidates would only cost
+                # time — let the caller move on to another source.
+                raise
+            except PlexServerError as exc:
+                # The transcoder answered with a 5xx, which is the *ordinary*
+                # way it refuses: it is a subsystem with its own concurrency
+                # limits, and a page asking for forty posters at once will
+                # exhaust them while the plain file handler is perfectly happy.
+                # This used to escape and skip the fallback below, which made a
+                # busy transcoder look like missing artwork — a different
+                # scatter of posters on every reload.
+                log.info("Plex refused artwork %s via %s: %s", path, endpoint, exc)
+                continue
             if resp is not None and resp.status_code < 400:
                 return resp.content, resp.headers.get("content-type", "image/jpeg")
             if resp is not None:
