@@ -191,6 +191,24 @@ FastAPI resolves `MediaFilters.__init__`'s annotations at import time to build
 the query parameters, and stringised annotations leave it with unresolvable
 forward references at request time.
 
+### A button must react before the round trip, not after it
+
+`POST /api/sync` creates the `SyncRun` row **in the request**, then hands the id
+to the background task, which adopts it. Created inside the task instead, the
+UI's follow-up refetch raced it, saw nothing running, fell back to the 30-second
+poll, and the progress bar stayed hidden until the user reloaded — the button
+looked broken. Anything else that kicks off background work should make its
+state true before responding, the same way.
+
+That is the server half of a standing rule: **every button shows a visible
+reaction on click**. On the client that means a pending state (spinner, disabled,
+changed label) or an optimistic update — never waiting on a poll. `SyncProgress`
+takes an optional status precisely so the "clicked, nothing back yet" state can
+render an indeterminate bar.
+
+Because the row now exists up front, the endpoint also has to refuse a second
+concurrent run, or a double click is two visible syncs over one library.
+
 ### Tokens are encrypted at rest
 
 Plex auth tokens grant full account access, so they are Fernet-encrypted with a
@@ -286,7 +304,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 66 tests
+cd backend && .venv/bin/python -m pytest -q     # 68 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
