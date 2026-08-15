@@ -1,5 +1,5 @@
 """Two-way sync: which side wins, and does a removal stay removed."""
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -1208,6 +1208,178 @@ async def test_importing_the_same_history_twice_adds_one_event(db, monkeypatch):
         select(func.count(WatchEvent.id)).where(WatchEvent.user_id == user.id)
     )
     assert count == 1, "re-importing the same history duplicated the event"
+
+
+async def test_history_does_not_mint_a_second_identity_from_a_plex_guid(db, monkeypatch):
+    """Regression: 372 of 4796 rows on a live instance, every one a blank tile.
+
+    A modern Plex history row always carries a `guid`, and it is the `plex://`
+    form — which names the item to this one server and to nothing else. The
+    import took its presence as "the ids resolve, no need to ask for more",
+    fell through `build_guid_key` to `plex:<key>`, and created a *second* row
+    for a film the library already held as `tmdb:movie:603`. The duplicate
+    carried only what a history row has — a title, an air date — so it had no
+    artwork, nothing for enrichment to identify it by, and no external id for
+    `merge_duplicates` to pair it up on. It stayed forever.
+    """
+    from sqlalchemy import func, select
+
+    user, server, item, _ = await _fixture_world(db)
+    before = await db.scalar(select(func.count(MediaItem.id)))
+
+    entries = [
+        {
+            "ratingKey": "77",  # no mapping for this one yet
+            "historyKey": "/status/sessions/history/12",
+            "viewedAt": int(utcnow().timestamp()),
+            "guid": "plex://movie/5d7768ba96b655001fdc0408",
+            "title": "The Matrix",
+            "type": "movie",
+            "originallyAvailableAt": "1999-03-30",
+        }
+    ]
+    # What the server says when actually asked, which is where the tmdb id is.
+    full = {
+        "77": {
+            "ratingKey": "77",
+            "type": "movie",
+            "title": "The Matrix",
+            "year": 1999,
+            "guid": "plex://movie/5d7768ba96b655001fdc0408",
+            "Guid": [{"id": "tmdb://603"}, {"id": "imdb://tt0133093"}],
+            "thumb": "/library/metadata/77/thumb/1700",
+        }
+    }
+    fake = FakeHistoryClient(entries, full)
+
+    service = SyncService(db)
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+    await service.sync_history(user, server, SyncStats())
+
+    # The play landed on the row that already existed, and nothing new was made.
+    assert await db.scalar(select(func.count(MediaItem.id))) == before
+    matrix = await db.scalar(
+        select(MediaItem).where(MediaItem.guid_key == "tmdb:movie:603")
+    )
+    assert matrix is not None and matrix.id == item.id
+    assert (
+        await db.scalar(
+            select(func.count(MediaItem.id)).where(
+                MediaItem.guid_key.like("plex:%")
+            )
+        )
+        == 0
+    ), "a plex:// guid was treated as an identity of its own"
+
+
+async def test_a_year_is_recovered_from_the_air_date_without_moving_the_key(db):
+    """A thin payload has no `year`, and without one nothing can identify it.
+
+    History rows carry `originallyAvailableAt` but not `year`, so rows built
+    from one had no year — and a title with no year is not enough for a
+    provider to match, which is why these rows could never be enriched into
+    having artwork. The air date answers it.
+
+    The guid_key must *not* move as a result: its last-resort branch is
+    title+year, so feeding the recovered year into it would re-key every
+    id-less row already stored and duplicate the lot.
+    """
+    from app.services.media_repo import MediaRepository
+
+    server = PlexServer(
+        machine_identifier="abc123",
+        name="Home",
+        base_url="http://plex:32400",
+        access_token_encrypted=encrypt_secret("token") or "",
+    )
+    db.add(server)
+    await db.flush()
+
+    repo = MediaRepository(db, enrich=False)
+    item = await repo.upsert_from_plex(
+        {
+            "ratingKey": "91",
+            "type": "movie",
+            "title": "101 Dalmatians",
+            "originallyAvailableAt": "1996-11-16",
+        },
+        server=server,
+    )
+    await db.commit()
+
+    assert item is not None
+    assert item.year == 1996
+    # The key is still the year-less one, so existing rows stay where they are.
+    assert item.guid_key == "title:movie:101-dalmatians"
+
+
+async def test_the_backfill_revisits_rows_that_nothing_else_looks_at(db, monkeypatch):
+    """Regression: an artwork-less row was never enriched again, by anything.
+
+    Enrichment hangs off an import: a library scan sees what Plex still holds,
+    the watchlist pass sees the watchlist. A row created from a thin payload is
+    in neither, so it kept its blank tile permanently. This pass is the only
+    thing that goes back for them.
+    """
+    from sqlalchemy import func, select
+
+    from app.services.sync_service import SyncService as Service
+
+    # Exactly the shape found on the live instance: a title, an air date, and
+    # nothing else. The year has to be recovered here too — these rows predate
+    # the import-side fix and no import will ever touch them again.
+    ghost = MediaItem(
+        guid_key="title:movie:101-dalmatians",
+        media_type=MediaType.MOVIE,
+        title="101 Dalmatians",
+        first_aired=date(1996, 11, 16),
+    )
+    # Already has artwork from a provider: must not be picked up again.
+    settled = MediaItem(
+        guid_key="tmdb:movie:603",
+        media_type=MediaType.MOVIE,
+        title="The Matrix",
+        tmdb_id=603,
+        poster_url="https://image.tmdb.org/t/p/w500/matrix.jpg",
+    )
+    db.add_all([ghost, settled])
+    await db.commit()
+
+    asked: list[tuple[str, int | None]] = []
+
+    # Patched below `enrich_existing`, so the year recovery it does is real.
+    async def fake_apply(self, item, *, ids, library, genres):
+        asked.append((item.title, item.year))
+        item.tmdb_id = 10113
+        item.poster_url = "https://image.tmdb.org/t/p/w500/dalmatians.jpg"
+        item.metadata_updated_at = utcnow()
+
+    service = Service(db)
+    monkeypatch.setattr(
+        "app.services.media_repo.MediaRepository._apply_enrichment", fake_apply
+    )
+
+    stats = SyncStats()
+    assert await service.backfill_missing_metadata(stats) == 1
+    # 1996 came from first_aired: without it the provider has only a title, and
+    # "101 Dalmatians" is more than one film.
+    assert asked == [("101 Dalmatians", 1996)]
+    assert stats.metadata_backfilled == 1
+
+    await db.refresh(ghost)
+    assert ghost.tmdb_id == 10113
+    # Now that it has an external id, merge_duplicates can finally see it.
+    assert (
+        await db.scalar(
+            select(func.count(MediaItem.id)).where(MediaItem.tmdb_id.is_not(None))
+        )
+        == 2
+    )
+
+    # Second run: it was just attempted, so it is not asked again immediately.
+    asked.clear()
+    assert await service.backfill_missing_metadata(SyncStats()) == 0
+    assert asked == []
 
 
 async def test_a_webhook_and_the_history_import_do_not_double_count(db, monkeypatch):
