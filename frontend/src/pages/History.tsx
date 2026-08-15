@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
@@ -50,10 +49,29 @@ function dayLabel(dateString: string): string {
 }
 
 export function History() {
-  const [filter, setFilter] = useState<Filter>('all')
-  const [page, setPage] = useState(0)
+  // In the URL, like every other browse surface. Kept in component state, the
+  // filter and page were lost on reload and ignored by the back button, so a
+  // link to "my anime history, page 3" could not exist.
+  const [params, setParams] = useSearchParams()
+  const filter = (params.get('filter') ?? 'all') as Filter
+  const page = Math.max(0, Number(params.get('page') ?? '0') || 0)
   const queryClient = useQueryClient()
   const { notify } = useToast()
+
+  const setFilter = (next: Filter) => {
+    const updated = new URLSearchParams(params)
+    if (next === 'all') updated.delete('filter')
+    else updated.set('filter', next)
+    updated.delete('page')
+    setParams(updated, { replace: true })
+  }
+
+  const setPage = (next: number) => {
+    const updated = new URLSearchParams(params)
+    if (next <= 0) updated.delete('page')
+    else updated.set('page', String(next))
+    setParams(updated)
+  }
 
   const query = {
     media_type: filter === 'movie' || filter === 'episode' ? filter : undefined,
@@ -113,10 +131,7 @@ export function History() {
           <Segmented
             label="Filter history"
             value={filter}
-            onChange={(value) => {
-              setFilter(value)
-              setPage(0)
-            }}
+            onChange={setFilter}
             options={[
               { value: 'all', label: 'Everything' },
               { value: 'movie', label: 'Movies' },
@@ -169,7 +184,7 @@ export function History() {
         <nav className="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">
           <button
             type="button"
-            onClick={() => setPage((value) => Math.max(0, value - 1))}
+            onClick={() => setPage(Math.max(0, page - 1))}
             disabled={page === 0}
             className="btn-outline h-9 px-3 text-sm"
           >
@@ -180,7 +195,7 @@ export function History() {
           </span>
           <button
             type="button"
-            onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
+            onClick={() => setPage(Math.min(pageCount - 1, page + 1))}
             disabled={page >= pageCount - 1}
             className="btn-outline h-9 px-3 text-sm"
           >

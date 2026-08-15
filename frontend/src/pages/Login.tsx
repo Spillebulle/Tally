@@ -205,6 +205,15 @@ function LocalForm({
   onDone: () => Promise<void>
 }) {
   const [isRegister, setIsRegister] = useState(setupRequired)
+  // `useState` seeds once. If the user opened this form before
+  // `api.auth.status` resolved, a fresh install showed "Sign in" rather than
+  // "Create account" — with no account to sign into. Follow the answer when it
+  // lands, unless they have already chosen the other mode themselves.
+  const [seededFrom, setSeededFrom] = useState(setupRequired)
+  if (seededFrom !== setupRequired) {
+    setSeededFrom(setupRequired)
+    setIsRegister(setupRequired)
+  }
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
