@@ -40,7 +40,28 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _run_light_migrations()
+    await _merge_duplicates()
     log.info("Database ready at %s", settings.db_path)
+
+
+async def _merge_duplicates() -> None:
+    """Collapse items that the old watchlist import recorded twice.
+
+    Needs a session rather than a raw connection, so it sits here instead of in
+    `_run_light_migrations`. Failure must not stop the app booting: a duplicate
+    row is a cosmetic problem, and refusing to start over one would be worse
+    than living with it.
+    """
+    from .merge_duplicates import merge_duplicate_media_items
+
+    try:
+        async with session_scope() as db:
+            removed = await merge_duplicate_media_items(db)
+    except Exception:
+        log.exception("Could not merge duplicate media items; continuing")
+        return
+    if removed:
+        log.info("Merged %s duplicate media item(s) into their originals", removed)
 
 
 async def _run_light_migrations() -> None:

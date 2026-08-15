@@ -274,6 +274,11 @@ class PlexTVClient:
                         "X-Plex-Container-Size": page_size,
                         "includeCollections": 0,
                         "includeExternalMedia": 1,
+                        # Without this Discover identifies everything by its own
+                        # ratingKey, which shares no identity with the tmdb id a
+                        # library scan produces — so every watchlist entry became
+                        # a second row for a film already in the library.
+                        "includeGuids": 1,
                     },
                 )
                 if resp.status_code == 401:

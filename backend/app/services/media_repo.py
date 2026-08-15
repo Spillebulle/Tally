@@ -11,7 +11,7 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import MediaItem, MediaType, PlexLibrary, PlexMapping, PlexServer, utcnow
@@ -446,6 +446,52 @@ class MediaRepository:
 
     # -- watchlist / discover ---------------------------------------------
 
+    async def _existing_match_for_discover(
+        self, media_type: MediaType, ids: ExternalIds, title: str, year: int | None
+    ) -> MediaItem | None:
+        """Find the library row a Discover payload is really talking about.
+
+        Discover identifies things by a `plex://` ratingKey, while a library scan
+        identifies the same film by its tmdb id — so `build_guid_key` gives the
+        two a different answer and the watchlist ends up as a parallel copy of
+        the library. That is where 400-odd duplicate rows came from.
+
+        Matching on an external id is exact. Matching on title *and* year is a
+        judgement call, and only made when Discover gave no id at all: without a
+        year it is not made, because "101 Dalmatians" is two different films and
+        guessing between them is worse than a duplicate.
+        """
+        for column, value in (
+            (MediaItem.tmdb_id, ids.tmdb_id),
+            (MediaItem.tvdb_id, ids.tvdb_id),
+            (MediaItem.imdb_id, ids.imdb_id),
+        ):
+            if not value:
+                continue
+            found = await self.db.scalar(
+                select(MediaItem)
+                .where(MediaItem.media_type == media_type, column == value)
+                .order_by(MediaItem.id)
+                .limit(1)
+            )
+            if found is not None:
+                return found
+
+        if ids.tmdb_id or ids.tvdb_id or ids.imdb_id or not year or not title:
+            return None
+
+        found = await self.db.scalar(
+            select(MediaItem)
+            .where(
+                MediaItem.media_type == media_type,
+                MediaItem.year == year,
+                func.lower(MediaItem.title) == title.lower(),
+            )
+            .order_by(MediaItem.id)
+            .limit(1)
+        )
+        return found
+
     async def upsert_from_discover(self, meta: dict[str, Any]) -> MediaItem | None:
         """Create a canonical item from a plex.tv Discover payload.
 
@@ -463,6 +509,8 @@ class MediaRepository:
         guid_key = build_guid_key(media_type.value, ids, title=title, year=year)
 
         item = await self.find_by_guid_key(guid_key)
+        if item is None:
+            item = await self._existing_match_for_discover(media_type, ids, title, year)
         created = item is None
         if item is None:
             item = MediaItem(guid_key=guid_key, media_type=media_type, title=title)
