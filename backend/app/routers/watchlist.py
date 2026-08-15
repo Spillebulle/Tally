@@ -30,7 +30,7 @@ async def list_watchlist(
     user: CurrentUser,
     filters: Annotated[MediaFilters, Depends()],
     sort: WatchlistSortField = "watchlist_added",
-    order: SortOrder = "desc",
+    order: SortOrder = "asc",
     offset: int = Query(0, ge=0),
     limit: int = Query(60, ge=1, le=200),
 ) -> PaginatedWatchlist:
@@ -39,6 +39,12 @@ async def list_watchlist(
     Adds one sort of its own: when you put it on the watchlist, which is a
     different question from when it landed in your library, and the one people
     actually mean on this page. It is the default here for that reason.
+
+    Ascending, unlike every other date sort, because a watchlist is a queue:
+    the thing you added first is the thing you have been meaning to watch
+    longest, and it belongs at the top rather than buried under everything
+    added since. The frontend defaults to the same pair — see
+    `useBrowseFilters` — so the page and a direct API call agree.
     """
     active = and_(
         WatchlistEntry.user_id == user.id,

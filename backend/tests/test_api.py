@@ -245,12 +245,14 @@ async def test_watchlist_takes_the_same_filters_as_the_grid(authed_client, db):
         payload = (await authed_client.get(f"/api/watchlist{query}")).json()
         return [entry["item"]["title"] for entry in payload["entries"]]
 
-    # Default: most recently added to the *watchlist* first.
-    assert await titles() == ["Severance", "Heat", "Akira"]
-    assert await titles("?sort=watchlist_added&order=asc") == [
-        "Akira",
-        "Heat",
+    # Default: added to the *watchlist* — not to the library — oldest first,
+    # because the page is a queue and the top of it should be what has been
+    # waiting longest.
+    assert await titles() == ["Akira", "Heat", "Severance"]
+    assert await titles("?sort=watchlist_added&order=desc") == [
         "Severance",
+        "Heat",
+        "Akira",
     ]
 
     # Every filter the grid has works here too.
@@ -326,6 +328,11 @@ async def test_watchlist_sorts_are_independent_of_library_added(authed_client, d
 
     assert await titles("sort=watchlist_added&order=desc") == ["Old file", "New file"]
     assert await titles("sort=added&order=desc") == ["New file", "Old file"]
+
+    # With nothing asked for: watchlisted date, oldest first. A watchlist is a
+    # queue, so the thing you have been meaning to watch longest leads. The
+    # frontend defaults to the same pair, so the page and the API agree.
+    assert await titles("") == ["New file", "Old file"]
 
 
 async def test_season_children_and_bulk_mark(authed_client, db):

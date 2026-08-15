@@ -123,8 +123,16 @@ export interface BrowseFilterState {
 /**
  * Filter state, held in the URL so a filtered view can be linked and survives a
  * reload. `defaultSort` differs per page.
+ *
+ * `defaultOrder` overrides the general direction rule below, and applies only
+ * while the page is still on its own default sort — the watchlist opens oldest
+ * first because it is a queue, but if you switch it to Year you want the same
+ * newest-first that Year means everywhere else.
  */
-export function useBrowseFilters(defaultSort: string): BrowseFilterState {
+export function useBrowseFilters(
+  defaultSort: string,
+  defaultOrder?: 'asc' | 'desc',
+): BrowseFilterState {
   const [params, setParams] = useSearchParams()
 
   const search = params.get('q') ?? ''
@@ -132,9 +140,13 @@ export function useBrowseFilters(defaultSort: string): BrowseFilterState {
   const sort = params.get('sort') ?? defaultSort
   // Titles read A–Z; everything else is a recency or a score, where the
   // interesting end is the top.
-  const order = (params.get('order') ?? (sort === 'title' ? 'asc' : 'desc')) as
-    | 'asc'
-    | 'desc'
+  const fallbackOrder =
+    sort === defaultSort && defaultOrder
+      ? defaultOrder
+      : sort === 'title'
+        ? 'asc'
+        : 'desc'
+  const order = (params.get('order') ?? fallbackOrder) as 'asc' | 'desc'
   const statusFilter = (params.get('status') ?? 'all') as
     | WatchStatus
     | 'all'
