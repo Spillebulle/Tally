@@ -717,6 +717,86 @@ async def test_the_owner_gets_artwork_without_an_access_row(authed_client, db):
     assert seen["token"] == "owner-token"
 
 
+async def test_a_missing_artwork_path_is_recovered_from_plex(authed_client, db):
+    """Regression: a null thumb_path was a dead end with no way back.
+
+    Library scans only store what their payload carried, so an item Plex had not
+    finished generating artwork for kept a null path until something rescanned
+    it — which for a large library may be never. Serving a poster is the moment
+    we know for certain the row is wrong, so it is repaired there and kept.
+    """
+    from app.models import PlexMapping
+    from app.services import plex_server as plex_server_module
+
+    user = (await db.execute(select(User))).scalars().first()
+    server = PlexServer(
+        machine_identifier="machine-1",
+        name="Basement",
+        base_url="https://plex.example:32400",
+        access_token_encrypted=encrypt_secret("owner-token"),
+        owner_user_id=user.id,
+    )
+    item = MediaItem(
+        guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="101 Dalmatians"
+    )
+    db.add_all([server, item])
+    await db.flush()
+    mapping = PlexMapping(
+        media_item_id=item.id,
+        server_id=server.id,
+        rating_key="52589",
+        thumb_path=None,  # the state that produced a permanent blank tile
+        art_path=None,
+    )
+    db.add(mapping)
+    await db.commit()
+
+    paths: list[str] = []
+
+    async def fake_request(self, method, path, *, params=None, retries=1, record_failures=True):
+        paths.append(path)
+
+        class Resp:
+            status_code = 200
+            content = b"jpeg-bytes"
+            headers = {"content-type": "image/jpeg"}
+
+            @staticmethod
+            def json():
+                return {
+                    "MediaContainer": {
+                        "Metadata": [
+                            {
+                                "type": "movie",
+                                "ratingKey": "52589",
+                                "title": "101 Dalmatians",
+                                "thumb": "/library/metadata/52589/thumb/1700",
+                                "art": "/library/metadata/52589/art/1700",
+                            }
+                        ]
+                    }
+                }
+
+        return Resp()
+
+    original = plex_server_module.PlexServerClient._request
+    plex_server_module.PlexServerClient._request = fake_request  # type: ignore[assignment]
+    try:
+        response = await authed_client.get(f"/api/images/{item.id}/poster")
+    finally:
+        plex_server_module.PlexServerClient._request = original  # type: ignore[assignment]
+
+    assert response.status_code == 200
+    assert response.content == b"jpeg-bytes"
+    # It asked Plex for the metadata, then fetched the artwork it named.
+    assert paths == ["/library/metadata/52589", "/photo/:/transcode"]
+
+    # And the repair is persisted, so the next request costs one call, not two.
+    await db.refresh(mapping)
+    assert mapping.thumb_path == "/library/metadata/52589/thumb/1700"
+    assert mapping.art_path == "/library/metadata/52589/art/1700"
+
+
 async def test_an_unreachable_server_does_not_500_a_poster(authed_client, db):
     from app.models import PlexMapping
     from app.services import plex_server as plex_server_module

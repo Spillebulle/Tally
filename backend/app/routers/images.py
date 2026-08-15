@@ -32,6 +32,7 @@ from sqlalchemy import select
 from ..deps import CurrentUser, DbSession
 from ..models import MediaItem, PlexMapping, PlexServer, User
 from ..security import decrypt_secret
+from ..services.media_repo import artwork_paths
 from ..services.plex_server import PlexServerError
 from ..services.plex_tv import DISCOVER, plex_headers
 from ..services.sync_service import SyncService
@@ -62,12 +63,12 @@ async def _from_plex_servers(
     UserServerAccess row is missing — the case `client_for` falls back for — got
     no artwork at all.
     """
+    # Mappings with no stored path are included on purpose — see the repair below.
     rows = await db.execute(
         select(PlexMapping, PlexServer)
         .join(PlexServer, PlexServer.id == PlexMapping.server_id)
         .where(
             PlexMapping.media_item_id == item_id,
-            getattr(PlexMapping, attr).is_not(None),
             PlexServer.enabled.is_(True),
         )
     )
@@ -75,22 +76,50 @@ async def _from_plex_servers(
     service = SyncService(db)
     width, height = size
     tried = False
+    repaired = False
     for mapping, server in rows.all():
         client = await service.client_for(user, server)
         if client is None:
             continue
         tried = True
+
+        path = getattr(mapping, attr)
+        if path is None:
+            # Nothing stored. Library scans fill these in, but only from what the
+            # scan payload happened to carry — an item Plex had not finished
+            # generating artwork for keeps a null path until something rescans
+            # it, which may be never. Ask Plex directly and keep the answer: this
+            # is the one moment we know for certain the row is wrong, and a
+            # single metadata call fixes it permanently.
+            try:
+                meta = await client.metadata(mapping.rating_key)
+            except PlexServerError as exc:
+                log.info("Could not refresh artwork path on %s: %s", server.name, exc)
+                continue
+            if meta:
+                thumb, art = artwork_paths(meta)
+                mapping.thumb_path = thumb or mapping.thumb_path
+                mapping.art_path = art or mapping.art_path
+                repaired = True
+                path = getattr(mapping, attr)
+            if path is None:
+                continue
+            log.info("Recovered %s for item %s from %s", attr, item_id, server.name)
+
         try:
-            fetched = await client.image_bytes(
-                getattr(mapping, attr), width=width, height=height
-            )
+            fetched = await client.image_bytes(path, width=width, height=height)
         except PlexServerError as exc:
             # An unreachable server is ordinary here — it must not turn a poster
             # into a 500. Try the next one, then fall through to Discover.
             log.info("Artwork unavailable on %s: %s", server.name, exc)
             continue
         if fetched:
+            if repaired:
+                await db.commit()
             return fetched, True
+
+    if repaired:
+        await db.commit()
     return None, tried
 
 
