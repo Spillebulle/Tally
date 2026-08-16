@@ -5,12 +5,19 @@
  * (thin marks, 4px rounded data-ends, a 2px surface gap between neighbours,
  * hairline recessive gridlines) and a library would fight all of them.
  *
- * Colour: every chart plots a single series, so each uses the sequential blue
- * and needs no legend — the heading names what is plotted. Values are directly
- * labelled at the data end, which also satisfies the relief rule for the
- * lighter steps.
+ * Colour: almost every chart plots a single series, so it uses the sequential
+ * blue and needs no legend — the heading names what is plotted. Values are
+ * directly labelled at the data end, which also satisfies the relief rule for
+ * the lighter steps.
+ *
+ * The comparison chart is the one exception, and it is the exception the rule
+ * was always conditioned on: two series in one frame cannot be told apart by a
+ * heading, so it ships a `ChartLegend`. Two series, not three — `--series-1`
+ * and `--series-2` are from the validated palette and nothing here may invent a
+ * colour by eye.
  */
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { StatCount } from '@/lib/types'
 import { cn, compactNumber, localDateKey } from '@/lib/utils'
 
@@ -51,22 +58,49 @@ export function ChartCard({
   description,
   children,
   table,
+  legend,
 }: {
   title: string
   description?: string
   children: React.ReactNode
   table?: React.ReactNode
+  /** Only for a chart with more than one series; see `ChartLegend`. */
+  legend?: React.ReactNode
 }) {
   return (
     <section className="card p-5">
-      <div className="mb-4">
-        {/* The heading names the single plotted series, so no legend box. */}
-        <h2 className="text-base font-semibold tracking-tight text-ink">{title}</h2>
-        {description && <p className="mt-0.5 text-xs text-muted">{description}</p>}
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          {/* The heading names the single plotted series, so no legend box —
+              except where there is more than one, which is what `legend` is. */}
+          <h2 className="text-base font-semibold tracking-tight text-ink">{title}</h2>
+          {description && <p className="mt-0.5 text-xs text-muted">{description}</p>}
+        </div>
+        {legend}
       </div>
       {children}
       {table}
     </section>
+  )
+}
+
+/**
+ * Which colour is which series.
+ *
+ * Exists only where a frame holds more than one, and each entry is a swatch
+ * *beside its name* rather than a colour standing in for one — the same reason
+ * a status dot always sits next to a written label.
+ */
+export function ChartLegend({ series }: { series: Array<{ label: string; className: string }> }) {
+  return (
+    <ul className="flex flex-wrap items-center gap-x-4 gap-y-1">
+      {series.map((entry) => (
+        <li key={entry.label} className="flex items-center gap-1.5 text-xs text-subtle">
+          <span className={cn('h-2.5 w-2.5 shrink-0 rounded-[3px]', entry.className)} />
+          {entry.label}
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -182,6 +216,17 @@ interface ColumnChartProps<T extends StatCount> {
   describe?: (entry: T) => string
   /** Label of the column currently reflected elsewhere, e.g. an active filter. */
   activeLabel?: string | null
+  /**
+   * A second series drawn beside the first, **aligned by index**.
+   *
+   * By index and not by label, because the two series deliberately do not share
+   * labels: the whole point of a comparison is that the second window is a
+   * different stretch of calendar. The caller guarantees the two are the same
+   * length and describe the same offsets — which is why the only caller builds
+   * both windows from one resolved range rather than from two queries that
+   * happen to look similar.
+   */
+  compare?: { data: T[]; describe?: (entry: T) => string }
 }
 
 export function ColumnChart<T extends StatCount>({
@@ -191,12 +236,15 @@ export function ColumnChart<T extends StatCount>({
   onSelect,
   describe,
   activeLabel = null,
+  compare,
 }: ColumnChartProps<T>) {
   const total = data.reduce((sum, d) => sum + d.value, 0)
-  if (total === 0) {
+  const compareTotal = compare?.data.reduce((sum, d) => sum + d.value, 0) ?? 0
+  if (total === 0 && compareTotal === 0) {
     return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
   }
-  const max = Math.max(...data.map((d) => d.value), 1)
+  // One scale across both series, or the comparison would be a lie.
+  const max = Math.max(...data.map((d) => d.value), ...(compare?.data ?? []).map((d) => d.value), 1)
 
   return (
     // `items-stretch` is load-bearing, not a default worth "tidying" away: the
@@ -213,24 +261,45 @@ export function ColumnChart<T extends StatCount>({
       {data.map((entry, index) => {
         const height = (entry.value / max) * 100
         const active = activeLabel === entry.label
-        const text = describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`
+        const earlier = compare?.data[index]
+        const text = [
+          describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`,
+          earlier && (compare?.describe?.(earlier) ?? `${earlier.label}: ${earlier.value}`),
+        ]
+          .filter(Boolean)
+          .join(' · ')
         const bar = (
           <>
-            {/* Value on the cap. */}
+            {/* Value on the cap — the primary series only. Two numbers stacked
+                over a 24px column is unreadable at twelve columns, and the
+                second series' value is in the tooltip, the aria label and the
+                table, which is where a comparison is actually read anyway. */}
             <span className="text-xs font-medium tabular-nums text-ink">
               {entry.value || ''}
             </span>
-            <div className="flex w-full flex-1 items-end justify-center">
+            <div className="flex w-full flex-1 items-end justify-center gap-[2px]">
               <div
                 // ≤24px thick; rounded at the data end, square at the baseline.
                 className={cn(
-                  'w-full max-w-[24px] rounded-t-[4px] transition-[height,background-color]',
+                  'w-full rounded-t-[4px] transition-[height,background-color]',
                   'duration-700 ease-spring',
+                  compare ? 'max-w-[11px]' : 'max-w-[24px]',
                   active ? 'bg-accent' : 'bg-series-1',
                   onSelect && !active && 'group-hover/col:bg-accent',
                 )}
                 style={{ height: `${Math.max(entry.value ? 4 : 0, height)}%` }}
               />
+              {compare && (
+                <div
+                  className={cn(
+                    'w-full max-w-[11px] rounded-t-[4px] bg-series-2',
+                    'transition-[height] duration-700 ease-spring',
+                  )}
+                  style={{
+                    height: `${Math.max(earlier?.value ? 4 : 0, ((earlier?.value ?? 0) / max) * 100)}%`,
+                  }}
+                />
+              )}
             </div>
             <span className={cn('text-xs', active ? 'text-ink' : 'text-muted')}>
               {formatLabel(entry.label)}
@@ -279,6 +348,17 @@ export function ColumnChart<T extends StatCount>({
 interface HeatmapProps {
   data: StatCount[]
   weeks?: number
+  /**
+   * Drill into one day. Given the local `YYYY-MM-DD` key and its count.
+   *
+   * A **secondary** way in, never the only one. A cell is 13px square, which is
+   * a third of the 44px a finger needs, and putting 180 of them in the tab
+   * order would bury every control after the chart. So the cells take a click
+   * for the pointer users who will try it, stay out of the tab order, and the
+   * page pairs this chart with a ranked list of the same days as real buttons —
+   * that list, not this, is the route a keyboard or a thumb takes.
+   */
+  onSelect?: (dateKey: string, value: number) => void
 }
 
 /**
@@ -292,7 +372,7 @@ interface HeatmapProps {
  */
 const HEAT_STEPS = 5
 
-export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
+export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
   const [tip, setTip] = useState<Tooltip | null>(null)
 
   const byDate = new Map(data.map((d) => [d.label, d.value]))
@@ -392,7 +472,13 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
                   className={cn(
                     tier < 0 && 'fill-line/60',
                     'transition-opacity hover:opacity-80',
+                    onSelect && day.value > 0 && 'cursor-pointer',
                   )}
+                  onClick={
+                    onSelect && day.value > 0
+                      ? () => onSelect(localDateKey(day.date), day.value)
+                      : undefined
+                  }
                   style={
                     tier >= 0
                       ? {
@@ -445,22 +531,80 @@ export function ActivityHeatmap({ data, weeks = 26 }: HeatmapProps) {
 // Stat tiles
 // ---------------------------------------------------------------------------
 
+/**
+ * How this figure moved against the window it is being compared with.
+ *
+ * `pct` is null when the earlier window held nothing of this metric: "up from
+ * nothing" has no percentage, so the tile falls back to naming the raw earlier
+ * value instead of inventing an infinity.
+ */
+export interface StatDelta {
+  pct: number | null
+  /** The earlier figure, already formatted. */
+  previous: string
+  /** What it is being compared with: "vs. the previous 90 days". */
+  against: string
+}
+
+/**
+ * Direction, in a glyph and in words.
+ *
+ * Deliberately *not* coloured green and red. Those two colours would assert
+ * that watching more is good and watching less is bad, which this app has no
+ * business claiming — a quiet month is not a regression. The arrow and the sign
+ * carry the direction, so nothing here depends on colour vision either.
+ */
+function DeltaBadge({ delta }: { delta: StatDelta }) {
+  const direction = delta.pct == null ? 0 : Math.sign(delta.pct)
+  const arrow = direction > 0 ? '↑' : direction < 0 ? '↓' : '→'
+  // Five tiles across leaves about 140px of text. "↓ 7.8%, was 77 in the
+  // period before" truncates to "↓ 7.8%, was 77 in…", which is the same
+  // mistake the hints here already avoid — so the phrase naming the comparison
+  // window lives in the title and in the accessible name instead. The control
+  // that turned the comparison on is three inches up the page and says it once.
+  const short =
+    delta.pct == null
+      ? `was ${delta.previous}`
+      : `${Math.abs(delta.pct)}% · was ${delta.previous}`
+  const full =
+    delta.pct == null
+      ? `was ${delta.previous} ${delta.against}`
+      : `${direction > 0 ? 'up' : direction < 0 ? 'down' : 'unchanged at'} ${Math.abs(delta.pct)}%, was ${delta.previous} ${delta.against}`
+  return (
+    <p className="mt-1 truncate text-xs text-subtle" title={full}>
+      <span aria-hidden="true">{arrow} </span>
+      <span className="sr-only">{full}</span>
+      <span aria-hidden="true">{short}</span>
+    </p>
+  )
+}
+
 interface StatTileProps {
   label: string
   value: string
   hint?: string
   icon?: React.ReactNode
   accent?: boolean
+  /** Movement against a comparison window, when one is being shown. */
+  delta?: StatDelta
+  /** Makes the whole tile a link. A tile is 44px-plus, so this is a real target. */
+  to?: string
+  /** Required with `to`: what the destination is, for a screen reader. */
+  toLabel?: string
 }
 
-export function StatTile({ label, value, hint, icon, accent }: StatTileProps) {
-  return (
-    <div
-      className={cn(
-        'card flex items-start gap-3 p-4 transition-transform duration-300 ease-spring hover:-translate-y-0.5',
-        accent && 'ring-1 ring-accent/25',
-      )}
-    >
+export function StatTile({
+  label,
+  value,
+  hint,
+  icon,
+  accent,
+  delta,
+  to,
+  toLabel,
+}: StatTileProps) {
+  const body = (
+    <>
       {icon && (
         <span
           className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl
@@ -475,9 +619,28 @@ export function StatTile({ label, value, hint, icon, accent }: StatTileProps) {
           {value}
         </p>
         {hint && <p className="mt-0.5 truncate text-xs text-muted">{hint}</p>}
+        {delta && <DeltaBadge delta={delta} />}
       </div>
-    </div>
+    </>
   )
+
+  const shell = cn(
+    'card flex items-start gap-3 p-4 transition-transform duration-300 ease-spring hover:-translate-y-0.5',
+    accent && 'ring-1 ring-accent/25',
+  )
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        aria-label={toLabel ?? `${label}: ${value}`}
+        className={cn(shell, 'hover:border-accent/40 focus-visible:border-accent')}
+      >
+        {body}
+      </Link>
+    )
+  }
+  return <div className={shell}>{body}</div>
 }
 
 /**
@@ -488,10 +651,21 @@ export function DataTable({
   caption,
   rows,
   valueHeader = 'Count',
+  compare,
 }: {
   caption: string
   rows: StatCount[]
   valueHeader?: string
+  /**
+   * A second column of the same shape, for a two-series chart.
+   *
+   * Aligned by index, exactly as `ColumnChart`'s `compare` is and for the same
+   * reason — the two windows do not share labels — so `rowLabel` gets to say
+   * what the earlier row was called. Without this a comparison chart would have
+   * a fallback that showed only half of what was drawn, which is not a
+   * fallback.
+   */
+  compare?: { header: string; rows: StatCount[]; rowLabel?: (row: StatCount) => string }
 }) {
   if (rows.length === 0) return null
   return (
@@ -510,17 +684,41 @@ export function DataTable({
               <th scope="col" className="py-1.5 text-right font-medium">
                 {valueHeader}
               </th>
+              {compare && (
+                <th scope="col" className="py-1.5 pl-4 text-right font-medium">
+                  {compare.header}
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.label} className="border-b border-line/60 last:border-0">
-                <td className="py-1.5 pr-4 text-subtle">{row.label}</td>
-                <td className="py-1.5 text-right tabular-nums text-ink">
-                  {row.value.toLocaleString()}
-                </td>
-              </tr>
-            ))}
+            {rows.map((row, index) => {
+              const earlier = compare?.rows[index]
+              return (
+                <tr key={row.label} className="border-b border-line/60 last:border-0">
+                  <td className="py-1.5 pr-4 text-subtle">{row.label}</td>
+                  <td className="py-1.5 text-right tabular-nums text-ink">
+                    {row.value.toLocaleString()}
+                  </td>
+                  {compare && (
+                    <td className="py-1.5 pl-4 text-right tabular-nums text-subtle">
+                      {earlier ? (
+                        <>
+                          {earlier.value.toLocaleString()}
+                          {compare.rowLabel && (
+                            <span className="ml-1 text-xs text-muted">
+                              ({compare.rowLabel(earlier)})
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                  )}
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>

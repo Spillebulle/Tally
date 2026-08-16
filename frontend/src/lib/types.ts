@@ -183,7 +183,30 @@ export interface StatCount {
   value: number
 }
 
-export interface Stats {
+/** The named windows `/api/stats` resolves server-side. */
+export type StatsPreset = '7d' | '30d' | '90d' | 'ytd' | '12m' | 'last_year' | 'all'
+export type StatsGranularity = 'day' | 'week' | 'month'
+
+/**
+ * The window the numbers actually cover, as the server resolved it.
+ *
+ * `since`/`until` are the real UTC bounds and the window is half-open;
+ * `start_day`/`end_day` are the *inclusive* local dates to label it with, which
+ * is not the same thing. `timezone` is the zone that was in force — it reports
+ * the fallback to UTC rather than hiding it.
+ */
+export interface StatsRange {
+  preset: StatsPreset | null
+  since: string
+  until: string
+  start_day: string
+  end_day: string
+  days: number
+  timezone: string
+  granularity: StatsGranularity
+}
+
+export interface StatsTotals {
   total_movies_watched: number
   total_episodes_watched: number
   total_shows_watched: number
@@ -191,6 +214,22 @@ export interface Stats {
   total_runtime_minutes: number
   watch_events: number
   average_rating: number | null
+}
+
+export interface StatsComparison {
+  range: StatsRange
+  totals: StatsTotals
+  /**
+   * Percent movement per metric, keyed by the field names on `StatsTotals`. A
+   * metric is *absent* when the earlier window held nothing of it: "up from
+   * nothing" has no percentage, and the tile shows the raw pair instead.
+   */
+  pct_change: Record<string, number | undefined>
+}
+
+export interface Stats extends StatsTotals {
+  range: StatsRange
+  previous: StatsComparison | null
   current_streak_days: number
   longest_streak_days: number
   top_genres: StatCount[]

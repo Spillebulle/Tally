@@ -37,11 +37,26 @@ import { useSearchParams } from 'react-router-dom'
 /**
  * One query parameter: where it lives in the URL, the values the API will
  * accept, and the value that means "unset" and is therefore never written.
+ *
+ * Two ways to say what is acceptable, and a parameter needs exactly one:
+ *
+ *  - `allowed` for the common case, a closed set the API declares as a
+ *    `Literal` — a scope, a sort, a preset.
+ *  - `parse` for a value that is checked rather than enumerated. A date cannot
+ *    be listed, but `?from=banana`, `?from=2026-13-40` and `?from=0007-01-01`
+ *    are all just as much a 422 as a mistyped sort is, so they need the same
+ *    treatment: answer `null` and the reader falls back. `parse` may also
+ *    *canonicalise* — whatever it returns is the value the page then uses.
+ *
+ * Neither is not an error but a parameter that can never be set: it always
+ * reads as its fallback, which is at least the safe direction.
  */
 export interface UrlParam<T extends string> {
   key: string
   /** The exact set the API accepts. Anything else reads back as `fallback`. */
-  allowed: readonly T[]
+  allowed?: readonly T[]
+  /** Checks (and may canonicalise) a value the API accepts by shape. */
+  parse?: (raw: string) => T | null
   /** The page default. Never appears in the URL. */
   fallback: T
 }
@@ -57,6 +72,15 @@ export interface UrlParamsState<S extends UrlParamSpec> {
   values: UrlParamValues<S>
   /** Write one parameter. Replaces rather than pushes; drops it if it is the default. */
   set: <K extends keyof S>(name: K, value: ValueOf<S[K]>) => void
+  /**
+   * Write several parameters as one navigation.
+   *
+   * Not a convenience: some parameters only mean anything together. Picking a
+   * named timeframe has to clear the custom `from`/`to` in the *same* write, or
+   * the two land as separate history entries and the intermediate one describes
+   * a view nobody asked for — a custom range with half its bounds gone.
+   */
+  setMany: (values: Partial<UrlParamValues<S>>) => void
   /** Drop every declared parameter, leaving anything else in the query alone. */
   reset: () => void
   /** True when at least one parameter is off its default. */
@@ -74,7 +98,9 @@ export function readUrlParam<T extends string>(
   param: UrlParam<T>,
 ): T {
   const raw = params.get(param.key)
-  return param.allowed.includes(raw as T) ? (raw as T) : param.fallback
+  if (raw === null) return param.fallback
+  if (param.parse) return param.parse(raw) ?? param.fallback
+  return param.allowed?.includes(raw as T) ? (raw as T) : param.fallback
 }
 
 /**
@@ -104,14 +130,22 @@ export function useUrlParams<S extends UrlParamSpec>(
     setParams(next, { replace: true })
   }
 
+  // Rule 2, in one place: the default is the *absence* of the parameter, not a
+  // value of it. Every writer goes through here so none of them can forget.
+  const put = (next: URLSearchParams, name: keyof S & string, value: string) => {
+    const param: UrlParam<string> = spec[name]
+    if (value === param.fallback) next.delete(param.key)
+    else next.set(param.key, value)
+  }
+
   return {
     values,
-    set: (name, value) =>
+    set: (name, value) => write((next) => put(next, name as string, value as string)),
+    setMany: (updates) =>
       write((next) => {
-        const param: UrlParam<string> = spec[name]
-        // Rule 2: the default is the absence of the parameter, not a value of it.
-        if ((value as string) === param.fallback) next.delete(param.key)
-        else next.set(param.key, value as string)
+        for (const [name, value] of Object.entries(updates)) {
+          if (value !== undefined) put(next, name, value as string)
+        }
       }),
     reset: () =>
       write((next) => {
