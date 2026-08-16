@@ -374,6 +374,31 @@ watchlisted it, `WatchlistEntry.added_at`) and opens on it, which is a different
 date from `added` (when it reached your library, `MediaItem.created_at`). Keep
 them distinct; collapsing them loses the only ordering that page actually wants.
 
+**The whole browse query lives in the URL** — filters, sort, order and the page
+number — because that is the only place a navigation cannot lose it. The page
+number was component state once, so returning from a title landed on page one
+of an unfiltered grid. `useBrowseFilters` owns all of it; `usePageParam` and
+`Pagination` are shared by the grids, the watchlist *and* History, so `?page=`
+means one thing everywhere (1-based as written, 0-based as used).
+
+Three rules keep it honest, and each was a bug first:
+
+* **Paging pushes, filtering replaces.** Stepping back from page three to page
+  two is what Back is for; one history entry per filter chip — or per
+  keystroke — buries whatever the user actually wants to go back to.
+* **A default never survives into the URL.** Picking the sort a page already
+  opens on says nothing, and a link spelling out every default reads as noise.
+  Changing a filter also drops `page`: narrowing renumbers the results, so
+  "page 4" of the old filter is not a place that still exists.
+* **A URL is untrusted input.** `sort`, `order`, `status`, `kind` and
+  `media_type` are all `Literal`s on the API, so one stale or mistyped word is
+  a 422 and an error card where the grid should be; the rating bounds are
+  `ge=0, le=10` with the same result. Everything read from the query string is
+  checked against what the API accepts and falls back to the page default. A
+  page number past the end is clamped once the real total arrives — never
+  before it, or the first render would throw the page away a moment ahead of
+  its own results.
+
 `media_filters.py` must **not** get `from __future__ import annotations` —
 FastAPI resolves `MediaFilters.__init__`'s annotations at import time to build
 the query parameters, and stringised annotations leave it with unresolvable

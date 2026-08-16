@@ -4,6 +4,7 @@ import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { HistoryPage, WatchEvent } from '@/lib/types'
 import { cn, compactNumber, displaySubtitle, formatDateTime } from '@/lib/utils'
+import { Pagination, usePageParam } from '@/components/BrowseFilters'
 import { Artwork } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { ClockIcon, XIcon } from '@/components/Icons'
@@ -18,7 +19,14 @@ const SOURCE_LABELS: Record<WatchEvent['source'], string> = {
   import: 'Imported',
 }
 
-type Filter = 'all' | 'movie' | 'episode' | 'anime'
+const FILTERS = [
+  { value: 'all', label: 'Everything' },
+  { value: 'movie', label: 'Movies' },
+  { value: 'episode', label: 'Episodes' },
+  { value: 'anime', label: 'Anime' },
+] as const
+
+type Filter = (typeof FILTERS)[number]['value']
 
 /** Group events by calendar day so the timeline reads as a diary. */
 function groupByDay(events: WatchEvent[]): Array<[string, WatchEvent[]]> {
@@ -51,10 +59,15 @@ function dayLabel(dateString: string): string {
 export function History() {
   // In the URL, like every other browse surface. Kept in component state, the
   // filter and page were lost on reload and ignored by the back button, so a
-  // link to "my anime history, page 3" could not exist.
+  // link to "my anime history, page 3" could not exist. The page number is
+  // read and written by the same helper the grids use, so `?page=` means one
+  // thing across the app.
   const [params, setParams] = useSearchParams()
-  const filter = (params.get('filter') ?? 'all') as Filter
-  const page = Math.max(0, Number(params.get('page') ?? '0') || 0)
+  const requestedFilter = params.get('filter')
+  const filter: Filter = FILTERS.some((option) => option.value === requestedFilter)
+    ? (requestedFilter as Filter)
+    : 'all'
+  const { page, setPage } = usePageParam()
   const queryClient = useQueryClient()
   const { notify } = useToast()
 
@@ -64,13 +77,6 @@ export function History() {
     else updated.set('filter', next)
     updated.delete('page')
     setParams(updated, { replace: true })
-  }
-
-  const setPage = (next: number) => {
-    const updated = new URLSearchParams(params)
-    if (next <= 0) updated.delete('page')
-    else updated.set('page', String(next))
-    setParams(updated)
   }
 
   const query = {
@@ -132,12 +138,7 @@ export function History() {
             label="Filter history"
             value={filter}
             onChange={setFilter}
-            options={[
-              { value: 'all', label: 'Everything' },
-              { value: 'movie', label: 'Movies' },
-              { value: 'episode', label: 'Episodes' },
-              { value: 'anime', label: 'Anime' },
-            ]}
+            options={FILTERS.map((option) => ({ ...option }))}
           />
         }
       />
@@ -180,29 +181,12 @@ export function History() {
         </div>
       )}
 
-      {pageCount > 1 && (
-        <nav className="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">
-          <button
-            type="button"
-            onClick={() => setPage(Math.max(0, page - 1))}
-            disabled={page === 0}
-            className="btn-outline h-9 px-3 text-sm"
-          >
-            Previous
-          </button>
-          <span className="px-3 text-sm tabular-nums text-muted">
-            Page {page + 1} of {pageCount}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPage(Math.min(pageCount - 1, page + 1))}
-            disabled={page >= pageCount - 1}
-            className="btn-outline h-9 px-3 text-sm"
-          >
-            Next
-          </button>
-        </nav>
-      )}
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        onPage={setPage}
+        ready={!isLoading}
+      />
     </div>
   )
 }
