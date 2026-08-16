@@ -50,6 +50,27 @@ HANDLED_EVENTS = {
 }
 
 
+def _as_int(value: Any) -> int | None:
+    """A number out of an attacker-supplied payload, or nothing.
+
+    Plex sends these as integers, but this endpoint cannot be authenticated, so
+    a bare `int(value)` on whatever arrived is a 500 waiting to happen — and a
+    5xx is the one answer Plex responds to by retrying and then disabling the
+    webhook.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _resolve_user(db: AsyncSession, payload: dict[str, Any]) -> User | None:
     """Match the webhook's Account block to a Tally user."""
     account = payload.get("Account") or {}
@@ -157,6 +178,11 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str,
                     source=WatchSource.PLEX_WEBHOOK,
                     dedupe_key=dedupe_key,
                     completed=True,
+                    # What Plex says the item runs to. The stats runtime total
+                    # reads this before falling back to `runtime_minutes`, and
+                    # a webhook-minted row may be the only record of an item
+                    # the library scan never saw.
+                    duration_ms=_as_int(metadata.get("duration")),
                     server_id=server.id,
                     player=(payload.get("Player") or {}).get("title"),
                     device=(payload.get("Player") or {}).get("product"),
@@ -169,12 +195,12 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str,
 
     if event in ("media.play", "media.resume", "media.pause", "media.stop"):
         state = await service.get_or_create_state(user.id, item.id)
-        offset = metadata.get("viewOffset")
+        offset = _as_int(metadata.get("viewOffset"))
         if offset is not None:
-            state.progress_ms = int(offset)
-        duration = metadata.get("duration")
+            state.progress_ms = offset
+        duration = _as_int(metadata.get("duration"))
         if duration:
-            state.duration_ms = int(duration)
+            state.duration_ms = duration
         state.last_watched_at = now
         if state.status != WatchStatus.COMPLETED:
             state.status = WatchStatus.WATCHING
@@ -187,15 +213,15 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str,
         return {"status": "ok", "action": event, "item": item.title}
 
     if event == "media.rate":
-        rating = metadata.get("userRating")
+        rating = _as_float(metadata.get("userRating"))
         if rating is None:
             return {"status": "ignored", "reason": "rate event without a rating"}
         state = await service.get_or_create_state(user.id, item.id)
-        state.rating = float(rating)
+        state.rating = rating
         state.rating_updated_at = now
         # Record it as the Plex baseline too: this value *came from* Plex, so the
         # next sync must not mistake it for a local edit and push it back.
-        state.plex_rating = float(rating)
+        state.plex_rating = rating
         state.plex_rating_synced_at = now
         await db.commit()
         return {"status": "ok", "action": "rated", "item": item.title}

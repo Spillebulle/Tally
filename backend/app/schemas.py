@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import MediaType, WatchSource, WatchStatus
+from .models import ApiKeyScope, MediaType, WatchSource, WatchStatus
 
 
 class ORMModel(BaseModel):
@@ -69,6 +69,10 @@ class UserPreferences(BaseModel):
     separate_anime: bool | None = None
     default_view: str | None = None
     theme: str | None = None
+    # IANA name ("Europe/Oslo"). None means UTC — see `app/timezones.py` and the
+    # stats router, which bucket days in this zone. Validated in the router
+    # rather than here, so an unloadable zone is a 422 and not a silent UTC.
+    timezone: str | None = None
     # None is a real value here — "follow the Plex server's onDeckWindow" — so
     # this endpoint keys off which fields were *sent*, not which are non-null.
     continue_watching_weeks: int | None = Field(None, ge=0, le=520)
@@ -254,6 +258,10 @@ class WatchlistEntryOut(ORMModel):
 
 class ApiKeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
+    # Anything unrecognised is a 422 rather than a quietly narrowed key: the
+    # caller must know what they asked for. Omitting it keeps the historical
+    # behaviour, so existing clients are unaffected.
+    scope: ApiKeyScope = ApiKeyScope.FULL
 
 
 class ApiKeyOut(ORMModel):
@@ -261,6 +269,9 @@ class ApiKeyOut(ORMModel):
     name: str
     # The visible half only. The rest exists nowhere but the owner's copy.
     prefix: str
+    # A row written before scopes existed reads back as "full", which is what it
+    # was issued with.
+    scope: ApiKeyScope = ApiKeyScope.FULL
     created_at: datetime
     last_used_at: datetime | None = None
     revoked_at: datetime | None = None
@@ -383,7 +394,36 @@ class StatCount(BaseModel):
     value: float
 
 
-class StatsOut(BaseModel):
+StatsPreset = Literal["7d", "30d", "90d", "ytd", "12m", "last_year", "all"]
+StatsGranularity = Literal["day", "week", "month"]
+
+
+class StatsRange(BaseModel):
+    """The window the numbers actually cover, resolved server-side.
+
+    The caller asks with a preset, or a `since`/`until` pair, or the legacy
+    `days`; whichever it was, this says what that turned into — so the UI can
+    label the page "1 Jan – 16 Aug 2026" without re-deriving a calculation that
+    depends on the viewer's timezone, on which the two sides have to agree.
+
+    `since`/`until` are the real UTC bounds of the query and the window is
+    half-open, `since <= watched_at < until`, so two adjacent windows can never
+    both claim the same play. `start_day`/`end_day` are the *inclusive* local
+    dates for display, which is not the same thing: the last day's `until` is
+    the following midnight.
+    """
+
+    preset: StatsPreset | None
+    since: datetime
+    until: datetime
+    start_day: date
+    end_day: date
+    days: int
+    timezone: str
+    granularity: StatsGranularity
+
+
+class StatsTotals(BaseModel):
     total_movies_watched: int
     total_episodes_watched: int
     total_shows_watched: int
@@ -391,6 +431,23 @@ class StatsOut(BaseModel):
     total_runtime_minutes: int
     watch_events: int
     average_rating: float | None
+
+
+class StatsComparison(BaseModel):
+    """The same aggregation over the window immediately before this one."""
+
+    range: StatsRange
+    totals: StatsTotals
+    # Percent change of the current window against the previous one, keyed by
+    # the field names on StatsTotals. A metric is absent from the mapping when
+    # the previous window was zero (or unrated), because "up from nothing" has
+    # no percentage — the tile should show the raw pair instead.
+    pct_change: dict[str, float]
+
+
+class StatsOut(StatsTotals):
+    range: StatsRange
+    previous: StatsComparison | None = None
     current_streak_days: int
     longest_streak_days: int
     top_genres: list[StatCount]
