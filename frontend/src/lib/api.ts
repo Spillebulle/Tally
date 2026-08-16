@@ -6,6 +6,7 @@ import type {
   HistoryPage,
   Library,
   MediaCard,
+  MediaCredits,
   MediaDetail,
   Paginated,
   PlexAuthPoll,
@@ -112,6 +113,10 @@ export interface MediaQuery extends Query {
   anime?: string
   watch_status?: string
   genre?: string
+  /** The facets a detail page links out on, each an exact match. */
+  content_rating?: string
+  studio?: string
+  director?: string
   year?: number
   unwatched?: boolean
   favorites?: boolean
@@ -144,7 +149,10 @@ export const api = {
   media: {
     list: (query: MediaQuery) => get<Paginated<MediaCard>>('/api/media', query),
     genres: (anime?: string) => get<string[]>('/api/media/genres', { anime }),
+    contentRatings: (anime?: string) =>
+      get<string[]>('/api/media/content-ratings', { anime }),
     detail: (id: number) => get<MediaDetail>(`/api/media/${id}`),
+    credits: (id: number) => get<MediaCredits>(`/api/media/${id}/credits`),
     children: (id: number, season?: number) =>
       get<MediaCard[]>(`/api/media/${id}/children`, { season }),
     continueWatching: () =>

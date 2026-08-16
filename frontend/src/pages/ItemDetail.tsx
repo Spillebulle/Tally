@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import type { MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
+import type { Credit, MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
 import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/lib/utils'
 import { Artwork } from '@/components/Poster'
 import {
@@ -14,7 +14,7 @@ import {
   SparkIcon,
   XIcon,
 } from '@/components/Icons'
-import { Spinner, StarRating, StatusBadge } from '@/components/ui'
+import { ErrorState, Spinner, StarRating, StatusBadge } from '@/components/ui'
 
 const STATUS_OPTIONS: WatchStatus[] = [
   'plan_to_watch',
@@ -23,6 +23,18 @@ const STATUS_OPTIONS: WatchStatus[] = [
   'on_hold',
   'dropped',
 ]
+
+/**
+ * Where a facet on this page takes you.
+ *
+ * `/browse`, not `/movies` or `/shows`, for the reason the genre chips already
+ * give: those force `anime: 'exclude'`, so an anime title's own facet would
+ * lead to a grid guaranteed not to contain it. The query key is the one
+ * `useBrowseFilters` reads, so the filter bar over there shows the same filter
+ * as a removable chip and can widen or clear it.
+ */
+const facetLink = (key: string, value: string) =>
+  `/browse?${key}=${encodeURIComponent(value)}`
 
 export function ItemDetail() {
   const { id } = useParams<{ id: string }>()
@@ -45,6 +57,16 @@ export function ItemDetail() {
     queryKey: ['item', itemId],
     queryFn: () => api.media.detail(itemId),
     enabled: Number.isFinite(itemId),
+  })
+
+  // Fetched on first view rather than during a library scan — see
+  // `services/credits.py`. Only films and series have them; an episode's
+  // credits are the show's, and asking per episode is the cost that design
+  // exists to avoid.
+  const credits = useQuery({
+    queryKey: ['credits', itemId],
+    queryFn: () => api.media.credits(itemId),
+    enabled: item?.media_type === 'movie' || item?.media_type === 'show',
   })
 
   const seasons = useQuery({
@@ -183,19 +205,45 @@ export function ItemDetail() {
       ? Math.round((item.watched_episodes / item.total_episodes) * 100)
       : null
 
-  const facts: Array<[string, string]> = [
-    item.first_aired ? ['Released', formatDate(item.first_aired)] : null,
-    formatRuntime(item.runtime_minutes) ? ['Runtime', formatRuntime(item.runtime_minutes)!] : null,
-    item.content_rating ? ['Rated', item.content_rating] : null,
-    item.studio ? ['Studio', item.studio] : null,
-    item.network ? ['Network', item.network] : null,
-    item.release_status ? ['Status', item.release_status] : null,
-    item.anime_format ? ['Format', item.anime_format] : null,
-    item.state?.last_watched_at
-      ? ['Last watched', relativeTime(item.state.last_watched_at)]
-      : null,
-    (item.state?.view_count ?? 0) > 1 ? ['Plays', String(item.state?.view_count)] : null,
-  ].filter(Boolean) as Array<[string, string]>
+  const directors = credits.data?.directors ?? []
+
+  // `to` turns a fact into a way into the library: certificate, studio and
+  // director are all things a whole shelf shares, and each lands on a browse
+  // view already filtered to it.
+  const facts: Fact[] = [
+    item.first_aired && { term: 'Released', value: formatDate(item.first_aired) },
+    formatRuntime(item.runtime_minutes) && {
+      term: 'Runtime',
+      value: formatRuntime(item.runtime_minutes)!,
+    },
+    item.content_rating && {
+      term: 'Rated',
+      value: item.content_rating,
+      to: facetLink('content_rating', item.content_rating),
+    },
+    ...directors.map((person, index) => ({
+      // Two directors are a pair, not a list with a heading each.
+      term: index === 0 ? (directors.length > 1 ? 'Directors' : 'Director') : '',
+      value: person.name,
+      to: facetLink('director', person.name),
+    })),
+    item.studio && {
+      term: 'Studio',
+      value: item.studio,
+      to: facetLink('studio', item.studio),
+    },
+    item.network && { term: 'Network', value: item.network },
+    item.release_status && { term: 'Status', value: item.release_status },
+    item.anime_format && { term: 'Format', value: item.anime_format },
+    item.state?.last_watched_at && {
+      term: 'Last watched',
+      value: relativeTime(item.state.last_watched_at),
+    },
+    (item.state?.view_count ?? 0) > 1 && {
+      term: 'Plays',
+      value: String(item.state?.view_count),
+    },
+  ].filter(Boolean) as Fact[]
 
   return (
     <div className="-mt-6 sm:-mt-8">
@@ -404,7 +452,11 @@ export function ItemDetail() {
 
         {/* Overview + facts */}
         <div className="mt-10 grid gap-8 lg:grid-cols-[1fr_18rem]">
-          <div className="space-y-8">
+          {/* `min-w-0`, or the cast strip cannot scroll. A grid track sizes to
+              its content by default (`min-width: auto`), so the strip's full
+              intrinsic width pushed this column — and the whole page — wider
+              than the viewport instead of scrolling inside its own box. */}
+          <div className="min-w-0 space-y-8">
             {item.overview && (
               <section>
                 <h2 className="text-lg font-semibold tracking-tight text-ink">Overview</h2>
@@ -412,6 +464,16 @@ export function ItemDetail() {
                   {item.overview}
                 </p>
               </section>
+            )}
+
+            {(item.media_type === 'movie' || item.media_type === 'show') && (
+              <CastStrip
+                cast={credits.data?.cast ?? []}
+                loading={credits.isLoading}
+                isError={credits.isError}
+                error={credits.error}
+                onRetry={() => void credits.refetch()}
+              />
             )}
 
             {item.media_type === 'show' && (
@@ -516,10 +578,29 @@ export function ItemDetail() {
               <div className="card p-4">
                 <h3 className="label">Details</h3>
                 <dl className="mt-3 space-y-2.5 text-sm">
-                  {facts.map(([term, value]) => (
-                    <div key={term} className="flex justify-between gap-4">
-                      <dt className="text-muted">{term}</dt>
-                      <dd className="truncate text-right capitalize text-ink">{value}</dd>
+                  {facts.map((fact) => (
+                    <div
+                      key={`${fact.term}-${fact.value}`}
+                      className="flex justify-between gap-4"
+                    >
+                      <dt className="text-muted">{fact.term}</dt>
+                      <dd className="truncate text-right capitalize text-ink">
+                        {fact.to ? (
+                          // Underlined at rest, not on hover: touch has no
+                          // hover, so a hover-only cue leaves half the users
+                          // with no way of knowing this row goes anywhere.
+                          <Link
+                            to={fact.to}
+                            className="underline decoration-muted decoration-dotted
+                                       underline-offset-4 hover:text-accent
+                                       hover:decoration-accent"
+                          >
+                            {fact.value}
+                          </Link>
+                        ) : (
+                          fact.value
+                        )}
+                      </dd>
                     </div>
                   ))}
                 </dl>
@@ -537,6 +618,87 @@ export function ItemDetail() {
         </div>
       </div>
     </div>
+  )
+}
+
+/** One row of the details card. `to` makes it a way into a filtered library. */
+interface Fact {
+  term: string
+  value: string
+  to?: string
+}
+
+/**
+ * The cast, as a strip you scroll through.
+ *
+ * Scrolling is the only affordance here, so it is not hidden behind hover: the
+ * scrollbar stays visible on a pointer device and the strip drags on touch.
+ * Nothing is revealed on hover at all, so there is nothing a touch user cannot
+ * reach.
+ */
+function CastStrip({
+  cast,
+  loading,
+  isError,
+  error,
+  onRetry,
+}: {
+  cast: Credit[]
+  loading: boolean
+  isError: boolean
+  error: unknown
+  onRetry: () => void
+}) {
+  // A failed request is not an empty cast — checked before the empty branch, or
+  // a 500 would render as "this film has nobody in it".
+  if (isError) {
+    return (
+      <section>
+        <h2 className="text-lg font-semibold tracking-tight text-ink">Cast</h2>
+        <div className="mt-3">
+          <ErrorState error={error} onRetry={onRetry} title="Could not load the cast" />
+        </div>
+      </section>
+    )
+  }
+
+  // Nothing to show and nothing pending: TMDB had no credits for this title, or
+  // no TMDB key is configured. Neither is worth a heading over an empty rail.
+  if (!loading && cast.length === 0) return null
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold tracking-tight text-ink">Cast</h2>
+      <ul className="scroll-x scrollbar-thin -mx-1 mt-3 flex gap-4 px-1 pb-3">
+        {loading
+          ? Array.from({ length: 8 }, (_, index) => (
+              <li key={index} className="w-[104px] shrink-0">
+                <div className="skeleton aspect-[2/3] w-full rounded-xl" />
+                <div className="skeleton mt-2 h-3.5 w-3/4 rounded" />
+                <div className="skeleton mt-1.5 h-3 w-1/2 rounded" />
+              </li>
+            ))
+          : cast.map((person) => (
+              <li key={person.person_id} className="w-[104px] shrink-0">
+                <Artwork
+                  src={person.profile_url}
+                  title={person.name}
+                  showTitle={false}
+                  imgClassName="object-top"
+                  className="aspect-[2/3] rounded-xl bg-raised ring-1 ring-line"
+                />
+                <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-ink">
+                  {person.name}
+                </p>
+                {person.character && (
+                  <p className="mt-0.5 line-clamp-2 text-xs leading-snug text-muted">
+                    {person.character}
+                  </p>
+                )}
+              </li>
+            ))}
+      </ul>
+    </section>
   )
 }
 

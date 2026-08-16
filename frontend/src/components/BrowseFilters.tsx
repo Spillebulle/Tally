@@ -91,10 +91,31 @@ const numberParam = (raw: string | null): number | undefined => {
   return Number.isFinite(value) ? value : undefined
 }
 
+/**
+ * Facets a detail page links out on.
+ *
+ * Only `content_rating` gets a picker: a library holds a dozen certificates but
+ * hundreds of studios and thousands of directors, and a select is not a way to
+ * find one name in a thousand. The other two are arrived at by clicking one on
+ * an item page, and appear here as a removable chip instead — so whatever is
+ * narrowing the grid is still named in the bar, and can still be undone,
+ * without a control nobody could use.
+ */
+const FACETS = [
+  { key: 'content_rating', label: 'Rated', picker: true },
+  { key: 'studio', label: 'Studio', picker: false },
+  { key: 'director', label: 'Director', picker: false },
+] as const
+
+type FacetKey = (typeof FACETS)[number]['key']
+
 /** The subset of a media query these controls own. */
 export interface FilterQuery {
   q?: string
   genre?: string
+  content_rating?: string
+  studio?: string
+  director?: string
   watch_status?: WatchStatus
   unwatched?: true
   min_rating?: number
@@ -106,6 +127,8 @@ export interface FilterQuery {
 export interface BrowseFilterState {
   search: string
   genre: string
+  /** The active facet values, keyed as they appear in the URL. */
+  facets: Record<FacetKey, string>
   sort: string
   order: 'asc' | 'desc'
   statusFilter: WatchStatus | 'all' | 'unwatched'
@@ -137,6 +160,9 @@ export function useBrowseFilters(
 
   const search = params.get('q') ?? ''
   const genre = params.get('genre') ?? ''
+  const facets = Object.fromEntries(
+    FACETS.map((facet) => [facet.key, params.get(facet.key) ?? '']),
+  ) as Record<FacetKey, string>
   const sort = params.get('sort') ?? defaultSort
   // Titles read A–Z; everything else is a recency or a score, where the
   // interesting end is the top.
@@ -173,6 +199,9 @@ export function useBrowseFilters(
   const query: FilterQuery = {
     q: search || undefined,
     genre: genre || undefined,
+    content_rating: facets.content_rating || undefined,
+    studio: facets.studio || undefined,
+    director: facets.director || undefined,
     watch_status:
       statusFilter !== 'all' && statusFilter !== 'unwatched' ? statusFilter : undefined,
     unwatched: statusFilter === 'unwatched' || undefined,
@@ -185,12 +214,18 @@ export function useBrowseFilters(
   return {
     search,
     genre,
+    facets,
     sort,
     order,
     statusFilter,
     minRating,
     maxRating,
-    active: Boolean(genre) || statusFilter !== 'all' || minRating != null || maxRating != null,
+    active:
+      Boolean(genre) ||
+      FACETS.some((facet) => facets[facet.key]) ||
+      statusFilter !== 'all' ||
+      minRating != null ||
+      maxRating != null,
     update,
     setRating,
     // A search term is navigation, not a filter — clearing the filters should
@@ -203,19 +238,45 @@ export function useBrowseFilters(
 export function BrowseFilters({
   state,
   genres,
+  contentRatings = [],
   sorts = SORTS,
   busy,
 }: {
   state: BrowseFilterState
   genres: string[]
+  /** Certificates present in the library, for the "Rated" select. */
+  contentRatings?: string[]
   sorts?: readonly SortOption[]
   /** Shows a quiet "Updating…" while a refetch is in flight. */
   busy?: boolean
 }) {
   const ratingChoices = ratingOptions(state.minRating, state.maxRating)
+  // Chips only for the facets with no control of their own — a chip beside a
+  // select that already shows the same value is just saying it twice.
+  const activeFacets = FACETS.filter(
+    (facet) => !facet.picker && state.facets[facet.key],
+  )
 
   return (
     <div className="mb-6 space-y-3">
+      {activeFacets.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {activeFacets.map((facet) => (
+            <button
+              key={facet.key}
+              type="button"
+              onClick={() => state.update(facet.key, null)}
+              className="chip chip-active"
+              aria-label={`Remove the ${facet.label.toLowerCase()} filter`}
+            >
+              <span className="font-normal opacity-70">{facet.label}</span>
+              {state.facets[facet.key]}
+              <span aria-hidden="true">×</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="scroll-x scrollbar-none flex gap-2 pb-1">
         {STATUS_FILTERS.map((filter) => (
           <button
@@ -255,6 +316,33 @@ export function BrowseFilters({
             </option>
           ))}
         </select>
+
+        {/* Only rendered where a page has fetched the list — the same reason
+            the genre select above carries its active value: a control offering
+            one option and a grid filtered by another is a control that lies. */}
+        {(contentRatings.length > 0 || state.facets.content_rating) && (
+          <select
+            aria-label="Filter by content rating"
+            value={state.facets.content_rating}
+            onChange={(event) =>
+              state.update('content_rating', event.target.value || null)
+            }
+            className="input h-9 w-auto py-0 text-sm"
+          >
+            <option value="">Any certificate</option>
+            {state.facets.content_rating &&
+              !contentRatings.includes(state.facets.content_rating) && (
+                <option value={state.facets.content_rating}>
+                  {state.facets.content_rating}
+                </option>
+              )}
+            {contentRatings.map((rating) => (
+              <option key={rating} value={rating}>
+                {rating}
+              </option>
+            ))}
+          </select>
+        )}
 
         <select
           aria-label="Filter by your rating"
