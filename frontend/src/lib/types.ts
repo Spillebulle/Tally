@@ -458,3 +458,32 @@ export interface PlexAuthPoll {
   status: 'pending' | 'authenticated' | 'expired'
   user: User | null
 }
+
+/**
+ * Which browse surface a saved view belongs to.
+ *
+ * The *filter surface*, not the route: every Browse mode — movies, shows,
+ * anime, search, all titles — offers one set of filters and one set of sorts,
+ * while the watchlist and History each have their own. A view saved on Movies
+ * therefore applies on Anime too, and applying one never navigates: it sets the
+ * query on the grid you are looking at.
+ */
+export type SavedViewPage = 'media' | 'watchlist' | 'history'
+
+/**
+ * A browse query somebody wants back later.
+ *
+ * `query` is the raw query string, stored verbatim and never parsed on the
+ * server. Recalling it hands the string back to `useBrowseFilters`, which
+ * validates every parameter exactly as it does for a hand-edited URL — so a
+ * view saved before a filter was renamed degrades to the page defaults instead
+ * of erroring.
+ */
+export interface SavedView {
+  id: number
+  page: SavedViewPage
+  name: string
+  query: string
+  created_at: string
+  updated_at: string
+}

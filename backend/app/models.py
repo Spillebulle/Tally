@@ -716,6 +716,53 @@ class ApiKey(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
 
 
+class SavedView(Base):
+    """A browse query somebody wants back later, stored verbatim.
+
+    ``query`` is the **raw query string** — `status=completed&genre=Crime&sort=year`
+    — and nothing here parses it. The whole browse query already lives in the
+    URL, and `useBrowseFilters` re-validates every parameter on the way in
+    against what the API accepts, falling back to the page default for anything
+    stale or mistyped. So storing the string means a saved view degrades to
+    defaults for free when a filter is renamed or dropped, and it means there is
+    exactly one place that decides what a filter value means. Parsing it here
+    would be a second validation path that could disagree with the first, which
+    is the whole thing this design exists to avoid.
+
+    ``page`` names the *filter surface*, not the route: every Browse mode
+    (movies, shows, anime, search, all titles) shares one set of filters and one
+    set of views, while the watchlist and History have their own sorts and their
+    own omissions. Applying a view sets the filters on the grid you are looking
+    at; it never navigates somewhere else.
+
+    Scoped hard to its owner. A view can name `favorites`, a rating band or a
+    library id, all of which mean something different — or nothing — to anybody
+    else, so every read and every write filters on ``user_id``.
+    """
+
+    __tablename__ = "saved_views"
+    __table_args__ = (
+        UniqueConstraint("user_id", "page", "name", name="uq_saved_view_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # "media" | "watchlist" | "history". A plain String rather than an Enum:
+    # the router constrains it with a Literal, and a value from a newer version
+    # after a downgrade should read back as an unreachable row, not a decode
+    # error on every list.
+    page: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    query: Mapped[str] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=utcnow, onupdate=utcnow
+    )
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 

@@ -45,6 +45,10 @@ export function Browse({ mode }: BrowseProps) {
     mode === 'search' || mode === 'browse' ? 'all' : 'exclude'
 
   const filters = useBrowseFilters({
+    // One shelf of saved views across all five modes: they share every filter
+    // and every sort, so a view saved on Movies is a view that means something
+    // on Search too. It sets the filters on whichever grid you are on.
+    id: 'media',
     sorts: SORTS,
     defaultSort: mode === 'search' || mode === 'browse' ? 'title' : 'added',
     defaults: { personal: personalDefault },
