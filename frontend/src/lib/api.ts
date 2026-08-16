@@ -4,6 +4,7 @@ import type {
   AuthStatus,
   BrowsePlaces,
   ContinueWatchingItem,
+  Coverage,
   HistoryPage,
   Library,
   MediaCard,
@@ -12,10 +13,13 @@ import type {
   Paginated,
   PlexAuthPoll,
   PlexAuthStart,
+  Rankings,
+  RatingDepth,
   SavedView,
   SavedViewPage,
   Seasonality,
   Server,
+  ShowCompletion,
   Stats,
   StatsGranularity,
   StatsPreset,
@@ -28,6 +32,7 @@ import type {
   ApiKeyCreated,
   ApiKeyScope,
   PaginatedWatchlist,
+  WatchlistConversion,
   WatchlistEntry,
   WatchStatus,
 } from './types'
@@ -228,6 +233,34 @@ export interface SeasonalityQuery extends Query {
   tz?: string
 }
 
+/**
+ * The two blocks that take **no window at all**: `/shows` and `/coverage`.
+ *
+ * Not an oversight and not a smaller `StatsQuery`: completion and inventory are
+ * facts about a viewer and a library, not about a fortnight, so the endpoints
+ * do not accept `preset`/`since`/`until` and would ignore them if they did. The
+ * separate type is what stops a caller passing the page's window and believing
+ * it applied — the page labels these sections "all time" for the same reason.
+ *
+ * No `tz` either: nothing here is bucketed by day, and a duration is the same
+ * length in every zone.
+ */
+export interface UnwindowedStatsQuery extends Query {
+  anime_only?: boolean
+  /**
+   * Coverage only, and the one stats block where this is live rather than
+   * inert: `exclude` by default, because a phone recording is not a title you
+   * have failed to get round to.
+   */
+  personal?: string
+}
+
+/** `/api/stats/rankings` — the window, plus how many rows each list returns. */
+export interface RankingsQuery extends StatsQuery {
+  /** 1–50 on the API; anything else is a 422. */
+  limit?: number
+}
+
 export const api = {
   auth: {
     status: () => get<AuthStatus>('/api/auth/status'),
@@ -351,6 +384,27 @@ export const api = {
      */
     seasonality: (params: SeasonalityQuery = {}) =>
       get<Seasonality>('/api/stats/seasonality', { ...params }),
+    /**
+     * The five depth blocks, one request each.
+     *
+     * Separate calls rather than fields on `query()` because that is what they
+     * are on the server: bolting them onto `GET /api/stats` would make a page
+     * that already runs four aggregations run eleven, on every filter chip. The
+     * page fetches each when its section is drawn, and each gets its own
+     * loading, error and empty states — a failed `/rankings` must not blank out
+     * the seven sections above it or claim you have watched nothing.
+     */
+    shows: (params: UnwindowedStatsQuery = {}) =>
+      get<ShowCompletion>('/api/stats/shows', { ...params }),
+    coverage: (params: UnwindowedStatsQuery = {}) =>
+      get<Coverage>('/api/stats/coverage', { ...params }),
+    ratings: (params: StatsQuery = {}) =>
+      get<RatingDepth>('/api/stats/ratings', { ...params }),
+    rankings: (params: RankingsQuery = {}) =>
+      get<Rankings>('/api/stats/rankings', { ...params }),
+    /** Windowed on `WatchlistEntry.added_at`, not on the plays. */
+    watchlistConversion: (params: StatsQuery = {}) =>
+      get<WatchlistConversion>('/api/stats/watchlist', { ...params }),
     summary: () =>
       get<{
         library_movies: number
