@@ -31,6 +31,17 @@ WatchlistSortField = Literal[
 ]
 
 
+def unwatched_condition():
+    """"Never played by this user", for a query that LEFT JOINs `UserMediaState`.
+
+    A row with no state at all has never been touched, so the null case is part
+    of the answer and not an oversight. Shared so that anything else offering
+    "unwatched" — the recommendations shelf, for one — cannot quietly disagree
+    with the browse filter about what the word means.
+    """
+    return or_(UserMediaState.id.is_(None), UserMediaState.view_count == 0)
+
+
 class MediaFilters:
     """Query parameters shared by `/api/media` and `/api/watchlist`."""
 
@@ -118,9 +129,7 @@ class MediaFilters:
         if self.watch_status is not None:
             conditions.append(UserMediaState.status == self.watch_status)
         if self.unwatched:
-            conditions.append(
-                or_(UserMediaState.id.is_(None), UserMediaState.view_count == 0)
-            )
+            conditions.append(unwatched_condition())
         if self.favorites:
             conditions.append(UserMediaState.is_favorite.is_(True))
         if self.min_rating is not None:
