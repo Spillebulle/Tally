@@ -25,8 +25,8 @@ import {
   type MultiValue,
 } from '@/lib/browse-filters'
 import { cn } from '@/lib/utils'
-import { CertificateBadge } from './Certificate'
 import { MultiSelect, Select } from './Dropdown'
+import { RatingBadge } from './RatingBadge'
 import { ChevronRightIcon, SearchIcon } from './Icons'
 import { Segmented } from './ui'
 
@@ -200,10 +200,12 @@ function MultiControl({
       onChange={onChange}
       andable={Boolean(control?.andable)}
       // The table says *that* an option is a badge; drawing one is this file's
-      // business, and the label it boxes was made presentable by the table.
+      // business. The badge needs the raw value as well as the label — the mark
+      // is chosen by the board that issued the certificate, which only the raw
+      // value names — and it still draws the label when there is no mark.
       renderOption={
         control?.style === 'badge'
-          ? (option) => <CertificateBadge>{option.label}</CertificateBadge>
+          ? (option) => <RatingBadge raw={option.value} label={option.label} />
           : undefined
       }
     />

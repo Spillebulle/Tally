@@ -67,24 +67,42 @@ const CANONICAL: Record<string, string> = {
 const CODE = /^[A-Z0-9][A-Z0-9+-]{0,11}$/
 
 /**
+ * The board that issued a certificate, and the certificate itself.
+ *
+ * `gb/12A`, `de/16`: Plex prefixes the certificate with the board that issued
+ * it, and two countries' "12" are not the same certificate — so the prefix is
+ * kept rather than discarded. `region` is `''` when the value carries none,
+ * which in practice means a US rating.
+ *
+ * Exported because `rating-systems.ts` has to ask the same question, and two
+ * parsers that can disagree about where the board's name ends is exactly the
+ * shape of bug this file already warns about.
+ */
+export function splitCertificate(raw: string): { region: string; code: string; key: string } | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+
+  const slash = trimmed.lastIndexOf('/')
+  const region = slash > 0 ? trimmed.slice(0, slash).trim() : ''
+  const code = (slash >= 0 ? trimmed.slice(slash + 1) : trimmed).trim()
+  if (!code) return null
+
+  return {
+    region: region.toUpperCase(),
+    code,
+    key: code.toUpperCase().replace(/[\s_]+/g, '-'),
+  }
+}
+
+/**
  * How this certificate should be written, without changing what it *is*.
  *
  * Never call this on a value on its way into a query — see the note above.
  */
 export function certificateLabel(raw: string): string {
-  const trimmed = raw.trim()
-  if (!trimmed) return raw
+  const parts = splitCertificate(raw)
+  if (!parts) return raw
 
-  // `gb/12A`, `de/16`: Plex prefixes the certificate with the board that
-  // issued it, and two countries' "12" are not the same certificate — so the
-  // prefix is kept, spaced rather than slashed.
-  const slash = trimmed.lastIndexOf('/')
-  const region = slash > 0 ? trimmed.slice(0, slash).trim() : ''
-  const code = (slash >= 0 ? trimmed.slice(slash + 1) : trimmed).trim()
-  if (!code) return trimmed
-
-  const key = code.toUpperCase().replace(/[\s_]+/g, '-')
-  const named = CANONICAL[key] ?? (CODE.test(key) ? key : code)
-
-  return region ? `${region.toUpperCase()} ${named}` : named
+  const named = CANONICAL[parts.key] ?? (CODE.test(parts.key) ? parts.key : parts.code)
+  return parts.region ? `${parts.region} ${named}` : named
 }
