@@ -21,15 +21,33 @@ rather than quietly.
 
 When they are fetched
 ---------------------
+Two ways in, and the distinction between them is the point.
+
 On the first request for that item's detail page — never during a library scan.
 A scan walks tens of thousands of rows, and a credits call per row would be a
 second full pass over the library against a provider that rate-limits; the
 reason enrichment already skips episodes. A detail view is one person looking at
 one title, and the answer is stored, so a title costs one call ever.
 
+And, since the stats pages ask "which actors do I watch most?", a **bounded
+phase after the scan** — ``sync_service.backfill_credits``, through
+``fetch_credits`` below. That question cannot be answered a detail page at a time: it needs
+credits for everything watched, and nobody opens the detail page of a film they
+saw in 2019. The objection above was never to fetching in bulk; it was to doing
+it *inline in the scan*, unbounded, one call per row of the whole library. So
+the phase runs after the scan rather than inside it, is capped per run like
+``METADATA_BACKFILL_BATCH``, and is ordered by relevance — watched first, then
+watchlisted, then the rest — so the few thousand titles the stats actually read
+are covered within the first syncs and the long tail drains behind them across
+later ones. A library still costs one call per title *ever*; it just no longer
+waits for somebody to click on each one.
+
 ``MediaItem.credits_updated_at`` is what makes "ever" true. Without it, "TMDB
 had nothing for this" and "nobody has ever asked" are the same empty list, and
-every render of every credit-less title would go back out to TMDB.
+every render of every credit-less title would go back out to TMDB. The bulk
+phase depends on that property twice over: it *selects* on the column being
+NULL, so anything that stopped stamping an empty answer would turn a bounded
+queue into an unbounded one that re-asks the same hundred titles every sync.
 """
 from __future__ import annotations
 
@@ -99,6 +117,38 @@ async def credits_for(
                 await _fetch(db, item, metadata_service or get_metadata_service())
 
     return await stored_credits(db, item.id)
+
+
+async def fetch_credits(
+    db: AsyncSession,
+    item: MediaItem,
+    *,
+    metadata_service: MetadataService | None = None,
+) -> bool:
+    """Fetch and store one title's credits for the bulk backfill.
+
+    Returns whether the row was stamped — that is, whether the provider was
+    asked and answered at all. False means the fetch failed or there was
+    nothing to ask, and in both cases the row stays in the queue, which is the
+    same rule the detail page follows.
+
+    Separate from `credits_for` because the caller is different in kind: it has
+    already decided this row is due (the queue selected on `credits_updated_at`
+    being NULL) and does not want the stored rows back.
+    """
+    if item.media_type not in (MediaType.MOVIE, MediaType.SHOW):
+        return False
+    async with _one_fetch_at_a_time(item.id):
+        # Somebody may have opened the detail page for this exact title while
+        # the batch was being walked; the lock is per item and per process, and
+        # re-reading under it is what keeps the two paths from both fetching.
+        stamped = await db.scalar(
+            select(MediaItem.credits_updated_at).where(MediaItem.id == item.id)
+        )
+        if not _is_due(stamped):
+            return False
+        await _fetch(db, item, metadata_service or get_metadata_service())
+    return item.credits_updated_at is not None
 
 
 async def stored_credits(
