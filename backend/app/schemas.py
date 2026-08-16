@@ -194,6 +194,37 @@ class ContinueWatchingItem(BaseModel):
     resumed_at: datetime | None = None
 
 
+class LibraryOption(BaseModel):
+    """One library the `library_id` browse filter can name.
+
+    Carries its server's name as well as its own: "Movies" is what half the
+    libraries on a two-server household are called, and a picker listing it
+    twice with no way to tell them apart is a picker that cannot be used.
+    """
+
+    id: int
+    title: str
+    section_type: str
+    server_id: int
+    server_name: str
+
+
+class ServerOption(BaseModel):
+    id: int
+    name: str
+
+
+class BrowsePlacesOut(BaseModel):
+    """Where the browse filters may look: the servers and libraries you can see.
+
+    Servers are listed in their own right rather than derived from the
+    libraries, so one that has never been scanned still appears.
+    """
+
+    servers: list[ServerOption] = []
+    libraries: list[LibraryOption] = []
+
+
 # --- history --------------------------------------------------------------
 
 

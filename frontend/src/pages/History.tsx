@@ -139,6 +139,7 @@ export function History() {
     queryKey: ['content-ratings', 'all'],
     queryFn: () => api.media.contentRatings('all'),
   })
+  const places = useQuery({ queryKey: ['places'], queryFn: () => api.media.places() })
 
   const remove = useMutation({
     mutationFn: (eventId: number) => api.history.remove(eventId),
@@ -201,8 +202,12 @@ export function History() {
 
       <BrowseFilters
         state={filters}
-        genres={genres.data ?? []}
-        contentRatings={contentRatings.data ?? []}
+        lists={{
+          genres: genres.data ?? [],
+          contentRatings: contentRatings.data ?? [],
+          libraries: places.data?.libraries ?? [],
+          servers: places.data?.servers ?? [],
+        }}
         busy={isFetching && !isLoading}
       />
 

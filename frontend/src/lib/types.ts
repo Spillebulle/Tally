@@ -265,6 +265,33 @@ export interface Server {
   libraries: Library[]
 }
 
+/**
+ * A library the `library_id` browse filter can name, from `/api/media/places`.
+ *
+ * Deliberately not `Library`: that one is the settings view of a library —
+ * scan state, item counts, the anime override — and the picker needs its
+ * server's name instead, because "Movies" is what half the libraries on a
+ * two-server household are called.
+ */
+export interface LibraryOption {
+  id: number
+  title: string
+  section_type: string
+  server_id: number
+  server_name: string
+}
+
+export interface ServerOption {
+  id: number
+  name: string
+}
+
+/** Where the browse filters may look: only what this account can see. */
+export interface BrowsePlaces {
+  servers: ServerOption[]
+  libraries: LibraryOption[]
+}
+
 export interface SyncRun {
   id: number
   kind: string
