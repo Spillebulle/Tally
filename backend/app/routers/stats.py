@@ -17,6 +17,15 @@ the same question over the same span, or the page compares things that were
 never comparable. Ratings and show counts used to opt out of the window
 silently.
 
+**The page is browsable with the same filters as the grids.** `MediaFilters` is
+declared here as a dependency, so "stats for horror films I rated 8 and up" is
+the same parameter set that narrows `/api/media`, `/api/watchlist` and
+`/api/history` — and a filter added there arrives here without a second
+implementation to keep in step. Two adjustments are made on the parsed object,
+both of them the ones `routers/history.py` makes: `default_types=False`, because
+episodes are most of a watch history, and `personal="all"`, because home videos
+are real hours.
+
 Home videos (`MediaItem.is_personal_media`) *are* counted in the watch numbers.
 The browse grids hide them by default, but a play is a play and the hours are
 real; only the library inventory on `/summary` leaves them out, because that
@@ -36,12 +45,15 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select, union
 from sqlalchemy.orm import aliased
+from sqlalchemy.sql import Select
 
 from ..deps import CurrentUser, DbSession
+from ..media_filters import MediaFilters
 from ..models import MediaItem, MediaType, User, UserMediaState, WatchEvent, utcnow
 from ..schemas import (
     PunchCard,
@@ -278,6 +290,76 @@ def _same_window_last_year(window: StatsRange, tz: tzinfo) -> StatsRange:
     )
 
 
+# --- the browse filters ---------------------------------------------------
+
+
+def _stats_filters(filters: MediaFilters, anime_only: bool) -> MediaFilters:
+    """The shared browse filters, adjusted for a page that counts plays.
+
+    Both adjustments are the ones `routers/history.py` makes, for the same
+    reasons — the two endpoints describe watch history rather than a shelf, so
+    they have to agree about what belongs in it:
+
+    * **`personal="all"`, set unconditionally.** `MediaFilters` excludes home
+      videos by default, which is right for a library grid and wrong for a
+      count of hours actually watched: the play really happened, and CLAUDE.md
+      is explicit that a row is never dropped for this. The dependency's own
+      default cannot be overridden per-router without restating its whole
+      signature, so it is set on the parsed object instead — which leaves
+      `personal` a valid parameter here (a stale link must not 422) but an inert
+      one.
+    * **`anime_only=true` maps to `anime="only"`.** Deprecated, and kept because
+      the shipped `Stats.tsx` still sends it; dropping it in the same change
+      that migrates the frontend would leave neither half able to work alone.
+
+    `default_types=False` is the third adjustment and lives in `_scope`, because
+    it is an argument to `item_conditions` rather than a value on the object.
+    """
+    filters.personal = "all"
+    if anime_only:
+        filters.anime = "only"
+    return filters
+
+
+def _scope(stmt: Select, filters: MediaFilters, user: User) -> Select:
+    """Join what the browse filters read, and apply them.
+
+    `stmt` must already have `watch_events` as its leftmost FROM; this adds the
+    `media_items` join every stats query wants anyway, plus the per-user
+    `user_media_states` row when — and only when — a filter reads from it.
+
+    Three things about this are load-bearing:
+
+    * **`default_types=False`.** The shared default restricts the flat grids to
+      movies and shows. Episodes are most of a watch history, so inheriting it
+      would silently empty the page for anyone who mainly watches television.
+    * **The state join cannot fan a play out into two rows.**
+      `user_media_states` is uniquely constrained on `(user_id, media_item_id)`
+      and the ON clause pins both, so it matches at most one row per event —
+      which is what lets `count()` and `sum()` stay honest through it. It is an
+      OUTER join because an item with no state row at all has still been
+      watched, and `unwatched_condition` reads that null side on purpose.
+    * **Every filter here is item-level.** Nothing in `MediaFilters` narrows
+      individual `WatchEvent` rows; the only event-level predicates in this
+      module are the window bounds and the user, and both are applied by the
+      caller. `_ranked_events` depends on that distinction — see its docstring.
+    """
+    stmt = stmt.join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+    if filters.needs_state_join():
+        stmt = stmt.outerjoin(
+            UserMediaState,
+            and_(
+                UserMediaState.media_item_id == MediaItem.id,
+                UserMediaState.user_id == user.id,
+            ),
+        )
+        if state := filters.state_conditions():
+            stmt = stmt.where(and_(*state))
+    if items := filters.item_conditions(default_types=False):
+        stmt = stmt.where(and_(*items))
+    return stmt
+
+
 # --- aggregation ----------------------------------------------------------
 
 
@@ -327,31 +409,34 @@ async def _aggregate(
     db: DbSession,
     user: User,
     window: StatsRange,
-    anime_only: bool,
+    filters: MediaFilters,
     tz: tzinfo,
 ) -> _Aggregate:
+    # The only event-level predicates on the page: whose plays, and when. Held
+    # apart from the filters because `_ratings_for_window` needs the same pair
+    # and `_ranked_events` must *not* have them.
     conditions = [
         WatchEvent.user_id == user.id,
         WatchEvent.watched_at >= window.since,
         WatchEvent.watched_at < window.until,
     ]
-    if anime_only:
-        conditions.append(MediaItem.is_anime.is_(True))
 
     rows = (
         await db.execute(
-            select(
-                WatchEvent.watched_at,
-                WatchEvent.duration_ms,
-                MediaItem.id,
-                MediaItem.media_type,
-                MediaItem.runtime_minutes,
-                MediaItem.genres,
-                MediaItem.is_anime,
-                MediaItem.show_id,
-            )
-            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
-            .where(and_(*conditions))
+            _scope(
+                select(
+                    WatchEvent.watched_at,
+                    WatchEvent.duration_ms,
+                    MediaItem.id,
+                    MediaItem.media_type,
+                    MediaItem.runtime_minutes,
+                    MediaItem.genres,
+                    MediaItem.is_anime,
+                    MediaItem.show_id,
+                ),
+                filters,
+                user,
+            ).where(and_(*conditions))
         )
     ).all()
 
@@ -387,31 +472,47 @@ async def _aggregate(
         for genre in genres or []:
             agg.genres[genre] += 1
 
-    agg.ratings = await _ratings_for_window(db, user, conditions)
+    agg.ratings = await _ratings_for_window(db, user, filters, conditions)
     return agg
 
 
-async def _ratings_for_window(db: DbSession, user: User, conditions: list) -> list[float]:
+async def _ratings_for_window(
+    db: DbSession, user: User, filters: MediaFilters, conditions: list
+) -> list[float]:
     """Ratings on what was watched in this window.
 
     Scoping ratings by *when the rating was made* looks more natural and is
     not: `rating_updated_at` is stamped when a rating is first pulled from
     Plex, so a fresh install would file a decade of ratings under "this week".
     What was watched, on the other hand, is exactly what the rest of the page
-    is already about — and it means `anime_only` scopes the ratings too, for
-    free, off the same conditions.
+    is already about — and it means the browse filters scope the ratings too,
+    for free, off the same subject set.
 
     An episode's rating lives on its show, so the shows episodes belong to are
     part of the subject set; without them a television-heavy window would show
     an empty ratings chart.
+
+    **The subject halves must never correlate to the outer query**, hence the
+    explicit `correlate(None)`. A state filter makes both halves join
+    `user_media_states`, and the outer query selects *from* that same table:
+    the moment those two facts meet in a place SQLAlchemy auto-correlates,
+    it drops the table from the inner FROM and silently turns a self-contained
+    subquery into a correlated one — a different, wrong question that still
+    returns plausible numbers. Today the union lands in a FROM clause, where
+    nothing is auto-correlated, so this compiles to the same SQL either way.
+    It is written down because flattening the union into a bare
+    `.in_(watched)` — the obvious tidy-up — moves it into the WHERE clause,
+    where it very much is.
     """
-    watched = select(WatchEvent.media_item_id.label("id")).join(
-        MediaItem, MediaItem.id == WatchEvent.media_item_id
-    ).where(and_(*conditions))
+    watched = (
+        _scope(select(WatchEvent.media_item_id.label("id")), filters, user)
+        .where(and_(*conditions))
+        .correlate(None)
+    )
     parents = (
-        select(MediaItem.show_id.label("id"))
-        .join(WatchEvent, MediaItem.id == WatchEvent.media_item_id)
+        _scope(select(MediaItem.show_id.label("id")).select_from(WatchEvent), filters, user)
         .where(and_(*conditions, MediaItem.show_id.is_not(None)))
+        .correlate(None)
     )
     # A subquery rather than an IN of ids read back into Python: a long window
     # holds thousands of items and SQLite caps bound parameters per statement.
@@ -458,11 +559,11 @@ async def _comparison(
     db: DbSession,
     user: User,
     earlier: StatsRange,
-    anime_only: bool,
+    filters: MediaFilters,
     tz: tzinfo,
     current: StatsTotals,
 ) -> StatsComparison:
-    earlier_totals = _totals(await _aggregate(db, user, earlier, anime_only, tz))
+    earlier_totals = _totals(await _aggregate(db, user, earlier, filters, tz))
     return StatsComparison(
         range=earlier,
         totals=earlier_totals,
@@ -555,7 +656,7 @@ def _punch_card(grid: Counter[tuple[int, int]]) -> PunchCard:
 # --- first watch vs rewatch -----------------------------------------------
 
 
-def _ranked_events(user: User, anime_only: bool):
+def _ranked_events(user: User, filters: MediaFilters):
     """Every play this user has recorded, numbered per item, oldest first.
 
     The ranking is deliberately unfiltered by time: a play is a rewatch because
@@ -563,8 +664,36 @@ def _ranked_events(user: User, anime_only: bool):
     to be inside the window on screen. The caller filters the *result* by
     window; ranking a pre-filtered set is the mistake this exists to avoid.
 
-    `anime_only` is safe to apply here because it selects whole items, and the
-    ranking partitions by item — dropping an item cannot renumber another one.
+    **The rule for what may go inside this subquery: a predicate may select
+    whole items, never a subset of one item's plays.** The ranking partitions
+    by `media_item_id`, so removing an item entirely removes a whole partition
+    and cannot renumber another one. Remove *some* of an item's rows and every
+    surviving row shifts down — a second viewing becomes rank 1 and is reported
+    as a first watch, silently, with a plausible number in every tile beside it.
+
+    Every filter in `MediaFilters` passes that test, including the ones that do
+    not look like it at first:
+
+    * **Item-level** — genre, studio, year, media type, anime, personal,
+      content rating, director, network, on-Plex, runtime, community rating,
+      release status, anime format. These read `media_items` (or a correlated
+      EXISTS off it), one value per item.
+    * **State-level** — your rating, watch status, favourites, notes, in
+      progress, watch counts, and `watched_after`/`watched_before`. These read
+      the joined `user_media_states` row, which is uniquely constrained on
+      `(user_id, media_item_id)`: one row per item, and the join is pinned to
+      this user, so the predicate's value is a property of the *item*, the same
+      for all of that item's plays. The two to think twice about are
+      `watched_after`/`watched_before` — they name a time and so read like
+      event filters, but they compare `UserMediaState.last_watched_at`, the
+      per-item rollup of when you last touched the title at all, not
+      `WatchEvent.watched_at`. If they are ever redefined to mean "plays in
+      this range", they must move outside this subquery.
+
+    So anything added to `MediaFilters` later has to be checked against the same
+    question, and anything that could filter individual `WatchEvent` rows —
+    a source, a completed flag, a duration bound, another time window — belongs
+    to the caller, applied to the *result* of this ranking.
 
     Ties break on `id`, so a re-run cannot swap which of two plays stamped with
     the same instant counts as the first.
@@ -578,21 +707,17 @@ def _ranked_events(user: User, anime_only: bool):
         )
         .label("rank"),
     )
-    if anime_only:
-        ranked = ranked.join(MediaItem, MediaItem.id == WatchEvent.media_item_id).where(
-            MediaItem.is_anime.is_(True)
-        )
-    return ranked.where(WatchEvent.user_id == user.id).subquery()
+    return _scope(ranked, filters, user).where(WatchEvent.user_id == user.id).subquery()
 
 
 async def _rewatch(
     db: DbSession,
     user: User,
     window: StatsRange,
-    anime_only: bool,
+    filters: MediaFilters,
     tz: tzinfo,
 ) -> RewatchStats:
-    ranked = _ranked_events(user, anime_only)
+    ranked = _ranked_events(user, filters)
     rows = (
         await db.execute(
             select(ranked.c.watched_at, ranked.c.rank).where(
@@ -620,36 +745,42 @@ async def _rewatch(
             RewatchSplit(label=label, first=firsts.get(label, 0), rewatch=repeats.get(label, 0))
             for label in _bucket_labels(window, window.granularity)
         ],
-        most_rewatched=await _most_rewatched(db, user, anime_only),
+        most_rewatched=await _most_rewatched(db, user, filters),
     )
 
 
-async def _most_rewatched(db: DbSession, user: User, anime_only: bool) -> list[RewatchedItem]:
+async def _most_rewatched(
+    db: DbSession, user: User, filters: MediaFilters
+) -> list[RewatchedItem]:
     """What this user comes back to, over their whole history.
 
     All-time on purpose, and not a `_ranked_events` consumer: "how often have I
     watched this" is a plain count per item, and grouping is cheaper than
     numbering every row only to throw the numbers away.
+
+    `count(WatchEvent.id)` stays honest through the state join for the reason
+    `routers/history.py` relies on as well: `(user_id, media_item_id)` is
+    unique and the ON clause pins both, so at most one state row can match a
+    play and nothing fans out.
     """
     show = aliased(MediaItem)
     plays = func.count(WatchEvent.id)
-    conditions = [WatchEvent.user_id == user.id]
-    if anime_only:
-        conditions.append(MediaItem.is_anime.is_(True))
 
     rows = (
         await db.execute(
-            select(
-                MediaItem,
-                show.title,
-                plays,
-                func.min(WatchEvent.watched_at),
-                func.max(WatchEvent.watched_at),
+            _scope(
+                select(
+                    MediaItem,
+                    show.title,
+                    plays,
+                    func.min(WatchEvent.watched_at),
+                    func.max(WatchEvent.watched_at),
+                ).select_from(WatchEvent),
+                filters,
+                user,
             )
-            .select_from(WatchEvent)
-            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
             .outerjoin(show, show.id == MediaItem.show_id)
-            .where(and_(*conditions))
+            .where(WatchEvent.user_id == user.id)
             .group_by(MediaItem.id)
             .having(plays > 1)
             # Most-played first; the newest of a tie first, because a thing
@@ -697,20 +828,45 @@ def _zone_for(user: User, tz: str | None) -> tuple[tzinfo, str]:
 async def get_stats(
     db: DbSession,
     user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
     preset: StatsPreset | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
     days: int | None = Query(None, ge=1, le=3650),
     compare: bool = False,
     granularity: StatsGranularity = "day",
+    # Deprecated: superseded by the shared `anime` tri-state, and kept because
+    # the shipped `Stats.tsx` still sends it. See `_stats_filters`.
     anime_only: bool = False,
     tz: str | None = None,
 ) -> StatsOut:
+    """Everything on the stats page, over one window, in one timezone.
+
+    Narrowable by the whole shared browse filter set — `?genre=Horror` and
+    `?min_rating=8` mean here exactly what they mean on `/api/media` — with the
+    two deliberate differences `_stats_filters` and `_scope` document: episodes
+    are included, and home videos count.
+
+    `since`/`until` bound this page's window, `WatchEvent.watched_at`. They are
+    *not* the shared `watched_after`/`watched_before`, which read
+    `UserMediaState.last_watched_at` — the rollup of when you last touched the
+    title at all. Both work, and they answer different questions.
+
+    One combination is degenerate rather than broken: `unwatched=true` asks for
+    plays of things this user has never played, and on real data returns
+    nothing, because every play updates the rollup that filter reads. It is
+    left functional rather than rejected, the same way History leaves it —
+    a filter the UI simply does not offer here is not worth a 422 on a shared
+    link — and it keeps `unwatched_condition`'s own meaning rather than a
+    stats-only redefinition: a play whose `UserMediaState` row is missing
+    entirely still counts, because a missing row *is* "never played".
+    """
+    filters = _stats_filters(filters, anime_only)
     zone, resolved_name = _zone_for(user, tz)
     window = await _resolve_range(
         db, user, zone, resolved_name, preset, since, until, days, granularity
     )
-    agg = await _aggregate(db, user, window, anime_only, zone)
+    agg = await _aggregate(db, user, window, filters, zone)
     totals = _totals(agg)
 
     previous = previous_year = None
@@ -719,9 +875,9 @@ async def get_stats(
         # window before this one, and the same window a year ago. "Down on last
         # month" and "down on last December" are different questions and a
         # seasonal library answers them differently.
-        previous = await _comparison(db, user, _preceding(window, zone), anime_only, zone, totals)
+        previous = await _comparison(db, user, _preceding(window, zone), filters, zone, totals)
         previous_year = await _comparison(
-            db, user, _same_window_last_year(window, zone), anime_only, zone, totals
+            db, user, _same_window_last_year(window, zone), filters, zone, totals
         )
 
     distribution: Counter[str] = Counter()
@@ -744,7 +900,7 @@ async def get_stats(
             agg.by_hour, agg.hour_minutes, tuple(f"{hour:02d}" for hour in range(24))
         ),
         punch_card=_punch_card(agg.by_weekday_hour),
-        rewatch=await _rewatch(db, user, window, anime_only, zone),
+        rewatch=await _rewatch(db, user, window, filters, zone),
         current_streak_days=current_streak,
         longest_streak_days=longest_streak,
         top_genres=[
@@ -768,6 +924,8 @@ async def get_stats(
 async def seasonality(
     db: DbSession,
     user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
+    # Deprecated alias for `anime=only`, exactly as on `GET /api/stats`.
     anime_only: bool = False,
     tz: str | None = None,
 ) -> SeasonalityOut:
@@ -778,27 +936,32 @@ async def seasonality(
     a few thousand rows on a real instance and cheap enough to ask for, but not
     cheap enough to attach to a page that reloads whenever a filter chip moves.
 
-    Only two columns come back per row — the instant and the length — because
-    nothing here needs to know *what* was watched. The months are bucketed from
-    `watched_at.astimezone(tz)` like everything else; a January play at 00:30
-    in Auckland is still December in UTC.
-    """
-    zone, resolved_name = _zone_for(user, tz)
+    Takes the same browse filters as `GET /api/stats`, so the two agree about
+    what is being counted when a chip is set. `unwatched=true` is degenerate
+    here for the same reason and returns an empty profile.
 
-    conditions = [WatchEvent.user_id == user.id]
-    if anime_only:
-        conditions.append(MediaItem.is_anime.is_(True))
+    Only four columns come back per row — the instant, the length and enough of
+    the item to price it — because nothing here needs to know *what* was
+    watched. The months are bucketed from `watched_at.astimezone(tz)` like
+    everything else; a January play at 00:30 in Auckland is still December in
+    UTC.
+    """
+    filters = _stats_filters(filters, anime_only)
+    zone, resolved_name = _zone_for(user, tz)
 
     rows = (
         await db.execute(
-            select(
-                WatchEvent.watched_at,
-                WatchEvent.duration_ms,
-                MediaItem.media_type,
-                MediaItem.runtime_minutes,
+            _scope(
+                select(
+                    WatchEvent.watched_at,
+                    WatchEvent.duration_ms,
+                    MediaItem.media_type,
+                    MediaItem.runtime_minutes,
+                ),
+                filters,
+                user,
             )
-            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
-            .where(and_(*conditions))
+            .where(WatchEvent.user_id == user.id)
             .order_by(WatchEvent.watched_at)
         )
     ).all()
