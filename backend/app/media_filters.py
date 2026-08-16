@@ -22,9 +22,23 @@ these carry an obligation on the caller, and both are traps:
   says so, and
 * nothing here joins anything on the caller's behalf. `item_conditions()` is
   self-contained precisely so it cannot go wrong — every clause that reaches
-  outside `media_items` (director, on-Plex, a parent show's facets) is written
-  as a correlated EXISTS rather than a join, which also means a title with two
-  directors or two Plex mappings still comes back once.
+  outside `media_items` (credits, on-Plex, a library, a parent show's facets) is
+  written as a correlated EXISTS rather than a join, which also means a title
+  with two directors, forty actors or two Plex mappings still comes back once.
+
+A join would not merely duplicate rows in the page: `apply_filters` puts the
+same clauses on `count_stmt`, so the total would be inflated too and the pager
+would offer pages that render empty.
+
+Two things are worth knowing before adding to this:
+
+* **Repeated keys, not commas.** The facets in `MULTI_FACETS` take
+  `?genre=Crime&genre=Drama`, with `?genre_not=` for exclusion and
+  `?genre_mode=all` for AND. A single occurrence parses exactly as the single
+  value it always did, so nothing that already links here changes meaning.
+* **A search that reaches your notes reaches per-user data.** `q_scope=all`
+  therefore moves the whole `q` clause into `state_conditions()`, where the
+  join has pinned `user_id`. See `searches_notes`.
 """
 # No `from __future__ import annotations` here on purpose: FastAPI resolves this
 # class's __init__ annotations at import time to build the query parameters, and
@@ -53,6 +67,17 @@ AnimeFilter = Literal["all", "only", "exclude"]
 PersonalFilter = Literal["all", "only", "exclude"]
 SortOrder = Literal["asc", "desc"]
 
+#: How several values of one facet combine. "any" is the default and is the only
+#: answer that can be right for a facet a row holds once — a title has one
+#: studio, one certificate, one network, so `all` there is the empty set by
+#: construction. Only `genre` offers the choice; see `MULTI_FACETS`.
+MatchMode = Literal["any", "all"]
+
+#: How far a free-text `q` reaches. `title` is the default on purpose: an
+#: ordinary search should not start matching plot summaries, where a word like
+#: "murder" is in half the library.
+SearchScope = Literal["title", "all"]
+
 # Sorts every browse page understands. The watchlist and history each add one of
 # their own, injected through `apply_filters(sort_columns=...)`. They live here
 # together so the three stay visibly siblings — a sort added to one page is
@@ -74,6 +99,8 @@ NEARLY_FINISHED_PERCENT = 95
 
 #: The parent show, for a facet that only the show carries. See `facet_source`.
 facet_parent = aliased(MediaItem, name="facet_parent")
+#: The item *or* its show, for the negative case. See `facet_absent`.
+facet_holder = aliased(MediaItem, name="facet_holder")
 
 
 def like_escape(value: str) -> str:
@@ -172,12 +199,157 @@ def facet_source(build: Callable[[Any], Any]):
     return or_(build(MediaItem), from_parent.exists())
 
 
+def facet_value(column: str):
+    """The same rule as `facet_source`, in value form rather than predicate form.
+
+    `facet_source` answers "does this item, or its series, have studio X"; this
+    answers "which studio was this play". The stats aggregates need the second
+    to group by, and a ranking that read the column straight off the played row
+    would file every episode under "no studio" and quietly leave television out
+    of the leaderboard.
+
+    These two live side by side because **they are one rule**: if the parent is
+    ever resolved through something other than `show_id`, both have to follow.
+    Split across modules they drifted once already — a filtered ranking would
+    narrow on one definition and group on the other, and nothing would fail
+    loudly.
+
+    `year` is deliberately not resolved this way, here or in `facet_source`: an
+    episode has its own air date, and reading it through the series would file
+    a 2019 episode under 1989.
+    """
+    return func.coalesce(
+        getattr(MediaItem, column),
+        select(getattr(facet_parent, column))
+        .where(facet_parent.id == MediaItem.show_id)
+        .scalar_subquery(),
+    )
+
+
+def facet_absent(build: Callable[[Any], Any]):
+    """The mirror of `facet_source`: neither the item nor its show matches.
+
+    Deliberately *not* `~facet_source(...)`. SQL's `NOT` over a NULL comparison
+    is NULL, and a row the WHERE cannot prove true is dropped — so
+    `?studio_not=A24` would exclude every title with no studio recorded at all,
+    which is the set most obviously not made by A24. The same trap in the other
+    direction is `EXISTS (… != value)`, which a title with a second value
+    satisfies; both are why exclusion is written as one `NOT EXISTS` over the
+    rows that *would* have matched.
+
+    One subquery covers the item and its show, so an episode is excluded by its
+    series' facets exactly as `facet_source` includes it by them.
+    """
+    holder = select(facet_holder.id).where(
+        or_(facet_holder.id == MediaItem.id, facet_holder.id == MediaItem.show_id),
+        build(facet_holder),
+    )
+    return ~holder.exists()
+
+
+def _genre_match(src: Any, value: str):
+    """One genre, matched against the JSON array's text form.
+
+    A LIKE on the serialised array is the portable filter for SQLite and is
+    fast enough at self-hosted library sizes. The quotes around the value stop
+    "Drama" matching "Docudrama"; `like_escape` stops a value carrying `%`
+    widening the grid instead of narrowing it.
+    """
+    return cast(src.genres, String).ilike(f'%"{like_escape(value)}"%', escape="\\")
+
+
+def _column_match(column: str) -> Callable[[Any, str], Any]:
+    """One exact value of a plain column, read from whichever row carries it."""
+
+    def match(src: Any, value: str):
+        return getattr(src, column) == value
+
+    return match
+
+
+#: The facets that take **repeated** query parameters: `?genre=Crime&genre=Drama`.
+#:
+#: One occurrence parses exactly as the single value it always did, so every
+#: bookmark, every facet link on an item page and every stats drill keeps
+#: working untouched — the contract is backwards compatible by construction.
+#: Comma-splitting would not be: studio names contain commas ("Warner Bros.,
+#: Inc."), and a `-Horror` prefix operator collides with values that legitimately
+#: start with one.
+#:
+#: Each entry says how *one* value matches *one* row; everything else — OR, AND,
+#: exclusion, resolution through the parent show — is derived from that, so a
+#: facet added here gets the whole set at once.
+MULTI_FACETS: dict[str, Callable[[Any, str], Any]] = {
+    "genre": _genre_match,
+    "content_rating": _column_match("content_rating"),
+    "studio": _column_match("studio"),
+    "network": _column_match("network"),
+    "anime_format": _column_match("anime_format"),
+}
+
+
+def _values(raw: list[str] | None) -> list[str]:
+    """The values a repeated parameter really carries.
+
+    A hand-edited URL leaves `?genre=&genre=Crime` behind, and an empty facet
+    value is not a filter — matched literally it asks for rows whose studio is
+    the empty string, which is a narrower grid nobody asked for.
+    """
+    return [value.strip() for value in (raw or []) if value and value.strip()]
+
+
+def credited_condition(kind: CreditKind, name: str):
+    """"Somebody by this name is credited on this title, in this role".
+
+    A correlated EXISTS rather than a join, for the same reason `on_plex` uses
+    one: a title with two directors — or forty actors — must not come back once
+    per credit, and a caller that is counting rather than paging would count it
+    that many times too.
+
+    By name rather than by person id, so the URL says who. Two people sharing a
+    name would widen the grid slightly; an opaque id in every link is the worse
+    trade.
+    """
+    return (
+        select(MediaCredit.id)
+        .join(Person, Person.id == MediaCredit.person_id)
+        .where(
+            MediaCredit.media_item_id == MediaItem.id,
+            MediaCredit.kind == kind,
+            Person.name == name,
+        )
+        .exists()
+    )
+
+
+def mapped_condition(column: Any, ids: list[int]):
+    """"Held in one of these libraries", or "on one of these servers".
+
+    A correlated EXISTS again: an item mapped on two servers is one row, and a
+    join would both double it in the page and inflate `count_stmt` — which is
+    how a pager invents pages that render empty.
+
+    The two filters are separate EXISTS clauses rather than one with both
+    columns in it, so each answers its own question: picking a library and a
+    server asks for a title in that library *and* on that server, not for one
+    mapping that is both.
+    """
+    return (
+        select(PlexMapping.id)
+        .where(PlexMapping.media_item_id == MediaItem.id, column.in_(ids))
+        .exists()
+    )
+
+
 class MediaFilters:
     """Query parameters shared by `/api/media`, `/api/watchlist` and `/api/history`."""
 
     def __init__(
         self,
         q: str | None = None,
+        # How wide the free-text search reaches. `title` by default, so an
+        # ordinary search does not start matching plot words.
+        q_scope: SearchScope = "title",
         media_type: MediaType | None = None,
         anime: AnimeFilter = "all",
         # Home videos are off by default. A phone recording played once through
@@ -188,23 +360,47 @@ class MediaFilters:
         # misclassified film is recoverable without a database change.
         personal: PersonalFilter = "exclude",
         watch_status: WatchStatus | None = None,
-        genre: str | None = None,
+        # Every facet below is **repeatable**: `?genre=Crime&genre=Drama` means
+        # either, `?genre_not=Horror` means neither, and `?genre_mode=all` means
+        # both. One occurrence parses as the single value it always did, so no
+        # existing link changes meaning — see `MULTI_FACETS`.
+        genre: list[str] | None = Query(None),
+        genre_not: list[str] | None = Query(None),
+        # Omitted means "any", so the default never lands in the URL. Offered
+        # for genre alone: a title has one studio, one certificate and one
+        # network, so "all" over those is the empty set by construction, and a
+        # control that can only produce a wrong answer should not exist.
+        genre_mode: MatchMode = "any",
         year: int | None = None,
-        # The three facets a detail page links out on. Each is an exact match
-        # on the value that page displayed, so the chip and the filter bar
-        # describe the same set of rows.
-        content_rating: str | None = None,
-        studio: str | None = None,
+        # The facets a detail page links out on. Each is an exact match on the
+        # value that page displayed, so the chip and the filter bar describe the
+        # same set of rows.
+        content_rating: list[str] | None = Query(None),
+        content_rating_not: list[str] | None = Query(None),
+        studio: list[str] | None = Query(None),
+        studio_not: list[str] | None = Query(None),
         # By name, not by person id, so the URL says who — matching how `genre`
         # and `studio` read. Two directors sharing a name would widen the grid
         # slightly; an opaque id in every link is the worse trade.
         director: str | None = None,
+        # The same shape for the other half of a credit list. Sparse today —
+        # credits are fetched when a detail page is viewed, so only titles
+        # somebody has opened carry any — which is a coverage gap, not a
+        # correctness one: what is recorded matches exactly.
+        actor: str | None = None,
         # Show-level facets. Like genre/studio/content rating these are only
         # populated for movies and shows, so they resolve through `facet_source`
         # and an episode answers with its series'.
-        network: str | None = None,
+        network: list[str] | None = Query(None),
+        network_not: list[str] | None = Query(None),
         release_status: str | None = None,
-        anime_format: str | None = None,
+        anime_format: list[str] | None = Query(None),
+        anime_format_not: list[str] | None = Query(None),
+        # Where the file lives. Repeatable like the facets, and resolved through
+        # `PlexMapping` with a correlated EXISTS so a title held on two servers
+        # is still one row.
+        library_id: list[int] | None = Query(None),
+        server_id: list[int] | None = Query(None),
         unwatched: bool = False,
         favorites: bool = False,
         on_plex: bool | None = None,
@@ -237,18 +433,31 @@ class MediaFilters:
         in_progress: bool = False,
     ) -> None:
         self.q = q
+        self.q_scope = q_scope
         self.media_type = media_type
         self.anime = anime
         self.personal = personal
         self.watch_status = watch_status
-        self.genre = genre
+        # Normalised once, here, so every reader — `item_conditions`, the stats
+        # aggregates, a test — sees the same list and none of them has to know
+        # that a hand-edited URL can carry `?genre=`.
+        self.genre = _values(genre)
+        self.genre_not = _values(genre_not)
+        self.genre_mode = genre_mode
         self.year = year
-        self.content_rating = content_rating
-        self.studio = studio
+        self.content_rating = _values(content_rating)
+        self.content_rating_not = _values(content_rating_not)
+        self.studio = _values(studio)
+        self.studio_not = _values(studio_not)
         self.director = director
-        self.network = network
+        self.actor = actor
+        self.network = _values(network)
+        self.network_not = _values(network_not)
         self.release_status = release_status
-        self.anime_format = anime_format
+        self.anime_format = _values(anime_format)
+        self.anime_format_not = _values(anime_format_not)
+        self.library_id = library_id or []
+        self.server_id = server_id or []
         self.unwatched = unwatched
         self.favorites = favorites
         self.on_plex = on_plex
@@ -273,6 +482,33 @@ class MediaFilters:
     def rated(self) -> bool:
         return self.min_rating is not None or self.max_rating is not None
 
+    @property
+    def searches_notes(self) -> bool:
+        """Whether `q` has to reach the viewer's own notes.
+
+        Notes are per-user, so this is the one part of a text search that can
+        only be evaluated inside the `user_id`-scoped join — which is why the
+        whole `q` clause moves to `state_conditions` when the scope widens.
+        Written as an OR across title, overview and notes, it cannot be split
+        across the two lists, and evaluated anywhere else it would count one
+        account's private notes into another account's results.
+        """
+        return bool(self.q) and self.q_scope == "all"
+
+    def search_condition(self, *, notes: bool):
+        """The free-text clause: titles always, overview and notes on request."""
+        pattern = f"%{like_escape((self.q or '').strip())}%"
+        parts = [
+            MediaItem.title.ilike(pattern, escape="\\"),
+            MediaItem.original_title.ilike(pattern, escape="\\"),
+            MediaItem.sort_title.ilike(pattern, escape="\\"),
+        ]
+        if self.q_scope == "all":
+            parts.append(MediaItem.overview.ilike(pattern, escape="\\"))
+            if notes:
+                parts.append(UserMediaState.notes.ilike(pattern, escape="\\"))
+        return or_(*parts)
+
     def needs_state_join(self, sort: str = "") -> bool:
         """Whether the per-user state row has to be joined in.
 
@@ -284,7 +520,8 @@ class MediaFilters:
         `sort` defaults to empty for a caller that has no ordering at all.
         """
         return bool(
-            self.watch_status
+            self.searches_notes
+            or self.watch_status
             or self.unwatched
             or self.favorites
             or self.rated
@@ -324,24 +561,31 @@ class MediaFilters:
         elif self.personal == "exclude":
             conditions.append(MediaItem.is_personal_media.is_(False))
 
-        if self.q:
-            pattern = f"%{like_escape(self.q.strip())}%"
-            conditions.append(
-                or_(
-                    MediaItem.title.ilike(pattern, escape="\\"),
-                    MediaItem.original_title.ilike(pattern, escape="\\"),
-                    MediaItem.sort_title.ilike(pattern, escape="\\"),
+        # A title-scoped search is decidable here; a widened one is not, because
+        # it reaches the viewer's own notes. See `searches_notes`.
+        if self.q and not self.searches_notes:
+            conditions.append(self.search_condition(notes=False))
+
+        # Every repeatable facet, from one table. `facet_source` resolves each
+        # value through the parent show, so an episode still matches its
+        # series'; `facet_absent` is its mirror for exclusion.
+        for name, match in MULTI_FACETS.items():
+            included = getattr(self, name)
+            # Both `value` and `match` are bound as defaults: the lambda would
+            # otherwise close over the loop variables and every clause would end
+            # up asking about the last facet's last value.
+            if included:
+                wanted = [
+                    facet_source(lambda src, value=value, match=match: match(src, value))
+                    for value in included
+                ]
+                mode = getattr(self, f"{name}_mode", "any")
+                conditions.append(and_(*wanted) if mode == "all" else or_(*wanted))
+            for value in getattr(self, f"{name}_not"):
+                conditions.append(
+                    facet_absent(lambda src, value=value, match=match: match(src, value))
                 )
-            )
-        if self.genre:
-            # genres is a JSON array; a LIKE on its text form is the portable
-            # filter for SQLite and is fast enough at self-hosted library sizes.
-            pattern = f'%"{like_escape(self.genre)}"%'
-            conditions.append(
-                facet_source(
-                    lambda src: cast(src.genres, String).ilike(pattern, escape="\\")
-                )
-            )
+
         # The item's *own* year, not its show's — unlike the facets above, an
         # episode has one and it is the year that episode aired. Resolving it
         # through the series would file a 2019 episode under 1989.
@@ -365,38 +609,23 @@ class MediaFilters:
             conditions.append(MediaItem.created_at <= self.added_before)
         # `facet_source` calls its builder immediately, so closing over `self`
         # here is evaluated now, not later.
-        if self.content_rating:
-            conditions.append(
-                facet_source(lambda src: src.content_rating == self.content_rating)
-            )
-        if self.studio:
-            conditions.append(facet_source(lambda src: src.studio == self.studio))
-        if self.network:
-            conditions.append(facet_source(lambda src: src.network == self.network))
         if self.release_status:
             conditions.append(
                 facet_source(lambda src: src.release_status == self.release_status)
             )
-        if self.anime_format:
-            conditions.append(
-                facet_source(lambda src: src.anime_format == self.anime_format)
-            )
         if self.on_plex is not None:
             conditions.append(on_plex_condition(self.on_plex))
         if self.director:
-            # A correlated EXISTS rather than a join, for the same reason
-            # `on_plex` uses one: a title with two directors must not come back
-            # twice — and it would, on the pair of rows a join produces.
-            directed = (
-                select(MediaCredit.id)
-                .join(Person, Person.id == MediaCredit.person_id)
-                .where(
-                    MediaCredit.media_item_id == MediaItem.id,
-                    MediaCredit.kind == CreditKind.DIRECTOR,
-                    Person.name == self.director,
-                )
-            )
-            conditions.append(directed.exists())
+            conditions.append(credited_condition(CreditKind.DIRECTOR, self.director))
+        if self.actor:
+            # `CAST` is what the model calls a cast credit; the *parameter* is
+            # `actor`, because that is the word on the detail page and in the
+            # link the user clicked.
+            conditions.append(credited_condition(CreditKind.CAST, self.actor))
+        if self.library_id:
+            conditions.append(mapped_condition(PlexMapping.library_id, self.library_id))
+        if self.server_id:
+            conditions.append(mapped_condition(PlexMapping.server_id, self.server_id))
         return conditions
 
     def state_conditions(self) -> list:
@@ -408,6 +637,11 @@ class MediaFilters:
         in `needs_state_join` too.
         """
         conditions = []
+        # `q_scope=all` searches your notes, and notes are yours: the clause can
+        # only be written where the join has already pinned `user_id`, so it
+        # lives here rather than in `item_conditions`.
+        if self.searches_notes:
+            conditions.append(self.search_condition(notes=True))
         if self.watch_status is not None:
             conditions.append(UserMediaState.status == self.watch_status)
         if self.unwatched:

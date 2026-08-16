@@ -8,11 +8,12 @@ by different agents, and also show up on the plex.tv watchlist with only a
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from ..models import MediaItem, MediaType, PlexLibrary, PlexMapping, PlexServer, utcnow
 from .guids import ExternalIds, build_guid_key, extract_ids
@@ -26,6 +27,57 @@ log = logging.getLogger(__name__)
 # How long to leave an item alone before asking the metadata providers again
 # about artwork they did not have last time.
 ARTWORK_RETRY_INTERVAL = timedelta(days=7)
+
+# Stamped on a row whose stored metadata predates the columns Tally now keeps —
+# `original_language`, `origin_countries`, and the `studio`/`network` a sticky
+# sink left blank on a row enriched before a provider knew them.
+#
+# A mark in the past rather than NULL, and the difference matters. NULL means
+# "never asked", and `_needs_enrichment` reads it as "enrich this now,
+# regardless" — so nulling the column across a whole library would turn the very
+# next library scan into one unbounded re-enrichment burst, thousands of
+# provider calls inline in the scan phase. A timestamp older than every
+# retry window says the truthful thing instead ("the answer we hold is older
+# than the questions we now ask"): the scan still skips a row that has artwork,
+# and `sync_service.backfill_missing_metadata` drains the queue in its bounded
+# batches, which is the whole point of doing this at all.
+METADATA_RESWEEP_MARK = datetime(2001, 1, 1, tzinfo=UTC)
+
+
+def has_external_id() -> ColumnElement[bool]:
+    """SQL for "some provider has named this row"."""
+    return or_(
+        MediaItem.tmdb_id.is_not(None),
+        MediaItem.tvdb_id.is_not(None),
+        MediaItem.imdb_id.is_not(None),
+        MediaItem.mal_id.is_not(None),
+        MediaItem.anilist_id.is_not(None),
+    )
+
+
+def metadata_is_incomplete() -> ColumnElement[bool]:
+    """SQL for "this row has never been through the enrichment sink as it stands".
+
+    Every clause has to *terminate* — one successful pass must be able to clear
+    it — or the row is re-asked every week for the life of the install. That is
+    why this is not simply "any of language, country, studio, network is
+    missing", which was the obvious spelling:
+
+    * ``original_language`` and ``origin_countries`` clear because the sink
+      writes ``[]`` when a provider says nothing, so NULL means only "not asked".
+    * ``studio``/``network`` cannot clear individually. TMDB has no
+      ``networks`` for a film and no production company worth calling a network
+      for one either, so "network IS NULL" is permanently true of every movie in
+      the library — and "studio IS NULL" is permanently true of most shows.
+      Having *neither* is the case worth re-asking about: a row with no
+      production attribution at all.
+    """
+    return or_(
+        MediaItem.original_language.is_(None),
+        MediaItem.origin_countries.is_(None),
+        and_(MediaItem.studio.is_(None), MediaItem.network.is_(None)),
+    )
+
 
 _PLEX_TYPE_TO_MEDIA = {
     "movie": MediaType.MOVIE,
@@ -86,6 +138,9 @@ class MediaRepository:
         # episodes; cache the resolved rows to avoid re-querying per episode.
         self._by_guid_key: dict[str, MediaItem] = {}
         self._by_rating_key: dict[tuple[int, str], MediaItem] = {}
+        # Which library a ratingKey belongs to. A history import asks this once
+        # per *new* event, and a season's worth of episodes share one library.
+        self._library_by_rating_key: dict[tuple[int, str], int | None] = {}
 
     # -- lookups ----------------------------------------------------------
 
@@ -116,6 +171,29 @@ class MediaRepository:
         if item:
             self._by_rating_key[cache_key] = item
         return item
+
+    async def library_id_for(self, server_id: int, rating_key: str) -> int | None:
+        """The library a server's ratingKey sits in, if a scan has recorded one.
+
+        The mapping is where that fact lives — a history row does not carry it —
+        and a play needs it copied onto the event itself, because
+        WatchEvent -> MediaItem -> PlexMapping is one-to-many and would multiply
+        a play by however many servers hold the item.
+
+        None is a real answer: an item Plex no longer holds has no mapping, and
+        a mapping made by anything other than a library scan has no library.
+        """
+        cache_key = (server_id, str(rating_key))
+        if cache_key in self._library_by_rating_key:
+            return self._library_by_rating_key[cache_key]
+        library_id = await self.db.scalar(
+            select(PlexMapping.library_id).where(
+                PlexMapping.server_id == server_id,
+                PlexMapping.rating_key == str(rating_key),
+            )
+        )
+        self._library_by_rating_key[cache_key] = library_id
+        return library_id
 
     # -- upsert -----------------------------------------------------------
 
@@ -389,14 +467,34 @@ class MediaRepository:
         if meta.genres:
             item.genres = sorted({*(item.genres or []), *meta.genres})
 
+        # Where the title comes from and what it is about. The classifier three
+        # lines down has read all three off `MetadataResult` since it was
+        # written; this is the first time they are kept.
+        #
+        # `[]` rather than NULL when the provider had nothing, because NULL is
+        # what `metadata_is_incomplete` reads as "not asked yet". A film has no
+        # `origin_country` on TMDB, so leaving NULL there would put every movie
+        # in the library back in the enrichment queue every week, permanently.
+        item.original_language = item.original_language or meta.original_language
+        item.origin_countries = meta.origin_countries or item.origin_countries or []
+        item.keywords = meta.keywords or item.keywords or []
+
         item.tmdb_id = item.tmdb_id or meta.tmdb_id
         item.tvdb_id = item.tvdb_id or meta.tvdb_id
         item.imdb_id = item.imdb_id or meta.imdb_id
         item.mal_id = item.mal_id or meta.mal_id
         item.anilist_id = item.anilist_id or meta.anilist_id
 
-        item.is_anime = result.anime.is_anime
-        item.anime_source = result.anime.source
+        # Two of the three *forcing* anime signals are invisible from here when
+        # there is no library: the user's override and a library named "Anime".
+        # So a call made without one is not equipped to overturn a positive
+        # verdict — it can only ever confirm it or add to it. Without this guard
+        # a resweep through `enrich_existing` would quietly un-anime every show
+        # in an anime library on its way past, which is a whole-library
+        # regression from a pass whose job is to add missing columns.
+        if library is not None or result.anime.is_anime or not item.is_anime:
+            item.is_anime = result.anime.is_anime
+            item.anime_source = result.anime.source
         item.anime_format = meta.anime_format or item.anime_format
         item.metadata_updated_at = utcnow()
         await self.db.flush()
@@ -534,6 +632,7 @@ class MediaRepository:
 
         await self.db.flush()
         self._by_rating_key[(server.id, rating_key)] = item
+        self._library_by_rating_key[(server.id, rating_key)] = mapping.library_id
         return mapping
 
     # -- matching a payload that cannot name itself ------------------------
