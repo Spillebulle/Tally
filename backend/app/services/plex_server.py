@@ -417,6 +417,14 @@ class PlexServerClient:
                 "sort": "viewedAt:desc",
                 "X-Plex-Container-Start": offset,
                 "X-Plex-Container-Size": page_size,
+                # The one call that used to leave this off, which is exactly
+                # backwards: a history row is the *thinnest* payload Plex sends
+                # and the one most in need of naming itself. Everything else —
+                # the section scan, the metadata re-fetch, the children fetch —
+                # has always asked. See the guid_key section in CLAUDE.md: the
+                # identity of a source is only as good as the ids you asked it
+                # for, and this is the source that had been asked for none.
+                "includeGuids": 1,
             }
             if account_id is not None:
                 params["accountID"] = account_id
