@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import and_, func, select
 
 from ..deps import CurrentUser, DbSession
+from ..media_filters import (
+    HistorySortField,
+    MediaFilters,
+    SortOrder,
+    apply_filters,
+)
 from ..models import (
     MediaItem,
     MediaType,
@@ -33,39 +40,72 @@ def _runtime_ms(item: MediaItem) -> int | None:
 async def list_history(
     db: DbSession,
     user: CurrentUser,
-    media_type: MediaType | None = None,
-    anime_only: bool = False,
+    filters: Annotated[MediaFilters, Depends()],
+    # `since`/`until` stay here rather than moving into `MediaFilters`, and the
+    # distinction is not cosmetic: these read `WatchEvent.watched_at` — when
+    # *this play* happened — while the shared `watched_after`/`watched_before`
+    # read `UserMediaState.last_watched_at`, the rollup of when you last
+    # touched the title at all. Folding them together would answer a different
+    # question on every page that asked.
     since: datetime | None = None,
     until: datetime | None = None,
+    # Deprecated: superseded by the shared `anime` tri-state. Kept for one
+    # release because the shipped frontend sends `?filter=anime` as
+    # `anime_only=true`, and dropping it in the same change that migrates the
+    # frontend would leave neither half able to work on its own.
+    anime_only: bool = False,
+    sort: HistorySortField = "watched_at",
+    order: SortOrder = "desc",
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
 ) -> HistoryPage:
-    conditions = [WatchEvent.user_id == user.id]
-    if media_type is not None:
-        conditions.append(MediaItem.media_type == media_type)
+    """The watch log, browsable with the same filter set as the grids.
+
+    Two things about the filters differ from `/api/media`, and both are
+    deliberate:
+
+    * `default_types=False`. The shared default keeps the flat grids to movies
+      and shows; episodes are most of a watch history, and hiding them here
+      would empty the page for anyone who mainly watches television.
+    * `personal="all"`. `MediaFilters` defaults to excluding home videos, which
+      is right for a library grid and wrong for a log — the play really
+      happened, and CLAUDE.md is explicit that a row is never dropped for this.
+      The dependency's default cannot be overridden per-router without
+      restating the whole signature, so it is set on the parsed object instead,
+      and *unconditionally*: a log that can be asked to hide real plays is a
+      log that will eventually be asked to. So `personal` is still a valid
+      parameter here — rejecting it would break links — but an inert one.
+
+    `unwatched` and `watch_status` are near-meaningless here (everything listed
+    has a play) but stay functional rather than rejected; the UI hides them.
+    """
+    filters.personal = "all"
     if anime_only:
-        conditions.append(MediaItem.is_anime.is_(True))
+        filters.anime = "only"
+
+    conditions = [WatchEvent.user_id == user.id]
     if since is not None:
         conditions.append(WatchEvent.watched_at >= since)
     if until is not None:
         conditions.append(WatchEvent.watched_at <= until)
 
-    base = select(WatchEvent).join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
-    total = int(
-        await db.scalar(
-            select(func.count(WatchEvent.id))
-            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
-            .where(and_(*conditions))
-        )
-        or 0
+    joined = MediaItem.id == WatchEvent.media_item_id
+    stmt, count_stmt = apply_filters(
+        select(WatchEvent).join(MediaItem, joined).where(and_(*conditions)),
+        # `count(WatchEvent.id)` stays honest through the state join: the
+        # `(user_id, media_item_id)` unique constraint plus the user-scoped ON
+        # clause means at most one state row per event, so nothing fans out.
+        select(func.count(WatchEvent.id)).join(MediaItem, joined).where(and_(*conditions)),
+        filters,
+        user.id,
+        sort=sort,
+        order=order,
+        sort_columns={"watched_at": WatchEvent.watched_at},
+        default_types=False,
     )
 
-    result = await db.execute(
-        base.where(and_(*conditions))
-        .order_by(WatchEvent.watched_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    total = int(await db.scalar(count_stmt) or 0)
+    result = await db.execute(stmt.offset(offset).limit(limit))
     events = list(result.scalars().unique())
 
     item_ids = [e.media_item_id for e in events]
