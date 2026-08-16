@@ -236,6 +236,203 @@ const OFLC: Marks = {
   R18: ['oflc-r18', 'OFLC R18 — Restricted to 18 and over'],
 }
 
+/** CBFC (India). */
+const CBFC: Marks = {
+  U: ['cbfc-u', 'CBFC U — Unrestricted'],
+  UA: ['cbfc-ua', 'CBFC U/A — Parental guidance'],
+  A: ['cbfc-a', 'CBFC A — Adults only'],
+}
+
+/**
+ * Canada. Two systems share the country: CHVRS nationally, and Quebec's own
+ * board, whose ratings are the ones written with a `+`.
+ */
+const CANADA: Marks = {
+  G: ['chvrs-g', 'CHVRS G — General'],
+  PG: ['chvrs-pg', 'CHVRS PG — Parental Guidance'],
+  '14A': ['chvrs-14a', 'CHVRS 14A'],
+  '18A': ['chvrs-18a', 'CHVRS 18A'],
+  R: ['chvrs-r', 'CHVRS R — Restricted'],
+  A: ['chvrs-adult', 'CHVRS A — Adult'],
+  E: ['chvrs-e', 'CHVRS E — Exempt'],
+  '13+': ['qc-13', 'Québec 13+'],
+  '16+': ['qc-16', 'Québec 16+'],
+  '18+': ['qc-18', 'Québec 18+'],
+}
+
+/** IMDA (Singapore). */
+const IMDA: Marks = {
+  G: ['imda-g', 'IMDA G — General'],
+  PG: ['imda-pg', 'IMDA PG — Parental Guidance'],
+  PG13: ['imda-pg13', 'IMDA PG13'],
+  'PG-13': ['imda-pg13', 'IMDA PG13'],
+  NC16: ['imda-nc16', 'IMDA NC16 — No Children Under 16'],
+  'NC-16': ['imda-nc16', 'IMDA NC16 — No Children Under 16'],
+  M18: ['imda-m18', 'IMDA M18 — Mature 18'],
+  'M-18': ['imda-m18', 'IMDA M18 — Mature 18'],
+  R21: ['imda-r21', 'IMDA R21 — Restricted 21'],
+  'R-21': ['imda-r21', 'IMDA R21 — Restricted 21'],
+}
+
+/** LSF (Indonesia). */
+const LSF: Marks = {
+  SU: ['lsf-su', 'LSF SU — semua umur'],
+  '13+': ['lsf-13', 'LSF 13+'],
+  '17+': ['lsf-17', 'LSF 17+'],
+  '21+': ['lsf-21', 'LSF 21+'],
+}
+
+/** Thailand. */
+const THAILAND: Marks = {
+  G: ['th-g', 'Thai G — general'],
+  P: ['th-p', 'Thai P — promotional / educational'],
+  '13+': ['th-13', 'Thai 13+'],
+  '15+': ['th-15', 'Thai 15+'],
+  '18+': ['th-18', 'Thai 18+'],
+  '20-': ['th-20', 'Thai 20- — adults only'],
+}
+
+/** GSRR (Taiwan). */
+const GSRR: Marks = {
+  G: ['gsrr-g', 'GSRR G — general'],
+  P: ['gsrr-p', 'GSRR P — protected'],
+  PG12: ['gsrr-pg12', 'GSRR PG12'],
+  'PG-12': ['gsrr-pg12', 'GSRR PG12'],
+  PG15: ['gsrr-pg15', 'GSRR PG15'],
+  'PG-15': ['gsrr-pg15', 'GSRR PG15'],
+  R: ['gsrr-r', 'GSRR R — restricted'],
+}
+
+/** TRDSİ (Turkey). The `A` forms mean "with an adult". */
+const TRDSI: Marks = {
+  '6+': ['trdsi-6', 'TRDSİ 6+'],
+  '6A': ['trdsi-6a', 'TRDSİ 6A'],
+  '10+': ['trdsi-10', 'TRDSİ 10+'],
+  '10A': ['trdsi-10a', 'TRDSİ 10A'],
+  '13+': ['trdsi-13', 'TRDSİ 13+'],
+  '13A': ['trdsi-13a', 'TRDSİ 13A'],
+  '16+': ['trdsi-16', 'TRDSİ 16+'],
+  '18+': ['trdsi-18', 'TRDSİ 18+'],
+}
+
+/** KFCB (Kenya). */
+const KFCB: Marks = {
+  GE: ['kfcb-ge', 'KFCB GE — General Exhibition'],
+  PG: ['kfcb-pg', 'KFCB PG — Parental Guidance'],
+  '16': ['kfcb-16', 'KFCB 16'],
+  '18': ['kfcb-18', 'KFCB 18'],
+}
+
+/** NFVCB (Nigeria). */
+const NFVCB: Marks = {
+  G: ['nfvcb-g', 'NFVCB G — General'],
+  PG: ['nfvcb-pg', 'NFVCB PG — Parental Guidance'],
+  '12': ['nfvcb-12', 'NFVCB 12'],
+  '12A': ['nfvcb-12a', 'NFVCB 12A'],
+  '15': ['nfvcb-15', 'NFVCB 15'],
+  '18': ['nfvcb-18', 'NFVCB 18'],
+  RE: ['nfvcb-re', 'NFVCB RE — Restricted Exhibition'],
+}
+
+/** FPB (South Africa). */
+const FPB: Marks = {
+  A: ['fpb-a', 'FPB A — all ages'],
+  PG: ['fpb-pg', 'FPB PG — Parental Guidance'],
+  '7-9PG': ['fpb-7-9pg', 'FPB 7–9 PG'],
+  '10-12PG': ['fpb-10-12pg', 'FPB 10–12 PG'],
+  '13': ['fpb-13', 'FPB 13'],
+  '16': ['fpb-16', 'FPB 16'],
+  '18': ['fpb-18', 'FPB 18'],
+  X18: ['fpb-x18', 'FPB X18'],
+  XX: ['fpb-xx', 'FPB XX — refused'],
+}
+
+/** INCAA (Argentina). */
+const INCAA: Marks = {
+  G: ['incaa-g', 'INCAA ATP — apta para todo público'],
+  ATP: ['incaa-g', 'INCAA ATP — apta para todo público'],
+  'R-13': ['incaa-r13', 'INCAA R-13'],
+  '13': ['incaa-r13', 'INCAA R-13'],
+  'R-17': ['incaa-r17', 'INCAA R-17'],
+  '17': ['incaa-r17', 'INCAA R-17'],
+  C: ['incaa-c', 'INCAA C — condicionada'],
+  SP: ['incaa-sp', 'INCAA SP — sólo para adultos'],
+}
+
+/** NBC (Maldives). */
+const NBC: Marks = {
+  G: ['nbc-g', 'NBC G — General'],
+  PU: ['nbc-pu', 'NBC PU — Parental Guidance under'],
+  PG: ['nbc-pg', 'NBC PG — Parental Guidance'],
+  '12+': ['nbc-12', 'NBC 12+'],
+  '15+': ['nbc-15', 'NBC 15+'],
+  '18+': ['nbc-18', 'NBC 18+'],
+  '18+R': ['nbc-18r', 'NBC 18+R — restricted'],
+}
+
+/** Kuwait. */
+const KUWAIT: Marks = {
+  'R-15': ['kw-r15', 'Kuwait R-15'],
+  '15': ['kw-r15', 'Kuwait R-15'],
+  'R-18': ['kw-r18', 'Kuwait R-18'],
+  '18': ['kw-r18', 'Kuwait R-18'],
+}
+
+/** RTC (Mexico). */
+const RTC: Marks = {
+  A: ['rtc-a', 'RTC A — todo público'],
+  AA: ['rtc-aa', 'RTC AA — menores de 7'],
+  B: ['rtc-b', 'RTC B — adolescentes de 12'],
+  B15: ['rtc-b15', 'RTC B15'],
+  'B-15': ['rtc-b15', 'RTC B15'],
+  C: ['rtc-c', 'RTC C — adultos de 18'],
+  D: ['rtc-d', 'RTC D — adultos'],
+}
+
+/** Iceland. */
+const ICELAND: Marks = {
+  L: ['is-l', 'Leyfð öllum — all ages'],
+  '6': ['is-6', 'Iceland 6'],
+  '9': ['is-9', 'Iceland 9'],
+  '12': ['is-12', 'Iceland 12'],
+  '14': ['is-14', 'Iceland 14'],
+  '16': ['is-16', 'Iceland 16'],
+  '18': ['is-18', 'Iceland 18'],
+}
+
+/** Hungary. */
+const HUNGARY: Marks = {
+  KN: ['hu-kn', 'Korhatár nélkül — all ages'],
+  '6': ['hu-6', 'Hungary 6'],
+  '12': ['hu-12', 'Hungary 12'],
+  '16': ['hu-16', 'Hungary 16'],
+  '18': ['hu-18', 'Hungary 18'],
+  X: ['hu-x', 'Hungary X'],
+}
+
+/** JSO (Slovakia). */
+const JSO: Marks = {
+  U: ['jso-u', 'JSO U — all ages'],
+  '7': ['jso-7', 'JSO 7+'],
+  '7+': ['jso-7', 'JSO 7+'],
+  '12': ['jso-12', 'JSO 12+'],
+  '12+': ['jso-12', 'JSO 12+'],
+  '15': ['jso-15', 'JSO 15+'],
+  '15+': ['jso-15', 'JSO 15+'],
+  '18': ['jso-18', 'JSO 18+'],
+  '18+': ['jso-18', 'JSO 18+'],
+}
+
+/** NFA (Ghana). */
+const NFA: Marks = {
+  U: ['nfa-u', 'NFA U — universal'],
+  PG: ['nfa-pg', 'NFA PG — Parental Guidance'],
+  '12+': ['nfa-12', 'NFA 12+'],
+  '15+': ['nfa-15', 'NFA 15+'],
+  '18+': ['nfa-18', 'NFA 18+'],
+  NS: ['nfa-ns', 'NFA NS — not suitable'],
+}
+
 /**
  * Which board issued a certificate carrying this prefix.
  *
@@ -259,6 +456,24 @@ const BY_REGION: Record<string, Marks> = {
   DK: MEDIERAADET,
   ES: ICAA,
   KR: KMRB,
+  IN: CBFC,
+  CA: CANADA,
+  SG: IMDA,
+  ID: LSF,
+  TH: THAILAND,
+  TW: GSRR,
+  TR: TRDSI,
+  KE: KFCB,
+  NG: NFVCB,
+  ZA: FPB,
+  AR: INCAA,
+  MV: NBC,
+  KW: KUWAIT,
+  MX: RTC,
+  IS: ICELAND,
+  HU: HUNGARY,
+  SK: JSO,
+  GH: NFA,
 }
 
 /** The shared ramp: green through red as the age rises. Not any board's palette. */
