@@ -110,6 +110,8 @@ export interface MediaQuery extends Query {
   q?: string
   media_type?: string
   anime?: string
+  /** Defaults to `exclude` on the server: home videos are not titles. */
+  personal?: string
   watch_status?: string
   genre?: string
   year?: number
