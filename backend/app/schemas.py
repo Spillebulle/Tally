@@ -522,9 +522,13 @@ class RewatchStats(BaseModel):
     something first seen in 2019 a first watch, which is exactly backwards.
 
     `plays`, `first_watches`, `rewatches`, `rewatch_ratio` and `by_bucket` are
-    all scoped to the window (and to `anime_only`); `most_rewatched` is
+    all scoped to the window (and to the browse filters); `most_rewatched` is
     deliberately not, because "what do you come back to?" is a question about a
     library, not about a fortnight. It is capped, and says so via `ranked_over`.
+
+    The filters narrow which *items* are ranked, never which of an item's plays
+    are — so a rewatch stays a rewatch when the grid is narrowed to its genre.
+    `routers/stats._ranked_events` holds the rule and the reasoning.
     """
 
     plays: int
@@ -576,8 +580,8 @@ class SeasonalityOut(BaseModel):
 
     Its own endpoint on purpose: answering it means walking every play a user
     has ever recorded, which is the one aggregation here that grows without
-    bound, and the stats page should not pay for it on every load. Timezone and
-    `anime_only` still apply; there is no window to apply.
+    bound, and the stats page should not pay for it on every load. The timezone
+    and the shared browse filters still apply; there is no window to apply.
     """
 
     timezone: str

@@ -1066,6 +1066,301 @@ async def test_the_time_shape_and_rewatch_fields_are_present_and_empty_when_noth
     assert all(b["first"] == b["rewatch"] == 0 for b in rewatch["by_bucket"])
 
 
+# --- the shared browse filters --------------------------------------------
+#
+# `GET /api/stats` takes the same `MediaFilters` dependency as the grids, the
+# watchlist and History, so "stats for horror films I rated 8 and up" is one
+# request. Three of the four things that can go wrong here are silent — a
+# number that is merely smaller than it should be looks exactly like a number
+# that is correct — so each of these pins a specific way of being quietly wrong.
+
+
+async def test_a_genre_filter_narrows_every_number_on_the_page(authed_client, db):
+    user = await _user(db)
+    horror, comedy = await _add(
+        db,
+        _movie("The Thing", genres=["Horror"], runtime_minutes=109),
+        _movie("Airplane!", genres=["Comedy"], runtime_minutes=88),
+    )
+    await _log(db, user, horror, _utc_at(1, 20))
+    await _log(db, user, comedy, _utc_at(1, 21))
+    await _rate(db, user, horror, 10)
+    await _rate(db, user, comedy, 6)
+
+    everything = await _stats(authed_client, days=7, tz="UTC")
+    assert everything["watch_events"] == 2
+    assert everything["total_runtime_minutes"] == 197
+
+    narrowed = await _stats(authed_client, days=7, tz="UTC", genre="Horror")
+    assert narrowed["watch_events"] == 1
+    assert narrowed["total_movies_watched"] == 1
+    assert narrowed["total_runtime_minutes"] == 109
+    # The ratings come off the same subject set, so they narrow with it.
+    assert narrowed["average_rating"] == 10.0
+    assert [g["label"] for g in narrowed["top_genres"]] == ["Horror"]
+    assert _slot(narrowed["by_hour"], 20)["plays"] == 1
+    assert _slot(narrowed["by_hour"], 21)["plays"] == 0
+    assert narrowed["punch_card"]["max_plays"] == 1
+
+
+async def test_episodes_are_counted_rather_than_dropped_by_the_shared_default(
+    authed_client, db
+):
+    """`default_types` keeps the flat grids to movies and shows; a watch log is
+    mostly episodes, so inheriting it would empty the page for a TV viewer."""
+    user = await _user(db)
+    (show,) = await _add(
+        db, MediaItem(guid_key=f"test:{uuid4()}", media_type=MediaType.SHOW, title="Show")
+    )
+    (episode,) = await _add(db, _episode(show, 1))
+    await _log(db, user, episode, _utc_at(1, 12))
+
+    stats = await _stats(authed_client, days=7, tz="UTC")
+    assert stats["watch_events"] == 1
+    assert stats["total_episodes_watched"] == 1
+
+
+async def test_an_episodes_play_is_counted_under_its_shows_genre(authed_client, db):
+    """The whole point of `facet_source`: enrichment skips episodes, so an
+    episode carries no genre of its own and a genre filter used to match
+    nothing — silently, because an empty page looks like an honest answer."""
+    user = await _user(db)
+    crime, sitcom = await _add(
+        db,
+        MediaItem(
+            guid_key=f"test:{uuid4()}",
+            media_type=MediaType.SHOW,
+            title="The Wire",
+            genres=["Crime"],
+        ),
+        MediaItem(
+            guid_key=f"test:{uuid4()}",
+            media_type=MediaType.SHOW,
+            title="Cheers",
+            genres=["Comedy"],
+        ),
+    )
+    crime_episode, sitcom_episode = await _add(db, _episode(crime, 1), _episode(sitcom, 1))
+    assert not crime_episode.genres  # the episode itself knows nothing
+    await _log(db, user, crime_episode, _utc_at(1, 12))
+    await _log(db, user, sitcom_episode, _utc_at(1, 13))
+
+    stats = await _stats(authed_client, days=7, tz="UTC", genre="Crime")
+    assert stats["watch_events"] == 1
+    assert stats["total_episodes_watched"] == 1
+    assert stats["total_shows_watched"] == 1
+
+
+async def test_a_state_filter_narrows_the_page_without_fanning_the_counts_out(
+    authed_client, db
+):
+    """`min_rating` reads the per-user state row, so the query has to join it —
+    and the `(user_id, media_item_id)` unique constraint is the only reason
+    that join cannot turn one play into two."""
+    user = await _user(db)
+    loved, tolerated, unrated = await _add(
+        db,
+        _movie("Stalker", runtime_minutes=162),
+        _movie("Battlefield Earth", runtime_minutes=118),
+        _movie("Unrated", runtime_minutes=100),
+    )
+    await _rate(db, user, loved, 9)
+    await _rate(db, user, tolerated, 3)
+    for days_ago in (3, 2, 1):
+        await _log(db, user, loved, _utc_at(days_ago, 20))
+    await _log(db, user, tolerated, _utc_at(1, 21))
+    await _log(db, user, unrated, _utc_at(1, 22))
+
+    stats = await _stats(authed_client, days=7, tz="UTC", min_rating=8)
+    # Three plays of one film, not six: the state row joins once per item.
+    assert stats["watch_events"] == 3
+    assert stats["total_movies_watched"] == 3
+    assert stats["total_runtime_minutes"] == 162 * 3
+    assert stats["average_rating"] == 9.0
+    assert sum(bucket["plays"] for bucket in stats["by_weekday"]) == 3
+    assert sum(cell for row in stats["punch_card"]["plays"] for cell in row) == 3
+    # And the rewatch split counts the same three plays.
+    assert stats["rewatch"]["plays"] == 3
+    assert (stats["rewatch"]["first_watches"], stats["rewatch"]["rewatches"]) == (1, 2)
+
+
+async def test_a_state_filter_reads_only_this_users_state(authed_client, db):
+    user = await _user(db)
+    theirs = await _second_user(db)
+    (item,) = await _add(db, _movie("Solaris"))
+    await _log(db, user, item, _utc_at(1, 12))
+    await _rate(db, theirs, item, 10)  # their ten, not mine
+
+    assert (await _stats(authed_client, days=7, tz="UTC", min_rating=8))["watch_events"] == 0
+    assert (await _stats(authed_client, days=7, tz="UTC"))["watch_events"] == 1
+
+
+async def test_anime_only_is_a_deprecated_alias_for_the_shared_tri_state(
+    authed_client, db
+):
+    """The shipped Stats page still sends `anime_only=true`; both spellings have
+    to describe the same set until it is migrated."""
+    user = await _user(db)
+    anime, western = await _add(
+        db, _movie("Akira", is_anime=True, runtime_minutes=124), _movie("Heat")
+    )
+    await _log(db, user, anime, _utc_at(1, 12))
+    await _log(db, user, western, _utc_at(1, 13))
+
+    legacy = await _stats(authed_client, days=7, tz="UTC", anime_only=True)
+    current = await _stats(authed_client, days=7, tz="UTC", anime="only")
+    assert legacy["watch_events"] == current["watch_events"] == 1
+    assert legacy["total_runtime_minutes"] == current["total_runtime_minutes"] == 124
+
+    excluded = await _stats(authed_client, days=7, tz="UTC", anime="exclude")
+    assert excluded["watch_events"] == 1
+    assert excluded["total_anime_watched"] == 0
+
+
+async def test_home_videos_count_whatever_personal_is_set_to(authed_client, db):
+    """`personal` defaults to "exclude" on `MediaFilters` and is overridden here
+    unconditionally, exactly as `routers/history.py` does it: a page counting
+    hours really watched must not be able to hide plays that really happened.
+    So the parameter stays valid — a stale link must not 422 — but inert."""
+    user = await _user(db)
+    film, home_video = await _add(
+        db,
+        _movie("Sicario", runtime_minutes=121),
+        _movie("2020-03-31 19.42.27", runtime_minutes=3, is_personal_media=True),
+    )
+    await _log(db, user, film, _utc_at(1, 12))
+    await _log(db, user, home_video, _utc_at(1, 13))
+
+    for personal in (None, "all", "exclude", "only"):
+        params = {"days": 7, "tz": "UTC"}
+        if personal is not None:
+            params["personal"] = personal
+        stats = await _stats(authed_client, **params)
+        assert stats["watch_events"] == 2, personal
+        assert stats["total_runtime_minutes"] == 124, personal
+
+
+async def test_a_narrowing_filter_never_turns_a_rewatch_into_a_first_watch(
+    authed_client, db
+):
+    """The one that would be silent, and the reason `_ranked_events` documents
+    what may go inside it.
+
+    The ranking numbers each item's plays over the user's whole history. A
+    filter that selected a *subset of one item's plays* would shift every
+    surviving row down, so a second viewing would come back as rank 1 — a
+    rewatch reported as a first watch, with a plausible number in every tile
+    beside it. Every filter in `MediaFilters` selects whole items instead, so
+    narrowing to the film's own genre must leave the split exactly as it was.
+    """
+    user = await _user(db)
+    horror, comedy = await _add(
+        db, _movie("Halloween", genres=["Horror"]), _movie("Airplane!", genres=["Comedy"])
+    )
+    await _log(db, user, horror, _utc_at(500, 12))  # years before the window
+    await _log(db, user, horror, _utc_at(2, 12))  # inside it: a rewatch
+    await _log(db, user, comedy, _utc_at(1, 12))  # inside it: a first watch
+
+    unfiltered = (await _stats(authed_client, days=7, tz="UTC"))["rewatch"]
+    assert (unfiltered["first_watches"], unfiltered["rewatches"]) == (1, 1)
+
+    narrowed = (await _stats(authed_client, days=7, tz="UTC", genre="Horror"))["rewatch"]
+    assert narrowed["plays"] == 1
+    # Still a rewatch. Ranking the filtered set *within the window* would say
+    # (1, 0) here, and nothing on the page would look wrong.
+    assert (narrowed["first_watches"], narrowed["rewatches"]) == (0, 1)
+    assert narrowed["rewatch_ratio"] == 1.0
+
+    day = _utc_at(2, 12).date().isoformat()
+    split = next(b for b in narrowed["by_bucket"] if b["label"] == day)
+    assert (split["first"], split["rewatch"]) == (0, 1)
+
+
+async def test_a_state_filter_leaves_the_rewatch_ranking_alone_too(authed_client, db):
+    """`min_rating` reaches through a join, and the join is still per *item*:
+    one state row per (user, item), so it cannot drop one play of a film and
+    keep another."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Groundhog Day"))
+    await _rate(db, user, item, 9)
+    await _log(db, user, item, _utc_at(400, 12))
+    await _log(db, user, item, _utc_at(2, 12))
+
+    rewatch = (await _stats(authed_client, days=7, tz="UTC", min_rating=8))["rewatch"]
+    assert (rewatch["plays"], rewatch["first_watches"], rewatch["rewatches"]) == (1, 0, 1)
+    assert [row["title"] for row in rewatch["most_rewatched"]] == ["Groundhog Day"]
+
+
+async def test_the_most_rewatched_ranking_respects_the_filters(authed_client, db):
+    user = await _user(db)
+    horror, comedy = await _add(
+        db, _movie("The Thing", genres=["Horror"]), _movie("Airplane!", genres=["Comedy"])
+    )
+    for days_ago in (30, 20, 10):
+        await _log(db, user, horror, _utc_at(days_ago, 12))
+        await _log(db, user, comedy, _utc_at(days_ago, 13))
+
+    both = (await _stats(authed_client, days=7, tz="UTC"))["rewatch"]["most_rewatched"]
+    assert sorted(row["title"] for row in both) == ["Airplane!", "The Thing"]
+
+    only_horror = (await _stats(authed_client, days=7, tz="UTC", genre="Horror"))["rewatch"]
+    assert [row["title"] for row in only_horror["most_rewatched"]] == ["The Thing"]
+    assert only_horror["most_rewatched"][0]["plays"] == 3
+
+
+async def test_filters_compose_and_apply_to_the_comparison_windows_as_well(
+    authed_client, db
+):
+    user = await _user(db)
+    horror, comedy = await _add(
+        db,
+        _movie("Suspiria", genres=["Horror"], runtime_minutes=98),
+        _movie("Airplane!", genres=["Comedy"], runtime_minutes=88),
+    )
+    await _rate(db, user, horror, 9)
+    await _log(db, user, horror, _utc_at(1, 12))
+    await _log(db, user, comedy, _utc_at(1, 13))
+    await _log(db, user, horror, _utc_at(10, 12))  # the preceding week
+    await _log(db, user, comedy, _utc_at(10, 13))
+
+    stats = await _stats(
+        authed_client, days=7, tz="UTC", compare=True, genre="Horror", min_rating=8
+    )
+    assert stats["watch_events"] == 1
+    assert stats["previous"]["totals"]["watch_events"] == 1
+    assert stats["previous"]["totals"]["total_runtime_minutes"] == 98
+
+
+async def test_an_unwatched_filter_is_degenerate_rather_than_broken(authed_client, db):
+    """"Plays of things you have never played" is a contradiction, and on real
+    data it returns nothing — every play updates the rollup this filter reads.
+
+    Left working rather than rejected, and documented on the endpoint: a filter
+    the Stats UI does not offer is not worth a 422 on a shared link. Note what
+    it does *not* mean, though — `unwatched` reads `UserMediaState`, so a play
+    whose rollup row is missing entirely still counts. That is the filter's own
+    definition (`unwatched_condition` treats a missing row as never played) and
+    not something stats may quietly redefine.
+    """
+    (logged,) = await _add(db, _movie("Solaris"))
+    await authed_client.post(f"/api/history/{logged.id}/watched", params={"push_to_plex": False})
+    assert (await _stats(authed_client, days=7, tz="UTC"))["watch_events"] == 1
+
+    stats = await _stats(authed_client, days=7, tz="UTC", unwatched=True)
+    assert stats["watch_events"] == 0
+    assert stats["rewatch"]["plays"] == 0
+    assert stats["rewatch"]["most_rewatched"] == []
+
+
+async def test_a_filter_the_api_does_not_accept_is_a_422_not_a_wrong_answer(
+    authed_client,
+):
+    rejected = await authed_client.get("/api/stats", params={"anime": "sometimes"})
+    assert rejected.status_code == 422
+    rejected = await authed_client.get("/api/stats", params={"min_rating": 99})
+    assert rejected.status_code == 422
+
+
 # --- seasonality ----------------------------------------------------------
 
 
@@ -1155,3 +1450,39 @@ async def test_seasonality_is_per_user_and_honours_anime_only(authed_client, db)
 
 async def test_seasonality_falls_back_to_utc_for_an_unusable_zone(authed_client):
     assert (await _seasonality(authed_client, tz="Mars/Base"))["timezone"] == "UTC"
+
+
+async def test_seasonality_takes_the_same_browse_filters(authed_client, db):
+    """Both endpoints draw the same page, so a chip must mean one thing on it."""
+    user = await _user(db)
+    (crime_show,) = await _add(
+        db,
+        MediaItem(
+            guid_key=f"test:{uuid4()}",
+            media_type=MediaType.SHOW,
+            title="The Wire",
+            genres=["Crime"],
+        ),
+    )
+    episode, comedy, home_video = await _add(
+        db,
+        _episode(crime_show, 1),
+        _movie("Airplane!", genres=["Comedy"], runtime_minutes=88),
+        _movie("IMG_4821", runtime_minutes=2, is_personal_media=True),
+    )
+    await _rate(db, user, comedy, 9)
+    await _log(db, user, episode, datetime(2023, 5, 1, 12, tzinfo=UTC))
+    await _log(db, user, comedy, datetime(2023, 5, 2, 12, tzinfo=UTC))
+    await _log(db, user, home_video, datetime(2023, 5, 3, 12, tzinfo=UTC))
+
+    # Episodes and home videos both counted, like the windowed endpoint.
+    assert (await _seasonality(authed_client, tz="UTC"))["plays"] == 3
+
+    # The episode answers with its show's genre — `facet_source` again.
+    crime = await _seasonality(authed_client, tz="UTC", genre="Crime")
+    assert crime["plays"] == 1
+    assert _slot(crime["months"], 5)["minutes"] == 24  # the episode default
+
+    rated = await _seasonality(authed_client, tz="UTC", min_rating=8)
+    assert rated["plays"] == 1
+    assert rated["minutes"] == 88

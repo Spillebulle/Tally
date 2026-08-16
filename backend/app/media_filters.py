@@ -13,8 +13,8 @@ recently watchlisted, history opens on most recently played.
 The conditions are also exposed as plain functions and methods, not only through
 `apply_filters`, so a caller that is aggregating rather than paging a page — the
 stats endpoints, which have no sort and no pagination — can reuse the *same*
-definitions without inheriting the ordering machinery. Nothing under
-`routers/stats.py` consumes them yet; that wiring is a separate change. Two of
+definitions without inheriting the ordering machinery. `routers/stats.py`
+does exactly that, in its own `_scope`. Two of
 these carry an obligation on the caller, and both are traps:
 
 * anything in `state_conditions()` reads the joined `user_media_states` row, so
