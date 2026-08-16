@@ -227,9 +227,87 @@ export interface StatsComparison {
   pct_change: Record<string, number | undefined>
 }
 
+/**
+ * One slot of a time-shape profile: a weekday, an hour or a month.
+ *
+ * `index` is the machine-readable slot — 0-6 **Monday first** for a weekday,
+ * 0-23 for an hour, 1-12 for a month — and `label` is display only. Sort and
+ * key on `index`; the label can be shortened or localised without anything
+ * else moving.
+ *
+ * **An hour is when a play finished, near enough.** Plex stamps `viewedAt` at
+ * the scrobble, around 90% of the way through, so a film started at 20:00
+ * lands in the 21:00 bucket. Any chart of these says "finish", never "start".
+ */
+export interface TimeBucket {
+  index: number
+  label: string
+  plays: number
+  minutes: number
+}
+
+/**
+ * The 7×24 weekday-by-hour grid, as a matrix rather than 168 objects.
+ *
+ * `plays[weekday][hour]`; `weekdays` and `hours` label the rows and columns in
+ * the order they are in. `max_plays` is the largest cell, so a chart scales its
+ * ramp without a pass over the matrix.
+ */
+export interface PunchCard {
+  weekdays: string[]
+  hours: number[]
+  plays: number[][]
+  max_plays: number
+}
+
+/** One period bucket split into first-time plays and rewatches. */
+export interface RewatchSplit {
+  label: string
+  first: number
+  rewatch: number
+}
+
+/** One row of the most-rewatched ranking. Play counts are **all-time**. */
+export interface RewatchedItem {
+  media_item_id: number
+  title: string
+  /** Set for an episode, so a row reading "Episode 4" is legible alone. */
+  show_title: string | null
+  year: number | null
+  media_type: MediaType
+  poster_url: string
+  plays: number
+  first_watched: string
+  last_watched: string
+}
+
+/**
+ * First-time watches against rewatches.
+ *
+ * Everything but `most_rewatched` is scoped to the window; that list is
+ * all-time by definition, which is what `ranked_over` says out loud. A play is
+ * a rewatch because of what came before it in the *whole* history, not because
+ * of what happens to sit inside the window on screen.
+ *
+ * `by_bucket` is index-aligned with `activity_by_day`, so the two can be
+ * chunked and drawn on one axis.
+ */
+export interface RewatchStats {
+  plays: number
+  first_watches: number
+  rewatches: number
+  /** A fraction, not a percentage — the UI decides how to render it. */
+  rewatch_ratio: number
+  by_bucket: RewatchSplit[]
+  most_rewatched: RewatchedItem[]
+  ranked_over: 'all_time'
+}
+
 export interface Stats extends StatsTotals {
   range: StatsRange
   previous: StatsComparison | null
+  /** The same window one calendar year earlier. Only with `compare=true`. */
+  previous_year: StatsComparison | null
   current_streak_days: number
   longest_streak_days: number
   top_genres: StatCount[]
@@ -237,6 +315,36 @@ export interface Stats extends StatsTotals {
   activity_by_month: StatCount[]
   by_type: StatCount[]
   rating_distribution: StatCount[]
+  by_weekday: TimeBucket[]
+  by_hour: TimeBucket[]
+  punch_card: PunchCard
+  rewatch: RewatchStats
+}
+
+/** One calendar year of history: totals plus its twelve month counts. */
+export interface YearProfile {
+  year: number
+  plays: number
+  minutes: number
+  /** Twelve play counts, January first. */
+  months: number[]
+}
+
+/**
+ * The month-of-year profile, over **all** history rather than a window.
+ *
+ * Its own endpoint because it is the one aggregation with nothing bounding it,
+ * which is also why the page gives it its own loading, error and empty states
+ * rather than folding it into the main query's.
+ */
+export interface Seasonality {
+  timezone: string
+  plays: number
+  minutes: number
+  first_play: string | null
+  last_play: string | null
+  months: TimeBucket[]
+  years: YearProfile[]
 }
 
 export interface Library {
