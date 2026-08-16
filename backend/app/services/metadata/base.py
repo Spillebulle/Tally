@@ -154,6 +154,18 @@ class ProviderClient:
     def enabled(self) -> bool:
         return True
 
+    @property
+    def paused(self) -> bool:
+        """Whether the circuit breaker is currently refusing calls.
+
+        `_get` already fails fast while it is open, but a *bulk* caller needs to
+        know the difference between "the provider answered nothing" and "we did
+        not ask", because it may be about to record the former. The credits
+        backfill stops on this rather than stamping a hundred titles as having
+        no cast during an outage.
+        """
+        return time.monotonic() < self._breaker_until
+
     def _cache_get(self, key: str) -> Any:
         hit = self._cache.get(key)
         if not hit:

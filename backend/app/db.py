@@ -42,6 +42,7 @@ async def init_db() -> None:
     await _run_light_migrations()
     await _close_interrupted_sync_runs()
     await _recover_release_name_titles()
+    await _resweep_incomplete_metadata()
     await _merge_duplicates()
     log.info("Database ready at %s", settings.db_path)
 
@@ -134,6 +135,71 @@ async def _recover_release_name_titles() -> None:
         log.info("Recovered a real title for %s item(s)", len(recovered))
 
 
+async def _resweep_incomplete_metadata() -> None:
+    """Queue rows whose stored metadata predates the columns Tally now keeps.
+
+    `original_language`, `origin_countries` and `keywords` were carried on
+    `MetadataResult` and discarded at the sink until now, and `studio`/`network`
+    are written stickily (`item.studio = item.studio or meta.studio`), so a row
+    enriched before a provider knew the studio keeps its blank forever. Neither
+    fixes itself: enrichment hangs off an import, and a row already stored and
+    already stamped is only revisited by `backfill_missing_metadata`. On an
+    existing install that leaves the three new columns empty on essentially
+    every row, permanently — which is the entire reason this pass exists.
+
+    It does not re-enrich anything. It moves `metadata_updated_at` back to
+    `METADATA_RESWEEP_MARK`, which is the marker
+    `sync_service.backfill_missing_metadata` selects its second arm on, so the
+    rows drain through that pass's existing bounded batches instead of arriving
+    as one burst of provider traffic. Setting the column to NULL would have been
+    the obvious spelling and is wrong for exactly that reason: `_needs_enrichment`
+    reads NULL as "enrich this now", so the next library scan would re-enrich the
+    whole catalogue inline.
+
+    Idempotent: the marked rows are excluded by `metadata_updated_at >` the mark,
+    so a second run — or a hundredth — updates nothing. A later restart does pick
+    up rows enriched since, which is intended: it is the only way a row whose
+    provider answer was incomplete gets asked again after a key is added.
+    """
+    from sqlalchemy import update
+
+    from .models import MediaItem, MediaType
+    from .services.media_repo import (
+        METADATA_RESWEEP_MARK,
+        has_external_id,
+        metadata_is_incomplete,
+    )
+
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                update(MediaItem)
+                .where(
+                    # Enrichment is movies and shows only, so nothing else can
+                    # be helped by queueing it.
+                    MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
+                    # An id is what makes the re-ask exact rather than a search,
+                    # and a row without one is `backfill_missing_metadata`'s
+                    # other arm's business already.
+                    has_external_id(),
+                    metadata_is_incomplete(),
+                    MediaItem.metadata_updated_at.is_not(None),
+                    MediaItem.metadata_updated_at > METADATA_RESWEEP_MARK,
+                )
+                .values(metadata_updated_at=METADATA_RESWEEP_MARK)
+            )
+    except Exception:
+        log.exception("Could not queue rows for a metadata resweep; continuing")
+        return
+    if result.rowcount:
+        log.info(
+            "Migrating: queued %s item(s) to be re-asked for language, origin "
+            "country and studio/network; they drain through the metadata "
+            "backfill a batch per sync",
+            result.rowcount,
+        )
+
+
 async def _merge_duplicates() -> None:
     """Collapse items that the old watchlist import recorded twice.
 
@@ -172,6 +238,16 @@ async def _run_light_migrations() -> None:
         ("media_items", "discover_art_path", "TEXT"),
         ("media_items", "is_personal_media", "BOOLEAN NOT NULL DEFAULT 0"),
         ("media_items", "credits_updated_at", "DATETIME"),
+        # Carried on `MetadataResult` all along and thrown away at the sink.
+        # No default: NULL means "no provider has been asked since this column
+        # existed", which is what `_resweep_incomplete_metadata` selects on.
+        ("media_items", "original_language", "VARCHAR(16)"),
+        ("media_items", "origin_countries", "JSON"),
+        ("media_items", "keywords", "JSON"),
+        # Which library a play came from. No REFERENCES clause: SQLite will not
+        # add a foreign key to an existing table, and `create_all` puts one on a
+        # fresh database, so the constraint is best-effort by design here.
+        ("watch_events", "library_id", "INTEGER"),
         ("sync_runs", "phase", "VARCHAR(255)"),
         ("sync_runs", "progress_current", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "progress_total", "INTEGER NOT NULL DEFAULT 0"),
@@ -204,6 +280,9 @@ async def _run_light_migrations() -> None:
             "watch_events",
             "user_id, media_item_id, watched_at",
         ),
+        # Per-library stats filter on it, and it is the column added above, so
+        # no existing database would otherwise have the index the model declares.
+        ("ix_watch_events_library_id", "watch_events", "library_id"),
     ]
     async with engine.begin() as conn:
         for name, table, column in indexes:
