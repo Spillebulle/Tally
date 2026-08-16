@@ -1,11 +1,12 @@
-import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { compactNumber, formatWatchTime, parseLocalDateLabel } from '@/lib/utils'
+import { useUrlParams } from '@/lib/url-state'
 import {
   ActivityHeatmap,
   BarList,
+  ChartCard,
   ColumnChart,
   DataTable,
   StatTile,
@@ -13,7 +14,8 @@ import {
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { ChartIcon, ClockIcon, FilmIcon, SparkIcon, StarIcon, TvIcon } from '@/components/Icons'
 
-type Range = '90' | '365' | '1825'
+const RANGES = ['90', '365', '1825'] as const
+type Range = (typeof RANGES)[number]
 
 const RANGE_LABELS: Record<Range, string> = {
   '90': 'Last 90 days',
@@ -21,39 +23,82 @@ const RANGE_LABELS: Record<Range, string> = {
   '1825': 'All time',
 }
 
-function ChartCard({
-  title,
-  description,
-  children,
-  table,
-}: {
-  title: string
-  description?: string
-  children: React.ReactNode
-  table?: React.ReactNode
-}) {
-  return (
-    <section className="card p-5">
-      <div className="mb-4">
-        {/* The heading names the single plotted series, so no legend box. */}
-        <h2 className="text-base font-semibold tracking-tight text-ink">{title}</h2>
-        {description && <p className="mt-0.5 text-xs text-muted">{description}</p>}
-      </div>
-      {children}
-      {table}
-    </section>
-  )
+const SCOPES = ['all', 'anime'] as const
+type Scope = (typeof SCOPES)[number]
+
+/**
+ * The stats query, in the URL.
+ *
+ * It used to be `useState`, which made this the one screen whose view could not
+ * be linked, bookmarked or returned to — the rest of the app keeps its whole
+ * query in the query string for exactly that reason.
+ *
+ * Not `useBrowseFilters`: that one owns a page number and a sort whitelist and
+ * shapes its output for `/api/media`, none of which this page has. Both sit on
+ * the same primitive instead, which is where the three URL rules live — the
+ * defaults never reach the URL, a value the API would reject falls back rather
+ * than becoming a 422, and picking a range replaces rather than pushes.
+ *
+ * `range` is validated against the three offered values and not merely parsed:
+ * `days` is declared `ge=7, le=3650` on the API, so `?range=99999` or
+ * `?range=banana` would be an error card where the charts should be.
+ */
+function useStatsFilters() {
+  const { values, set, reset, active } = useUrlParams({
+    range: { key: 'range', allowed: RANGES, fallback: '365' as Range },
+    scope: { key: 'scope', allowed: SCOPES, fallback: 'all' as Scope },
+  })
+  return {
+    range: values.range,
+    scope: values.scope,
+    setRange: (value: Range) => set('range', value),
+    setScope: (value: Scope) => set('scope', value),
+    reset,
+    active,
+  }
 }
 
 export function Stats() {
   const navigate = useNavigate()
-  const [range, setRange] = useState<Range>('365')
-  const [scope, setScope] = useState<'all' | 'anime'>('all')
+  const { range, scope, setRange, setScope, reset, active } = useStatsFilters()
 
   const { data, isLoading, isError, error, refetch } = useQuery({
+    // Deliberately a different key shape from Dashboard's `['stats', 365]`: that
+    // one asks a fixed question and this one asks whatever the URL says, so the
+    // two do not share a cache entry. Every invalidation is by the `['stats']`
+    // prefix, which reaches both.
     queryKey: ['stats', range, scope],
     queryFn: () => api.stats.get(Number(range), scope === 'anime'),
   })
+
+  // Whether there is *any* history, independent of this page's range and scope.
+  // Without it an empty chart set cannot tell "you have watched nothing" from
+  // "nothing in the last 90 days", and would tell the user to run a sync over a
+  // library that is already imported.
+  const summary = useQuery({ queryKey: ['summary'], queryFn: api.stats.summary })
+
+  // The controls ride along with the empty state too. "Try a wider time range"
+  // is not advice if the range picker only exists once there is something to
+  // chart — the one view that needs the control most had it hidden.
+  const controls = (
+    <>
+      <Segmented
+        label="Scope"
+        value={scope}
+        onChange={setScope}
+        options={[
+          { value: 'all', label: 'Everything' },
+          { value: 'anime', label: 'Anime only' },
+        ]}
+      />
+      <Segmented
+        label="Time range"
+        value={range}
+        onChange={setRange}
+        options={RANGES.map((value) => ({ value, label: RANGE_LABELS[value] }))}
+      />
+    </>
+  )
 
   if (isLoading) {
     return (
@@ -81,54 +126,59 @@ export function Stats() {
   }
 
   if (!data || data.watch_events === 0) {
+    // "Nothing at all" is only claimable when the unfiltered count actually
+    // came back and was zero. While it is loading or failed, the narrower
+    // message is the one that is always true.
+    const noHistoryAnywhere = summary.data?.watch_events === 0
     return (
       <div>
-        <PageHeader title="Stats" />
+        {/* No controls when there is genuinely nothing: a range picker over an
+            empty history is a dead control on the one page that has to explain
+            itself instead. */}
+        <PageHeader title="Stats" actions={noHistoryAnywhere ? undefined : controls} />
         <EmptyState
           icon={<ChartIcon />}
-          title="Nothing to chart yet"
-          description="Once Tally has some watch history — imported from Plex or logged here — your habits will show up on this page."
+          title={
+            noHistoryAnywhere
+              ? 'Nothing to chart yet'
+              : scope === 'anime'
+                ? 'No anime plays in this range'
+                : 'Nothing watched in this range'
+          }
+          description={
+            noHistoryAnywhere
+              ? 'Once Tally has some watch history — imported from Plex or logged here — your habits will show up on this page.'
+              : 'Try a wider time range, or clear the filters to chart everything.'
+          }
+          action={
+            !noHistoryAnywhere && active ? (
+              <button type="button" onClick={reset} className="btn-outline mt-2">
+                Clear filters
+              </button>
+            ) : undefined
+          }
         />
       </div>
     )
   }
 
-  const monthly = data.activity_by_month.slice(-12).map((entry) => ({
-    // Parsed as a local date: `new Date('2026-08-01')` is UTC midnight by spec,
-    // which formats as the previous month anywhere west of Greenwich.
-    label: parseLocalDateLabel(entry.label).toLocaleDateString(undefined, {
+  // The bucket keeps its raw `2026-08` key — that is the entry `onSelect` hands
+  // back, and formatting it away here is what made a time drill impossible.
+  const monthly = data.activity_by_month.slice(-12)
+  // Parsed as a local date: `new Date('2026-08-01')` is UTC midnight by spec,
+  // which formats as the previous month anywhere west of Greenwich.
+  const monthName = (label: string, withYear = false) =>
+    parseLocalDateLabel(label).toLocaleDateString(undefined, {
       month: 'short',
-    }),
-    value: entry.value,
-  }))
+      ...(withYear ? { year: 'numeric' } : {}),
+    })
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Stats"
         subtitle={`${compactNumber(data.watch_events)} plays · ${formatWatchTime(data.total_runtime_minutes)} watched`}
-        actions={
-          <>
-            <Segmented
-              label="Scope"
-              value={scope}
-              onChange={setScope}
-              options={[
-                { value: 'all', label: 'Everything' },
-                { value: 'anime', label: 'Anime only' },
-              ]}
-            />
-            <Segmented
-              label="Time range"
-              value={range}
-              onChange={setRange}
-              options={(Object.keys(RANGE_LABELS) as Range[]).map((value) => ({
-                value,
-                label: RANGE_LABELS[value],
-              }))}
-            />
-          </>
-        }
+        actions={controls}
       />
 
       {/* Hero figure — exactly one per view. */}
@@ -141,11 +191,12 @@ export function Stats() {
           Across {compactNumber(data.total_movies_watched)} film
           {data.total_movies_watched === 1 ? '' : 's'} and{' '}
           {compactNumber(data.total_episodes_watched)} episode
-          {data.total_episodes_watched === 1 ? '' : 's'}.
+          {data.total_episodes_watched === 1 ? '' : 's'} from{' '}
+          {compactNumber(data.total_shows_watched)} series.
         </p>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         <StatTile
           label="Films"
           value={compactNumber(data.total_movies_watched)}
@@ -156,10 +207,17 @@ export function Stats() {
           value={compactNumber(data.total_episodes_watched)}
           icon={<TvIcon />}
         />
+        {/* No hint: five tiles across leaves ~140px of text, and a hint that
+            truncates to "Shows you have watche…" says less than nothing. */}
+        <StatTile
+          label="Series"
+          value={compactNumber(data.total_shows_watched)}
+          icon={<TvIcon />}
+        />
         <StatTile
           label="Anime plays"
           value={compactNumber(data.total_anime_watched)}
-          hint={`${Math.round((data.total_anime_watched / Math.max(1, data.watch_events)) * 100)}% of everything you watch`}
+          hint={`${Math.round((data.total_anime_watched / Math.max(1, data.watch_events)) * 100)}% of your plays`}
           icon={<SparkIcon />}
         />
         <StatTile
@@ -169,7 +227,7 @@ export function Stats() {
               ? `${data.average_rating.toFixed(1)} / 10`
               : '—'
           }
-          hint="Across everything you have rated"
+          hint="Everything you rated"
           icon={<StarIcon filled />}
         />
       </div>
@@ -200,7 +258,7 @@ export function Stats() {
           <BarList
             data={data.top_genres}
             emptyMessage="No genre data yet"
-            onSelect={(genre) => navigate(`/browse?genre=${encodeURIComponent(genre)}`)}
+            onSelect={(entry) => navigate(`/browse?genre=${encodeURIComponent(entry.label)}`)}
           />
         </ChartCard>
 
@@ -222,8 +280,8 @@ export function Stats() {
             describe={(entry) =>
               `${entry.value} ${entry.value === 1 ? 'title' : 'titles'} rated ${entry.label}/10`
             }
-            onSelect={(score) =>
-              navigate(`/browse?min_rating=${score}&max_rating=${score}`)
+            onSelect={(entry) =>
+              navigate(`/browse?min_rating=${entry.label}&max_rating=${entry.label}`)
             }
           />
         </ChartCard>
@@ -233,36 +291,68 @@ export function Stats() {
         <ChartCard
           title="Plays by month"
           description="The last twelve months of viewing."
-          table={<DataTable caption="Plays by month" rows={monthly} valueHeader="Plays" />}
+          table={
+            <DataTable
+              caption="Plays by month"
+              rows={monthly.map((entry) => ({
+                label: monthName(entry.label, true),
+                value: entry.value,
+              }))}
+              valueHeader="Plays"
+            />
+          }
         >
-          <ColumnChart data={monthly} emptyMessage="Not enough history yet" />
+          <ColumnChart
+            data={monthly}
+            formatLabel={(label) => monthName(label)}
+            describe={(entry) =>
+              `${monthName(entry.label, true)}: ${entry.value} ${entry.value === 1 ? 'play' : 'plays'}`
+            }
+            emptyMessage="Not enough history yet"
+          />
         </ChartCard>
 
-        <section className="card p-5">
-          <h2 className="text-base font-semibold tracking-tight text-ink">Streaks</h2>
-          <p className="mt-0.5 text-xs text-muted">Consecutive days with something watched.</p>
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            <StatTile
-              label="Current streak"
-              value={`${data.current_streak_days} ${data.current_streak_days === 1 ? 'day' : 'days'}`}
-              icon={<ClockIcon />}
-              accent={data.current_streak_days > 0}
-            />
-            <StatTile
-              label="Longest streak"
-              value={`${data.longest_streak_days} ${data.longest_streak_days === 1 ? 'day' : 'days'}`}
-              icon={<ChartIcon />}
-            />
-          </div>
-          <p className="mt-4 text-sm text-muted">
-            {data.current_streak_days === 0
-              ? 'No active streak — watch something today to start one.'
-              : data.current_streak_days >= data.longest_streak_days
-                ? 'This is your longest streak so far.'
-                : `${data.longest_streak_days - data.current_streak_days} more days to beat your record.`}
-          </p>
-        </section>
+        {/*
+          `by_type` as bars rather than a donut, and this is not a toss-up: the
+          three slices are not disjoint. An anime episode is counted in both
+          "Episodes" and "Anime", so the parts do not sum to the whole and a
+          pie or a donut would assert a share of a total that does not exist.
+          Bars claim nothing beyond "these three counts, side by side", which is
+          the only true reading — and they stay one series, so still no legend.
+        */}
+        <ChartCard
+          title="What you watch"
+          description="Plays by kind. Anime overlaps the other two rather than sitting beside them."
+          table={<DataTable caption="Plays by kind" rows={data.by_type} valueHeader="Plays" />}
+        >
+          <BarList data={data.by_type} emptyMessage="Nothing watched in this range" />
+        </ChartCard>
       </div>
+
+      <section className="card p-5">
+        <h2 className="text-base font-semibold tracking-tight text-ink">Streaks</h2>
+        <p className="mt-0.5 text-xs text-muted">Consecutive days with something watched.</p>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <StatTile
+            label="Current streak"
+            value={`${data.current_streak_days} ${data.current_streak_days === 1 ? 'day' : 'days'}`}
+            icon={<ClockIcon />}
+            accent={data.current_streak_days > 0}
+          />
+          <StatTile
+            label="Longest streak"
+            value={`${data.longest_streak_days} ${data.longest_streak_days === 1 ? 'day' : 'days'}`}
+            icon={<ChartIcon />}
+          />
+        </div>
+        <p className="mt-4 text-sm text-muted">
+          {data.current_streak_days === 0
+            ? 'No active streak — watch something today to start one.'
+            : data.current_streak_days >= data.longest_streak_days
+              ? 'This is your longest streak so far.'
+              : `${data.longest_streak_days - data.current_streak_days} more days to beat your record.`}
+        </p>
+      </section>
     </div>
   )
 }

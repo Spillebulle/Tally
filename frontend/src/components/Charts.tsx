@@ -37,25 +37,71 @@ function TooltipBubble({ tip }: { tip: Tooltip | null }) {
 }
 
 // ---------------------------------------------------------------------------
+// The frame every chart sits in
+// ---------------------------------------------------------------------------
+
+/**
+ * A titled card around one chart, with its table fallback underneath.
+ *
+ * Lives here rather than on the stats page because every chart wants it and
+ * the heading is load-bearing, not decoration — see below.
+ */
+export function ChartCard({
+  title,
+  description,
+  children,
+  table,
+}: {
+  title: string
+  description?: string
+  children: React.ReactNode
+  table?: React.ReactNode
+}) {
+  return (
+    <section className="card p-5">
+      <div className="mb-4">
+        {/* The heading names the single plotted series, so no legend box. */}
+        <h2 className="text-base font-semibold tracking-tight text-ink">{title}</h2>
+        {description && <p className="mt-0.5 text-xs text-muted">{description}</p>}
+      </div>
+      {children}
+      {table}
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Horizontal bars — genre breakdown
 // ---------------------------------------------------------------------------
 
-interface BarListProps {
-  data: StatCount[]
+/**
+ * Selection hands back the whole entry, not its label.
+ *
+ * A label is what the axis *reads*, which is not always what the row *is*: the
+ * monthly columns are labelled "Aug" but the bucket is `2026-08`, and the raw
+ * key was formatted away before the chart ever saw it — so a drill-down had
+ * nothing to drill on. The charts are generic over the entry type for the same
+ * reason: a caller may hang whatever it needs off `StatCount` and get it back
+ * intact, with `formatLabel` doing the display work instead.
+ */
+export type SelectEntry<T extends StatCount> = (entry: T, index: number) => void
+
+interface BarListProps<T extends StatCount> {
+  data: T[]
   unit?: string
   emptyMessage?: string
-  /** Makes each row a button. Given the row's label. */
-  onSelect?: (label: string) => void
+  /** Makes each row a button. Given the whole entry and its index. */
+  onSelect?: SelectEntry<T>
   activeLabel?: string | null
 }
 
-export function BarList({
+export function BarList<T extends StatCount>({
   data,
   unit = '',
   emptyMessage = 'No data yet',
   onSelect,
   activeLabel = null,
-}: BarListProps) {
+}: BarListProps<T>) {
   if (data.length === 0) {
     return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
   }
@@ -63,7 +109,7 @@ export function BarList({
 
   return (
     <ul className="space-y-2.5">
-      {data.map((entry) => {
+      {data.map((entry, index) => {
         const active = activeLabel === entry.label
         const row = (
           <>
@@ -96,7 +142,7 @@ export function BarList({
             {onSelect ? (
               <button
                 type="button"
-                onClick={() => onSelect(entry.label)}
+                onClick={() => onSelect(entry, index)}
                 aria-pressed={active}
                 aria-label={`${entry.label}: ${entry.value}${unit}`}
                 className={cn(
@@ -121,26 +167,31 @@ export function BarList({
 // Columns — rating distribution
 // ---------------------------------------------------------------------------
 
-interface ColumnChartProps {
-  data: StatCount[]
+interface ColumnChartProps<T extends StatCount> {
+  data: T[]
+  /**
+   * Display text for the axis. The chart keeps the raw label as the entry's
+   * identity, so `onSelect` still receives the bucket it was given — the
+   * monthly chart shows "Aug" and hands back `2026-08`.
+   */
   formatLabel?: (label: string) => string
   emptyMessage?: string
-  /** Makes each column a button. Given the bar's label. */
-  onSelect?: (label: string) => void
+  /** Makes each column a button. Given the whole entry and its index. */
+  onSelect?: SelectEntry<T>
   /** Tooltip/aria text for a column; falls back to "<label>: <value>". */
-  describe?: (entry: StatCount) => string
+  describe?: (entry: T) => string
   /** Label of the column currently reflected elsewhere, e.g. an active filter. */
   activeLabel?: string | null
 }
 
-export function ColumnChart({
+export function ColumnChart<T extends StatCount>({
   data,
   formatLabel = (label) => label,
   emptyMessage = 'No ratings yet',
   onSelect,
   describe,
   activeLabel = null,
-}: ColumnChartProps) {
+}: ColumnChartProps<T>) {
   const total = data.reduce((sum, d) => sum + d.value, 0)
   if (total === 0) {
     return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
@@ -159,7 +210,7 @@ export function ColumnChart({
     // Tighter gap on narrow screens: the rating chart went from five columns to
     // ten, and a fixed 8px gutter ate most of the width on a phone.
     <div className="flex h-44 items-stretch gap-1 sm:gap-2">
-      {data.map((entry) => {
+      {data.map((entry, index) => {
         const height = (entry.value / max) * 100
         const active = activeLabel === entry.label
         const text = describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`
@@ -208,7 +259,7 @@ export function ColumnChart({
             className="group/col flex flex-1 cursor-pointer flex-col items-center gap-2
                        rounded-lg focus-visible:outline-none focus-visible:ring-2
                        focus-visible:ring-accent"
-            onClick={() => onSelect(entry.label)}
+            onClick={() => onSelect(entry, index)}
             title={text}
             aria-label={text}
             aria-pressed={active}
