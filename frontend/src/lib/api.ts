@@ -13,6 +13,8 @@ import type {
   PlexAuthStart,
   Server,
   Stats,
+  StatsGranularity,
+  StatsPreset,
   SyncRun,
   SyncStatus,
   User,
@@ -120,17 +122,66 @@ export interface MediaQuery extends Query {
   content_rating?: string
   studio?: string
   director?: string
+  network?: string
+  release_status?: string
+  anime_format?: string
   year?: number
   unwatched?: boolean
   favorites?: boolean
+  has_notes?: boolean
+  in_progress?: boolean
   on_plex?: boolean
   /** Your own rating, 0–10. Both bounds inclusive. */
   min_rating?: number
   max_rating?: number
+  /** The crowd's score, same scale. */
+  min_community?: number
+  max_community?: number
+  min_year?: number
+  max_year?: number
+  /** Minutes. */
+  min_runtime?: number
+  max_runtime?: number
+  min_watch_count?: number
+  max_watch_count?: number
+  /**
+   * Date bounds, sent as instants. The controls hold local days and convert on
+   * the way out — start of day and end of day in the viewer's own zone — so a
+   * range that reads "14–20 Aug" contains every play on the 20th.
+   */
+  added_after?: string
+  added_before?: string
+  watched_after?: string
+  watched_before?: string
+  /** History only: the window over the plays themselves. */
+  since?: string
+  until?: string
+  anime_only?: boolean
   sort?: string
   order?: string
   offset?: number
   limit?: number
+}
+
+/**
+ * The window `/api/stats` should cover.
+ *
+ * Three ways to ask and the server resolves whichever it was into one `range`
+ * block, so the page never re-derives a boundary that depends on the viewer's
+ * timezone: a named `preset`, an explicit `since`/`until` pair (which wins over
+ * a preset), or the legacy `days`. `tz` is the viewer's IANA zone — the server
+ * resolves `tz` → the stored preference → UTC and reports which it used.
+ */
+export interface StatsQuery extends Query {
+  preset?: StatsPreset
+  since?: string
+  until?: string
+  days?: number
+  /** Also aggregate the window immediately before this one. */
+  compare?: boolean
+  granularity?: StatsGranularity
+  anime_only?: boolean
+  tz?: string
 }
 
 export const api = {
@@ -178,7 +229,9 @@ export const api = {
   },
 
   history: {
-    list: (query: Query = {}) => get<HistoryPage>('/api/history', query),
+    // The same filter surface as /api/media, plus `since`/`until` over the
+    // plays and its own `HistorySortField`.
+    list: (query: MediaQuery = {}) => get<HistoryPage>('/api/history', query),
     markWatched: (id: number) =>
       post<WatchEvent>(`/api/history/${id}/watched`, undefined),
     markSeasonWatched: (showId: number, season: number) =>
@@ -215,6 +268,15 @@ export const api = {
   stats: {
     get: (days = 365, anime_only = false) =>
       get<Stats>('/api/stats', { days, anime_only }),
+    /**
+     * The full window vocabulary: a named preset, or an explicit `since`/`until`
+     * pair, plus the viewer's zone.
+     *
+     * Alongside `get` rather than replacing it — the dashboard asks a fixed
+     * "last 365 days" question and has no window to describe, so widening its
+     * call would only make it spell out a default.
+     */
+    query: (params: StatsQuery) => get<Stats>('/api/stats', { ...params }),
     summary: () =>
       get<{
         library_movies: number

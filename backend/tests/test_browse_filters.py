@@ -22,6 +22,8 @@ from app.security import encrypt_secret
 
 pytestmark = pytest.mark.asyncio
 
+UTC = dt.UTC
+
 
 async def _titles(client, **params) -> list[str]:
     response = await client.get("/api/media", params=params)
@@ -292,7 +294,352 @@ async def test_the_watchlist_offers_the_same_filters_as_the_grid(authed_client, 
         ({"on_plex": True}, 0),
         ({"favorites": True}, 0),
         ({"sort": "release", "order": "asc"}, 1),
+        ({"min_year": 2022}, 1),
+        ({"max_year": 2021}, 0),
+        ({"has_notes": True}, 0),
+        ({"in_progress": True}, 0),
+        ({"max_watch_count": 0}, 1),
     ):
         response = await authed_client.get("/api/watchlist", params=params)
         assert response.status_code == 200, response.text
         assert response.json()["total"] == expected, params
+
+
+# ---------------------------------------------------------------------------
+# Facets resolved through the parent show
+# ---------------------------------------------------------------------------
+
+
+async def _crime_series(db) -> tuple[MediaItem, MediaItem]:
+    """A show carrying every facet, and one episode carrying none of them."""
+    show = MediaItem(
+        guid_key="tvdb:1",
+        media_type=MediaType.SHOW,
+        title="Bosch",
+        genres=["Crime", "Drama"],
+        studio="Fabrik",
+        content_rating="TV-MA",
+        network="Prime Video",
+        release_status="ended",
+        anime_format="TV",
+    )
+    db.add(show)
+    await db.flush()
+    episode = MediaItem(
+        guid_key="tvdb:1/s1e1",
+        media_type=MediaType.EPISODE,
+        title="Tijuana Donkey Showcase",
+        show_id=show.id,
+        parent_id=show.id,
+        season_number=1,
+        episode_number=1,
+    )
+    db.add(episode)
+    await db.commit()
+    return show, episode
+
+
+@pytest.mark.parametrize(
+    ("param", "value"),
+    [
+        ("genre", "Crime"),
+        ("studio", "Fabrik"),
+        ("content_rating", "TV-MA"),
+        ("network", "Prime Video"),
+        ("release_status", "ended"),
+        ("anime_format", "TV"),
+    ],
+)
+async def test_an_episode_answers_with_its_shows_facets(authed_client, db, param, value):
+    """Enrichment is skipped for episodes, so the episode row carries nothing.
+
+    Filtering History or an episode grid on a genre therefore matched *nothing*
+    — silently, because an empty result set looks like an honest answer. The
+    episodes of a Crime series are Crime; `facet_source` says so once, for
+    every facet, so the answer cannot differ between filters.
+    """
+    await _crime_series(db)
+
+    assert await _titles(authed_client, media_type="episode", **{param: value}) == [
+        "Tijuana Donkey Showcase"
+    ]
+    # The show still answers for itself, and a facet neither row carries still
+    # matches nothing — the resolution widens the question, it does not blur it.
+    assert await _titles(authed_client, media_type="show", **{param: value}) == ["Bosch"]
+    assert await _titles(authed_client, media_type="episode", **{param: "Nonesuch"}) == []
+
+
+async def test_the_shows_facets_do_not_leak_to_an_unrelated_episode(authed_client, db):
+    """`facet_source` follows `show_id`, not "some show somewhere"."""
+    await _crime_series(db)
+    other = MediaItem(
+        guid_key="tvdb:2",
+        media_type=MediaType.SHOW,
+        title="Detectorists",
+        genres=["Comedy"],
+    )
+    db.add(other)
+    await db.flush()
+    db.add(
+        MediaItem(
+            guid_key="tvdb:2/s1e1",
+            media_type=MediaType.EPISODE,
+            title="Digging",
+            show_id=other.id,
+        )
+    )
+    await db.commit()
+
+    assert await _titles(authed_client, media_type="episode", genre="Crime") == [
+        "Tijuana Donkey Showcase"
+    ]
+    assert await _titles(authed_client, media_type="episode", genre="Comedy") == ["Digging"]
+
+
+async def test_a_resolved_facet_still_returns_each_row_once(authed_client, db):
+    """The parent lookup is a correlated EXISTS, so it cannot fan a row out."""
+    show, _ = await _crime_series(db)
+    db.add(
+        MediaItem(
+            guid_key="tvdb:1/s1e2",
+            media_type=MediaType.EPISODE,
+            title="Lost Light",
+            show_id=show.id,
+        )
+    )
+    await db.commit()
+
+    response = await authed_client.get(
+        "/api/media", params={"media_type": "episode", "genre": "Crime"}
+    )
+    assert response.json()["total"] == 2
+    assert sorted(await _titles(authed_client, media_type="episode", genre="Crime")) == [
+        "Lost Light",
+        "Tijuana Donkey Showcase",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Ranges over the item's own columns
+# ---------------------------------------------------------------------------
+
+
+async def test_year_runtime_and_community_ranges_are_inclusive(authed_client, db):
+    """Both bounds include their own value, like `min_rating` already did."""
+    db.add_all(
+        [
+            MediaItem(
+                guid_key="tmdb:movie:1",
+                media_type=MediaType.MOVIE,
+                title="Short",
+                year=1990,
+                runtime_minutes=80,
+                community_rating=5.0,
+            ),
+            MediaItem(
+                guid_key="tmdb:movie:2",
+                media_type=MediaType.MOVIE,
+                title="Long",
+                year=2010,
+                runtime_minutes=180,
+                community_rating=9.0,
+            ),
+            MediaItem(
+                guid_key="plex:movie:3",
+                media_type=MediaType.MOVIE,
+                title="Unknown",
+            ),
+        ]
+    )
+    await db.commit()
+
+    assert await _titles(authed_client, min_year=1990, max_year=1990) == ["Short"]
+    assert sorted(await _titles(authed_client, min_year=1990)) == ["Long", "Short"]
+    assert await _titles(authed_client, max_year=2009) == ["Short"]
+    assert await _titles(authed_client, min_runtime=80, max_runtime=80) == ["Short"]
+    assert await _titles(authed_client, min_runtime=100) == ["Long"]
+    assert await _titles(authed_client, min_community=9, max_community=9) == ["Long"]
+    assert await _titles(authed_client, max_community=5) == ["Short"]
+    # A row that cannot answer is not an answer: NULL is neither in nor out of
+    # a range, and must not be swept in by either bound.
+    assert "Unknown" not in await _titles(authed_client, min_year=0)
+    assert "Unknown" not in await _titles(authed_client, max_runtime=1000)
+
+
+async def test_added_bounds_read_when_the_row_reached_the_library(authed_client, db):
+    old = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Old")
+    new = MediaItem(guid_key="tmdb:movie:2", media_type=MediaType.MOVIE, title="New")
+    db.add_all([old, new])
+    await db.flush()
+    old.created_at = dt.datetime(2020, 1, 1, tzinfo=UTC)
+    new.created_at = dt.datetime(2024, 6, 1, tzinfo=UTC)
+    await db.commit()
+
+    assert await _titles(authed_client, added_after="2023-01-01T00:00:00") == ["New"]
+    assert await _titles(authed_client, added_before="2023-01-01T00:00:00") == ["Old"]
+    assert sorted(await _titles(authed_client, added_after="2020-01-01T00:00:00")) == [
+        "New",
+        "Old",
+    ]
+
+
+async def test_a_bad_range_bound_is_a_422_not_a_silent_widening(authed_client):
+    """A URL is untrusted input; the bounds are declared, so FastAPI refuses."""
+    for params in (
+        {"min_community": 11},
+        {"max_community": -1},
+        {"min_runtime": -5},
+        {"min_watch_count": -1},
+        {"min_year": "soon"},
+    ):
+        response = await authed_client.get("/api/media", params=params)
+        assert response.status_code == 422, params
+
+
+# ---------------------------------------------------------------------------
+# Filters that read the per-user state row
+# ---------------------------------------------------------------------------
+
+
+async def test_watched_bounds_read_the_rollup_not_the_event(authed_client, db):
+    """`watched_after`/`watched_before` are `UserMediaState.last_watched_at`.
+
+    Deliberately not named `since`/`until`: History already owns those two for
+    `WatchEvent.watched_at`, which is a different table answering a different
+    question.
+    """
+    user = await _owner(db)
+    items = [
+        MediaItem(guid_key=f"tmdb:movie:{n}", media_type=MediaType.MOVIE, title=title)
+        for n, title in enumerate(["Recent", "Ancient", "Never"], start=1)
+    ]
+    db.add_all(items)
+    await db.flush()
+    db.add_all(
+        [
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=items[0].id,
+                view_count=1,
+                last_watched_at=dt.datetime(2024, 5, 1, tzinfo=UTC),
+            ),
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=items[1].id,
+                view_count=1,
+                last_watched_at=dt.datetime(2015, 5, 1, tzinfo=UTC),
+            ),
+        ]
+    )
+    await db.commit()
+
+    assert await _titles(authed_client, watched_after="2020-01-01T00:00:00") == ["Recent"]
+    assert await _titles(authed_client, watched_before="2020-01-01T00:00:00") == ["Ancient"]
+    # Never played has no timestamp, so it answers neither bound.
+    assert "Never" not in await _titles(authed_client, watched_after="1900-01-01T00:00:00")
+
+
+async def test_watch_count_bounds_treat_a_missing_state_as_zero_plays(authed_client, db):
+    """A row with no state row at all has been played zero times.
+
+    Read as NULL instead, `max_watch_count=0` would exclude exactly the rows it
+    is asking for — the ones nobody has ever touched.
+    """
+    user = await _owner(db)
+    items = [
+        MediaItem(guid_key=f"tmdb:movie:{n}", media_type=MediaType.MOVIE, title=title)
+        for n, title in enumerate(["Once", "Rewatched", "Untouched"], start=1)
+    ]
+    db.add_all(items)
+    await db.flush()
+    db.add_all(
+        [
+            UserMediaState(user_id=user.id, media_item_id=items[0].id, view_count=1),
+            UserMediaState(user_id=user.id, media_item_id=items[1].id, view_count=7),
+        ]
+    )
+    await db.commit()
+
+    assert await _titles(authed_client, min_watch_count=2) == ["Rewatched"]
+    assert sorted(await _titles(authed_client, min_watch_count=1)) == ["Once", "Rewatched"]
+    assert await _titles(authed_client, max_watch_count=0) == ["Untouched"]
+    assert await _titles(authed_client, min_watch_count=1, max_watch_count=1) == ["Once"]
+
+
+async def test_in_progress_shares_continue_watchings_definition(authed_client, db):
+    """Started, and not so close to the end that it belongs in history.
+
+    `NEARLY_FINISHED_PERCENT` is the one cut-off; `routers/library` applies the
+    same number to the Continue Watching shelf. A second definition here would
+    have the two shelves disagreeing about "still watching".
+    """
+    user = await _owner(db)
+    items = [
+        MediaItem(guid_key=f"tmdb:movie:{n}", media_type=MediaType.MOVIE, title=title)
+        for n, title in enumerate(["Midway", "Credits", "Unstarted", "Unmeasured"], 1)
+    ]
+    db.add_all(items)
+    await db.flush()
+    db.add_all(
+        [
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=items[0].id,
+                progress_ms=30 * 60_000,
+                duration_ms=100 * 60_000,
+            ),
+            # 98% in: finished, as far as anyone watching is concerned.
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=items[1].id,
+                progress_ms=98 * 60_000,
+                duration_ms=100 * 60_000,
+            ),
+            UserMediaState(user_id=user.id, media_item_id=items[2].id, progress_ms=0),
+            # Playback recorded but no known length: unmeasurable against the
+            # cut-off, so it stays, exactly as the shelf treats it.
+            UserMediaState(
+                user_id=user.id, media_item_id=items[3].id, progress_ms=5 * 60_000
+            ),
+        ]
+    )
+    await db.commit()
+
+    assert sorted(await _titles(authed_client, in_progress=True)) == [
+        "Midway",
+        "Unmeasured",
+    ]
+    # False is "no opinion", the same shape `favorites` and `unwatched` use.
+    assert len(await _titles(authed_client, in_progress=False)) == 4
+
+
+async def test_has_notes_is_yours_alone(authed_client, db):
+    """Notes are per-user, so another account's cannot change your result.
+
+    The filter can only ever be evaluated inside the `user_id`-scoped join;
+    written against `user_media_states` unscoped it would show you every title
+    anyone in the household had annotated.
+    """
+    user = await _owner(db)
+    other = User(username="housemate", password_hash="x")
+    db.add(other)
+    items = [
+        MediaItem(guid_key=f"tmdb:movie:{n}", media_type=MediaType.MOVIE, title=title)
+        for n, title in enumerate(["Mine", "Theirs", "Blank"], start=1)
+    ]
+    db.add_all(items)
+    await db.flush()
+    db.add_all(
+        [
+            UserMediaState(
+                user_id=user.id, media_item_id=items[0].id, notes="rewatch in autumn"
+            ),
+            UserMediaState(user_id=other.id, media_item_id=items[1].id, notes="dreadful"),
+            # An emptied note is not a note.
+            UserMediaState(user_id=user.id, media_item_id=items[2].id, notes=""),
+        ]
+    )
+    await db.commit()
+
+    assert await _titles(authed_client, has_notes=True) == ["Mine"]
+    assert len(await _titles(authed_client, has_notes=False)) == 3
