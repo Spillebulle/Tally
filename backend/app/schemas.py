@@ -995,4 +995,51 @@ class RankingsOut(BaseModel):
     by_source: list[RankedFacet]
 
 
+# --- saved views ----------------------------------------------------------
+
+
+SavedViewPage = Literal["media", "watchlist", "history"]
+
+# Long enough for a query with several multi-value facets in it; short enough
+# that this cannot be used as free storage. A browse URL that exceeds it is
+# already past what most proxies will forward.
+MAX_QUERY_LENGTH = 2000
+
+
+class SavedViewIn(BaseModel):
+    """Save the current browse query under a name.
+
+    `query` is the raw query string, exactly as the URL holds it. It is never
+    parsed here — see `models.SavedView` — so the only checks are on length and
+    on the name, and the leading `?` is tolerated because that is what
+    `location.search` hands over.
+    """
+
+    page: SavedViewPage
+    name: str = Field(min_length=1, max_length=80)
+    query: str = Field(max_length=MAX_QUERY_LENGTH)
+
+
+class SavedViewPatch(BaseModel):
+    """Rename a view, re-point it at the current query, or both.
+
+    Both optional and neither defaulted to the current value: a field that was
+    not sent is a field that does not change, which is what lets the rename
+    control and the "update to what I am looking at now" control share one
+    endpoint without either clobbering the other.
+    """
+
+    name: str | None = Field(None, min_length=1, max_length=80)
+    query: str | None = Field(None, max_length=MAX_QUERY_LENGTH)
+
+
+class SavedViewOut(ORMModel):
+    id: int
+    page: SavedViewPage
+    name: str
+    query: str
+    created_at: datetime
+    updated_at: datetime
+
+
 PlexAuthPoll.model_rebuild()

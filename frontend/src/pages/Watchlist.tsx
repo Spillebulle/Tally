@@ -33,6 +33,9 @@ export function Watchlist() {
   // Oldest first: a watchlist is a queue, and the thing you added first is the
   // one you have been meaning to watch longest.
   const filters = useBrowseFilters({
+    // Its own shelf of saved views: `watchlist_added` is a sort no other page
+    // offers, so its views would be stale everywhere else.
+    id: 'watchlist',
     sorts: WATCHLIST_SORTS,
     defaultSort: 'watchlist_added',
     defaultOrder: 'asc',

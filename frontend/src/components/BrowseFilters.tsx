@@ -5,6 +5,10 @@ import {
   type ReactNode,
 } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { api } from '@/lib/api'
+import { useToast } from '@/lib/app-context'
+import type { SavedView } from '@/lib/types'
 import {
   chipsFor,
   choicesFor,
@@ -61,6 +65,13 @@ import { Segmented } from './ui'
  * row**, with its own ×. The two controls still on the bar do say it twice, and
  * that is the deliberate cost: a chip row that lists some filters and not
  * others is a chip row you cannot read as "this is what is narrowing the grid".
+ *
+ * ## Saved views get the same treatment
+ *
+ * A shelf of saved views is the one control here that grows with use, so it
+ * takes exactly one button beside "Filters" and its own push-down panel — see
+ * `SavedViews` below for why, and for why the button is absent entirely until
+ * there is something to save or something to apply.
  */
 
 /**
@@ -263,6 +274,294 @@ function MultiChips({
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Saved views: name the query you are looking at, and get it back later.
+ *
+ * ## Why it is a second disclosure and not more chrome on the bar
+ *
+ * The bar already carries status chips, a genre row, sort, direction, search
+ * and the "Filters · N" disclosure. A shelf of saved views laid out flat beside
+ * those grows with use — the one control here that gets *bigger* the more the
+ * feature is used — and it would push the controls people reach for constantly
+ * onto a second line, on a phone onto a third.
+ *
+ * So it takes one button, next to "Filters", opening a panel built the same way
+ * (pushes the content down, unmounted when closed, so nothing inside is
+ * focusable or tappable while hidden). The button only exists when it can do
+ * something: when there is at least one view to apply, or something is
+ * filtered and there is therefore a view worth saving. A fresh install sees no
+ * extra chrome at all.
+ *
+ * ## What is offered, and what is not
+ *
+ * Saving is offered only when a filter is set — `state.active`, the same
+ * derived flag that decides whether "Clear all" appears. A saved view of the
+ * default grid is a bookmark for the page you are already on.
+ *
+ * There is no separate "update this view to the current query" control: saving
+ * under a name that already exists re-points it, which is one endpoint, one
+ * control and one thing to learn.
+ *
+ * Every button here reacts on click rather than on the refetch that follows —
+ * pending labels on save and rename, and a two-step confirm on delete, which is
+ * both the confirmation and the reaction. `window.confirm` would block the page
+ * and say nothing about which view it means.
+ */
+function SavedViews({ state }: { state: BrowseFilterState }) {
+  const { notify } = useToast()
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState('')
+  /** The view being renamed, and the draft — one at a time, in place. */
+  const [renaming, setRenaming] = useState<number | null>(null)
+  const [rename, setRename] = useState('')
+  /** Delete asks once. The first click is the reaction; the second is the act. */
+  const [confirming, setConfirming] = useState<number | null>(null)
+
+  const key = ['saved-views', state.pageId]
+  const views = useQuery({
+    queryKey: key,
+    queryFn: () => api.views.list(state.pageId),
+  })
+  const list = views.data ?? []
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: key })
+
+  const save = useMutation({
+    mutationFn: (viewName: string) =>
+      api.views.save(state.pageId, viewName, state.savedQuery),
+    onSuccess: (view) => {
+      setName('')
+      notify(`Saved “${view.name}”`, 'success')
+      void refresh()
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const patch = useMutation({
+    mutationFn: (vars: { id: number; name: string }) =>
+      api.views.update(vars.id, { name: vars.name }),
+    onSuccess: (view) => {
+      setRenaming(null)
+      notify(`Renamed to “${view.name}”`, 'success')
+      void refresh()
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const remove = useMutation({
+    mutationFn: (id: number) => api.views.remove(id),
+    onSuccess: () => {
+      setConfirming(null)
+      void refresh()
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  // Nothing to apply and nothing worth saving: no button at all.
+  if (list.length === 0 && !state.active) return null
+
+  const apply = (view: SavedView) => {
+    state.applyView(view.query)
+    setOpen(false)
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-controls="browse-saved-views"
+        className="btn-outline h-9 gap-1.5 px-3 text-sm"
+      >
+        <ChevronRightIcon
+          className={cn('text-xs transition-transform duration-200', open && 'rotate-90')}
+        />
+        Views
+        {list.length > 0 && <span className="tabular-nums">· {list.length}</span>}
+      </button>
+
+      {open && (
+        // `order-last` because this sits inside the control bar's flex row, so
+        // that opening it drops the panel below the whole row rather than
+        // between the buttons and the "Updating…" note that follows them. DOM
+        // order still puts it straight after its own button, which is where a
+        // keyboard should find it.
+        <div id="browse-saved-views" className="card order-last w-full space-y-4 p-4">
+          {state.active ? (
+            <form
+              className="flex flex-wrap items-end gap-2"
+              onSubmit={(event) => {
+                event.preventDefault()
+                const trimmed = name.trim()
+                if (trimmed) save.mutate(trimmed)
+              }}
+            >
+              <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-xs">
+                <label className="label" htmlFor="saved-view-name">
+                  Save this view
+                </label>
+                <input
+                  id="saved-view-name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={80}
+                  placeholder="Name it, e.g. “Weeknight films”"
+                  className="input h-9 py-0 text-sm"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={!name.trim() || save.isPending}
+                className="btn-primary h-9 px-3 text-sm"
+              >
+                {save.isPending ? 'Saving…' : 'Save'}
+              </button>
+              <p className="w-full text-xs text-muted">
+                Saving under a name you already have updates it.
+              </p>
+            </form>
+          ) : (
+            <p className="text-xs text-muted">
+              Filter or sort the grid, then come back here to save it as a view.
+            </p>
+          )}
+
+          {/* A failed request is not an empty list: say so, rather than
+              reporting that the user has no saved views. */}
+          {views.isError ? (
+            <p className="flex items-center gap-2 text-xs text-danger">
+              Could not load your saved views.
+              <button
+                type="button"
+                onClick={() => void views.refetch()}
+                className="font-medium underline"
+              >
+                Try again
+              </button>
+            </p>
+          ) : list.length === 0 ? (
+            !views.isLoading && (
+              <p className="text-xs text-muted">No saved views on this page yet.</p>
+            )
+          ) : (
+            // Capped rather than full-bleed: `ml-auto` puts each row's Rename
+            // and Delete at its right edge, and on a wide screen that leaves
+            // them a card's width away from the name they act on, reading as
+            // controls for the panel instead of for the row.
+            <ul className="flex flex-col gap-1.5 sm:max-w-md">
+              {list.map((view) => {
+                // The view whose query is the one on screen. Compared against
+                // the *canonicalised* query, so a view saved from a link that
+                // spelled out a default still matches.
+                const applied = view.query === state.savedQuery
+                const busy = remove.isPending && remove.variables === view.id
+
+                if (renaming === view.id) {
+                  return (
+                    <li key={view.id}>
+                      <form
+                        className="flex flex-wrap items-center gap-2"
+                        onSubmit={(event) => {
+                          event.preventDefault()
+                          const trimmed = rename.trim()
+                          if (trimmed) patch.mutate({ id: view.id, name: trimmed })
+                        }}
+                      >
+                        <input
+                          value={rename}
+                          onChange={(event) => setRename(event.target.value)}
+                          maxLength={80}
+                          autoFocus
+                          aria-label={`New name for ${view.name}`}
+                          className="input h-8 w-full py-0 text-sm sm:w-56"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!rename.trim() || patch.isPending}
+                          className="btn-primary h-8 px-3 text-xs"
+                        >
+                          {patch.isPending ? 'Renaming…' : 'Save name'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRenaming(null)}
+                          className="btn-ghost h-8 px-2 text-xs"
+                        >
+                          Cancel
+                        </button>
+                      </form>
+                    </li>
+                  )
+                }
+
+                return (
+                  <li key={view.id} className={cn('flex items-center gap-1.5', busy && 'opacity-60')}>
+                    <button
+                      type="button"
+                      onClick={() => apply(view)}
+                      aria-label={
+                        applied ? `${view.name}, applied` : `Apply the view ${view.name}`
+                      }
+                      // Written, not colour-alone: the applied view says so.
+                      aria-current={applied ? 'true' : undefined}
+                      className={cn('chip min-w-0 shrink', applied && 'chip-active')}
+                    >
+                      <span className="truncate">{view.name}</span>
+                      {applied && <span className="text-[0.65rem] uppercase">Applied</span>}
+                    </button>
+                    {/* Named after the row they act on, because "Rename" and
+                        "Delete" repeated down a list say nothing about which
+                        view they mean — to a screen reader they are five
+                        identical buttons. */}
+                    <button
+                      type="button"
+                      aria-label={`Rename ${view.name}`}
+                      onClick={() => {
+                        setRenaming(view.id)
+                        setRename(view.name)
+                        setConfirming(null)
+                      }}
+                      className="btn-ghost ml-auto h-8 shrink-0 px-2 text-xs"
+                    >
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      aria-label={
+                        confirming === view.id
+                          ? `Confirm deleting ${view.name}`
+                          : `Delete ${view.name}`
+                      }
+                      onClick={() =>
+                        confirming === view.id
+                          ? remove.mutate(view.id)
+                          : setConfirming(view.id)
+                      }
+                      className={cn(
+                        'btn-ghost h-8 shrink-0 px-2 text-xs',
+                        confirming === view.id && 'text-danger',
+                      )}
+                    >
+                      {busy
+                        ? 'Deleting…'
+                        : confirming === view.id
+                          ? 'Confirm delete'
+                          : 'Delete'}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </>
   )
 }
 
@@ -559,6 +858,8 @@ export function BrowseFilters({
             <span className="tabular-nums">· {state.advancedCount}</span>
           )}
         </button>
+
+        <SavedViews state={state} />
 
         {busy && <span className="ml-auto text-xs text-muted">Updating…</span>}
       </div>
