@@ -57,6 +57,25 @@ class MetadataResult:
         return self
 
 
+@dataclass(slots=True)
+class CreditPerson:
+    """One credited person, as a provider describes them."""
+
+    provider_id: int
+    name: str
+    profile_url: str | None = None
+    # Who they played. Always None for a director.
+    character: str | None = None
+    # Billing order: lower is more prominent.
+    ordering: int = 0
+
+
+@dataclass(slots=True)
+class CreditsResult:
+    cast: list[CreditPerson] = field(default_factory=list)
+    directors: list[CreditPerson] = field(default_factory=list)
+
+
 class RateLimiter:
     """Simple token-bucket so we stay inside provider rate limits.
 

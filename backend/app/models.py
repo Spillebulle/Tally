@@ -100,6 +100,11 @@ class WatchSource(str, enum.Enum):
     IMPORT = "import"
 
 
+class CreditKind(str, enum.Enum):
+    CAST = "cast"
+    DIRECTOR = "director"
+
+
 class SyncStatus(str, enum.Enum):
     RUNNING = "running"
     SUCCESS = "success"
@@ -327,6 +332,13 @@ class MediaItem(Base):
     metadata_updated_at: Mapped[datetime | None] = mapped_column(
         UtcDateTime, default=None
     )
+    # When the cast and crew were last fetched. This is the only thing that
+    # tells "nobody has ever asked" apart from "the provider was asked and had
+    # nothing", and both look like an empty credit list — without it every
+    # render of every credit-less title would go back out to TMDB.
+    credits_updated_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime, default=None
+    )
     # Indexed: this is the `added` sort in media_filters, and every other
     # sortable column here already is.
     created_at: Mapped[datetime] = mapped_column(
@@ -367,6 +379,61 @@ class PlexMapping(Base):
     )
 
     item: Mapped[MediaItem] = relationship(back_populates="mappings")
+
+
+class Person(Base):
+    """Somebody credited on a title — an actor, or a director.
+
+    Global, exactly like ``MediaItem``: one row serves every Tally account, and
+    it is keyed on the TMDB person id because that is where credits come from
+    (see ``services/credits.py`` for why not Plex).
+
+    ``profile_url`` may hold a URL, unlike ``MediaItem.poster_url``'s Plex
+    counterparts, because a TMDB image needs no credentials. Anything that ever
+    starts sourcing portraits from Plex must store a bare path and proxy it —
+    a URL carrying ``X-Plex-Token`` on a shared row leaks that token to every
+    account.
+    """
+
+    __tablename__ = "people"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tmdb_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    # Indexed because the `director` browse filter matches on it.
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    profile_url: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class MediaCredit(Base):
+    """One person's credit on one title.
+
+    Derived data, cached from TMDB: it is safe to delete and re-fetch, which is
+    how a refresh works. Nothing a user typed lives here.
+    """
+
+    __tablename__ = "media_credits"
+    __table_args__ = (
+        UniqueConstraint("media_item_id", "person_id", "kind"),
+        Index("ix_media_credits_kind_person", "kind", "person_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    media_item_id: Mapped[int] = mapped_column(
+        ForeignKey("media_items.id", ondelete="CASCADE"), index=True
+    )
+    person_id: Mapped[int] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[CreditKind] = mapped_column(Enum(CreditKind))
+    # Who they played. Null for a director, and for a cast entry the provider
+    # left blank.
+    character: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Billing order, so the leads come first rather than whatever order the
+    # rows happened to be written in.
+    ordering: Mapped[int] = mapped_column(Integer, default=0)
+
+    person: Mapped[Person] = relationship()
 
 
 # ---------------------------------------------------------------------------

@@ -170,6 +170,7 @@ async def _run_light_migrations() -> None:
         ("plex_servers", "on_deck_window_weeks", "INTEGER"),
         ("media_items", "discover_thumb_path", "TEXT"),
         ("media_items", "discover_art_path", "TEXT"),
+        ("media_items", "credits_updated_at", "DATETIME"),
         ("sync_runs", "phase", "VARCHAR(255)"),
         ("sync_runs", "progress_current", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "progress_total", "INTEGER NOT NULL DEFAULT 0"),

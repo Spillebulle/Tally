@@ -19,7 +19,16 @@ from fastapi import Query
 from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.sql import Select
 
-from .models import MediaItem, MediaType, PlexMapping, UserMediaState, WatchStatus
+from .models import (
+    CreditKind,
+    MediaCredit,
+    MediaItem,
+    MediaType,
+    Person,
+    PlexMapping,
+    UserMediaState,
+    WatchStatus,
+)
 
 AnimeFilter = Literal["all", "only", "exclude"]
 SortOrder = Literal["asc", "desc"]
@@ -42,6 +51,15 @@ class MediaFilters:
         watch_status: WatchStatus | None = None,
         genre: str | None = None,
         year: int | None = None,
+        # The three facets a detail page links out on. Each is an exact match
+        # on the value that page displayed, so the chip and the filter bar
+        # describe the same set of rows.
+        content_rating: str | None = None,
+        studio: str | None = None,
+        # By name, not by person id, so the URL says who — matching how `genre`
+        # and `studio` read. Two directors sharing a name would widen the grid
+        # slightly; an opaque id in every link is the worse trade.
+        director: str | None = None,
         unwatched: bool = False,
         favorites: bool = False,
         on_plex: bool | None = None,
@@ -56,6 +74,9 @@ class MediaFilters:
         self.watch_status = watch_status
         self.genre = genre
         self.year = year
+        self.content_rating = content_rating
+        self.studio = studio
+        self.director = director
         self.unwatched = unwatched
         self.favorites = favorites
         self.on_plex = on_plex
@@ -110,6 +131,24 @@ class MediaFilters:
             conditions.append(cast(MediaItem.genres, String).ilike(f'%"{self.genre}"%'))
         if self.year:
             conditions.append(MediaItem.year == self.year)
+        if self.content_rating:
+            conditions.append(MediaItem.content_rating == self.content_rating)
+        if self.studio:
+            conditions.append(MediaItem.studio == self.studio)
+        if self.director:
+            # A correlated EXISTS rather than a join, for the same reason
+            # `on_plex` uses one: a title with two directors must not come back
+            # twice — and it would, on the pair of rows a join produces.
+            directed = (
+                select(MediaCredit.id)
+                .join(Person, Person.id == MediaCredit.person_id)
+                .where(
+                    MediaCredit.media_item_id == MediaItem.id,
+                    MediaCredit.kind == CreditKind.DIRECTOR,
+                    Person.name == self.director,
+                )
+            )
+            conditions.append(directed.exists())
         return conditions
 
     def state_conditions(self) -> list:
