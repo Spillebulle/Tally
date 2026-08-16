@@ -15,6 +15,14 @@ The endpoint is unauthenticated by necessity — Plex offers no way to send
 credentials — so everything here is attacker-supplied. It only ever matches
 already-linked accounts and known servers, never creates users, and must never
 return 5xx: Plex retries, then disables the webhook.
+
+Adoption also means the two writers have to *agree*, not merely avoid each
+other. A row either of them may have written must carry the same fields with
+the same meanings, or the difference only shows up once something groups by
+them. Two were out of step and both are fixed here: `device`/`player` were
+stored the opposite way round from every other writer — see
+`plex_server.player_identity`, which is now the single rule — and `library_id`
+was not stored at all.
 """
 from __future__ import annotations
 
@@ -35,7 +43,7 @@ from ..models import (
     utcnow,
 )
 from .media_repo import MediaRepository
-from .plex_server import PlexServerError
+from .plex_server import PlexServerError, player_identity
 from .sync_service import SyncService
 
 log = logging.getLogger(__name__)
@@ -170,6 +178,13 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str,
             )
         )
         if exists.scalar_one_or_none() is None:
+            # `device` is the client, `player` is the app — one rule, shared
+            # with the history import and the session poller, and this is the
+            # writer that had the two the wrong way round. `Player.title` is
+            # the name of the thing in the room, so it belongs in `device`;
+            # reading it as the app put "Living Room TV" and "Plex for Apple
+            # TV" in the same column as each other and as a bare `deviceID`.
+            device, player = player_identity(payload.get("Player"))
             db.add(
                 WatchEvent(
                     user_id=user.id,
@@ -184,8 +199,20 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str,
                     # the library scan never saw.
                     duration_ms=_as_int(metadata.get("duration")),
                     server_id=server.id,
-                    player=(payload.get("Player") or {}).get("title"),
-                    device=(payload.get("Player") or {}).get("product"),
+                    # The other field the two writers disagreed about: the
+                    # history import records which library a play came out of
+                    # and this did not, so a scrobble the import never adopted
+                    # — an item since deleted, a Plex history the sync no
+                    # longer reaches back to — was missing from every
+                    # per-library total. The mapping is the only thing that
+                    # knows, exactly as it is over there.
+                    library_id=(
+                        await repo.library_id_for(server.id, rating_key)
+                        if rating_key
+                        else None
+                    ),
+                    player=player,
+                    device=device,
                 )
             )
             await db.flush()

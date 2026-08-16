@@ -48,7 +48,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import Query
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
@@ -101,6 +101,10 @@ NEARLY_FINISHED_PERCENT = 95
 facet_parent = aliased(MediaItem, name="facet_parent")
 #: The item *or* its show, for the negative case. See `facet_absent`.
 facet_holder = aliased(MediaItem, name="facet_holder")
+
+# Facets stored as a JSON array rather than a scalar, and therefore "absent"
+# when empty rather than when NULL. See `facet_value`.
+_LIST_FACETS = frozenset({"genres"})
 
 
 def like_escape(value: str) -> str:
@@ -218,12 +222,24 @@ def facet_value(column: str):
     episode has its own air date, and reading it through the series would file
     a 2019 episode under 1989.
     """
-    return func.coalesce(
-        getattr(MediaItem, column),
+    own = getattr(MediaItem, column)
+    from_parent = (
         select(getattr(facet_parent, column))
         .where(facet_parent.id == MediaItem.show_id)
-        .scalar_subquery(),
+        .scalar_subquery()
     )
+    if column in _LIST_FACETS:
+        # `coalesce` is wrong for these and silently so. `MediaItem.genres` is
+        # `default=list`, so an episode is stored holding `[]` rather than NULL
+        # — and `coalesce([], <the show's genres>)` is `[]`, so the parent
+        # branch never fires and every episode is filed under no genre at all.
+        # That is not hypothetical: it is why "most-watched genres" counted
+        # films only, long after the filter side had been resolved through the
+        # show, and the aggregate looked healthy because an empty list is what
+        # a genre-less row honestly returns. Emptiness, not nullness, is the
+        # question for a list column.
+        return case((func.json_array_length(own) > 0, own), else_=from_parent)
+    return func.coalesce(own, from_parent)
 
 
 def facet_absent(build: Callable[[Any], Any]):

@@ -303,6 +303,46 @@ export interface RewatchStats {
   ranked_over: 'all_time'
 }
 
+/**
+ * One sitting: plays with no gap longer than `SessionStats.gap_minutes`.
+ *
+ * `started_at` and `ended_at` are both **scrobble** instants, so `started_at`
+ * is when the first play of the sitting *finished* — Plex records no start time
+ * anywhere. A one-play sitting therefore has `started_at === ended_at`. Never
+ * draw these as a timeline; they are a count and a length, not a span.
+ */
+export interface WatchSession {
+  started_at: string
+  ended_at: string
+  /** The local day the sitting started on, in the zone the range names. */
+  day: string
+  plays: number
+  minutes: number
+  title: string
+  /** Set only when every play in the sitting came from one series. */
+  show_title: string | null
+}
+
+/**
+ * Sittings, worked out by splitting the window's plays on long gaps.
+ *
+ * A judgement with no right answer, so `gap_minutes` — the threshold that
+ * produced these numbers — is part of the payload and has to be stated on
+ * screen rather than left implied.
+ */
+export interface SessionStats {
+  gap_minutes: number
+  sessions: number
+  plays: number
+  average_plays: number
+  average_minutes: number
+  /** The sitting with the most minutes, and the one with the most plays. */
+  longest: WatchSession | null
+  biggest_binge: WatchSession | null
+  /** Plays-per-sitting histogram, labelled "1" … "5", "6+". */
+  by_size: StatCount[]
+}
+
 export interface Stats extends StatsTotals {
   range: StatsRange
   previous: StatsComparison | null
@@ -319,6 +359,11 @@ export interface Stats extends StatsTotals {
   by_hour: TimeBucket[]
   punch_card: PunchCard
   rewatch: RewatchStats
+  /**
+   * Sittings over the same window. On this response rather than its own
+   * endpoint: it reads the same rows the totals came from.
+   */
+  sessions: SessionStats
 }
 
 /** One calendar year of history: totals plus its twelve month counts. */
@@ -345,6 +390,223 @@ export interface Seasonality {
   last_play: string | null
   months: TimeBucket[]
   years: YearProfile[]
+}
+
+// --- the five depth blocks, one endpoint each ------------------------------
+//
+// Deliberately not folded into `Stats`. Each is a section of the stats page
+// that can be fetched when it is drawn, and two of them — `ShowCompletion` and
+// `Coverage` — answer a question no window applies to at all, which is why
+// they carry `scope: 'all_time'` on the wire rather than a `range`. A page
+// that puts a date picker above a section the picker does not affect is
+// lying, so those two say "all time" in their own headings.
+
+/**
+ * How far through one show this viewer is, and where they stopped.
+ *
+ * `episodes_total` is Plex's `leaf_count` **and nothing else**, which is why it
+ * and `percent_complete` are both nullable: counting the episode rows Tally
+ * holds would report every history-only show as 100% complete. A show with no
+ * known total is never called completed and never called abandoned.
+ *
+ * `total_is_stale` means the total came back smaller than the number of
+ * distinct episodes actually watched — a library not rescanned since the season
+ * aired. `percent_complete` is null there too, rather than 130% or a clamped
+ * 100% that would hide the fact that the number is wrong.
+ */
+export interface ShowProgress {
+  media_item_id: number
+  title: string
+  year: number | null
+  poster_url: string
+  status: WatchStatus | null
+  episodes_watched: number
+  episodes_total: number | null
+  percent_complete: number | null
+  total_is_stale: boolean
+  last_watched_at: string
+  /** The drop-off point — the most recent episode watched, not the newest one. */
+  last_season: number | null
+  last_episode: number | null
+  last_episode_title: string | null
+  abandoned: boolean
+}
+
+/**
+ * Show completion and drop-off, over the viewer's **whole** history.
+ *
+ * `abandoned_under_percent` and `abandoned_after_days` are the thresholds that
+ * produced `abandoned`, echoed because they are a judgement rather than a fact
+ * and the page has to be able to state them.
+ */
+export interface ShowCompletion {
+  scope: 'all_time'
+  abandoned_under_percent: number
+  abandoned_after_days: number
+  shows_started: number
+  shows_completed: number
+  shows_in_progress: number
+  shows_abandoned: number
+  /** Counted apart: nothing about their completion is known. */
+  shows_unknown_total: number
+  in_progress: ShowProgress[]
+  abandoned: ShowProgress[]
+}
+
+/** A watchlist entry still waiting to be played. Oldest first. */
+export interface WatchlistWaiting {
+  media_item_id: number
+  title: string
+  year: number | null
+  media_type: MediaType
+  poster_url: string
+  added_at: string
+  days_waiting: number
+}
+
+/**
+ * Does watchlisting something mean you watch it?
+ *
+ * The window bounds `added_at` here — which entries are being asked about —
+ * not the plays. That is the only bound that makes the question answerable, and
+ * it is why the section says so out loud rather than inheriting the page's
+ * "watched in this range" reading of the same control.
+ */
+export interface WatchlistConversion {
+  range: StatsRange
+  tail_days: number
+  added: number
+  converted: number
+  /** A fraction, not a percentage. */
+  conversion_rate: number
+  /** Median, not mean: one title watchlisted in 2019 drags an average away. */
+  median_days_to_watch: number | null
+  still_waiting: number
+  waiting_past_tail: number
+  /** Removed from the watchlist without ever having been played. */
+  churned: number
+  removed: number
+  waiting: WatchlistWaiting[]
+}
+
+export interface CoverageSlice {
+  label: string
+  owned: number
+  watched: number
+  /** watched / owned as a fraction. Never null — a slice owns something. */
+  percent: number
+}
+
+/**
+ * How much of the shelf has actually been watched. All-time by construction.
+ *
+ * `includes_personal` reports whether home videos are in the inventory, and it
+ * deliberately differs from the watch blocks: everywhere else on the stats page
+ * a play is a play and home videos count, but this is a library inventory and a
+ * phone recording is not a title you have failed to get round to.
+ */
+export interface Coverage {
+  scope: 'all_time'
+  includes_personal: boolean
+  owned: number
+  watched: number
+  unwatched: number
+  percent: number
+  by_type: CoverageSlice[]
+  by_genre: CoverageSlice[]
+  by_decade: CoverageSlice[]
+}
+
+export interface RatingSlice {
+  label: string
+  count: number
+  average: number
+  /** The crowd over the same slice; absent when none of it carries a score. */
+  community_average: number | null
+}
+
+/** A title you and the crowd disagree about. `difference` is yours minus theirs. */
+export interface ContrarianItem {
+  media_item_id: number
+  title: string
+  year: number | null
+  media_type: MediaType
+  poster_url: string
+  rating: number
+  community_rating: number
+  difference: number
+}
+
+/**
+ * Your ratings against the crowd's, and how they break down.
+ *
+ * Only titles carrying **both** a rating and a community score can be compared,
+ * so `rated_with_community` is the denominator of every agreement number here
+ * and is shown next to `rated` rather than left to be inferred.
+ */
+export interface RatingDepth {
+  range: StatsRange
+  rated: number
+  rated_with_community: number
+  average_rating: number | null
+  average_community: number | null
+  /** Mean signed difference: positive means you are the kinder of the two. */
+  average_difference: number | null
+  average_absolute_difference: number | null
+  /** Share of comparable titles within one point either way, 0–1. */
+  agreement_within_one: number | null
+  kinder_than_crowd: number
+  harsher_than_crowd: number
+  you_rate_higher: ContrarianItem[]
+  you_rate_lower: ContrarianItem[]
+  by_genre: RatingSlice[]
+  by_decade: RatingSlice[]
+  by_runtime: RatingSlice[]
+  /** Rated titles with no runtime recorded, so they are in no runtime bucket. */
+  runtime_unknown: number
+}
+
+/** One row of a title ranking. `episodes` is distinct episodes in the window. */
+export interface RankedTitle {
+  media_item_id: number
+  title: string
+  year: number | null
+  media_type: MediaType
+  poster_url: string
+  plays: number
+  minutes: number
+  episodes: number | null
+  episodes_total: number | null
+}
+
+/** One row of a facet ranking — a studio, a network, a decade, a source. */
+export interface RankedFacet {
+  label: string
+  plays: number
+  minutes: number
+  /** Distinct titles behind the row, so "300 plays" reads as one show. */
+  titles: number
+}
+
+/**
+ * The leaderboards: what you watched most of, and where it came from.
+ *
+ * Facets resolve through the parent show, because enrichment skips episodes —
+ * except `decades`, which uses the item's own year so a 2019 episode is not
+ * filed under 1989.
+ */
+export interface Rankings {
+  range: StatsRange
+  limit: number
+  top_shows: RankedTitle[]
+  top_films: RankedTitle[]
+  top_by_runtime: RankedTitle[]
+  studios: RankedFacet[]
+  networks: RankedFacet[]
+  decades: RankedFacet[]
+  content_ratings: RankedFacet[]
+  /** How the play reached Tally, not what was played. A diagnostic as much as a stat. */
+  by_source: RankedFacet[]
 }
 
 export interface Library {
@@ -457,4 +719,33 @@ export interface PlexAuthStart {
 export interface PlexAuthPoll {
   status: 'pending' | 'authenticated' | 'expired'
   user: User | null
+}
+
+/**
+ * Which browse surface a saved view belongs to.
+ *
+ * The *filter surface*, not the route: every Browse mode — movies, shows,
+ * anime, search, all titles — offers one set of filters and one set of sorts,
+ * while the watchlist and History each have their own. A view saved on Movies
+ * therefore applies on Anime too, and applying one never navigates: it sets the
+ * query on the grid you are looking at.
+ */
+export type SavedViewPage = 'media' | 'watchlist' | 'history'
+
+/**
+ * A browse query somebody wants back later.
+ *
+ * `query` is the raw query string, stored verbatim and never parsed on the
+ * server. Recalling it hands the string back to `useBrowseFilters`, which
+ * validates every parameter exactly as it does for a hand-edited URL — so a
+ * view saved before a filter was renamed degrades to the page defaults instead
+ * of erroring.
+ */
+export interface SavedView {
+  id: number
+  page: SavedViewPage
+  name: string
+  query: string
+  created_at: string
+  updated_at: string
 }
