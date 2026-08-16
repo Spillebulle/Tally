@@ -158,6 +158,23 @@ class MediaCard(ORMModel):
     on_watchlist: bool = False
 
 
+class CreditOut(BaseModel):
+    """One credited person on one title."""
+
+    person_id: int
+    name: str
+    # Who they played. Null for a director.
+    character: str | None = None
+    # A TMDB URL, which needs no credentials — so unlike Plex artwork this is a
+    # real URL the browser fetches itself rather than a proxied path.
+    profile_url: str | None = None
+
+
+class MediaCreditsOut(BaseModel):
+    cast: list[CreditOut] = []
+    directors: list[CreditOut] = []
+
+
 class PaginatedMedia(BaseModel):
     items: list[MediaCard]
     total: int

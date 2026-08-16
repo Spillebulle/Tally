@@ -65,6 +65,11 @@ export function Watchlist() {
     queryFn: () => api.media.genres('all'),
   })
 
+  const contentRatings = useQuery({
+    queryKey: ['content-ratings', 'all'],
+    queryFn: () => api.media.contentRatings('all'),
+  })
+
   const remove = useMutation({
     mutationFn: (mediaItemId: number) => api.watchlist.remove(mediaItemId),
     // Removal also has to reach Plex, so the round trip is long enough to feel
@@ -138,6 +143,7 @@ export function Watchlist() {
       <BrowseFilters
         state={filters}
         genres={genres.data ?? []}
+        contentRatings={contentRatings.data ?? []}
         busy={isFetching && !isLoading}
       />
 

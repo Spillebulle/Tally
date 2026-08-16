@@ -94,6 +94,11 @@ export function Browse({ mode }: BrowseProps) {
     queryFn: () => api.media.genres(animeFilter),
   })
 
+  const contentRatings = useQuery({
+    queryKey: ['content-ratings', animeFilter],
+    queryFn: () => api.media.contentRatings(animeFilter),
+  })
+
   const markWatched = useMutation({
     mutationFn: (card: MediaCard) => api.history.markWatched(card.id),
     onSuccess: (_result, card) => {
@@ -111,6 +116,14 @@ export function Browse({ mode }: BrowseProps) {
       ? `Rated ${filters.minRating}/10`
       : null
 
+  // A facet clicked on an item page is the reason this view exists, so it names
+  // the page — the same courtesy the genre and rating arrivals already get.
+  const facetTitle =
+    (filters.facets.director && `Directed by ${filters.facets.director}`) ||
+    filters.facets.studio ||
+    (filters.facets.content_rating && `Rated ${filters.facets.content_rating}`) ||
+    null
+
   const titles: Record<BrowseMode, string> = {
     movies: 'Movies',
     shows: 'TV shows',
@@ -118,7 +131,7 @@ export function Browse({ mode }: BrowseProps) {
     search: search ? `Results for “${search}”` : 'Search',
     // Name what was clicked, so arriving here from the stats page explains
     // itself rather than showing an unexplained subset of the library.
-    browse: rated ?? (filters.genre ? filters.genre : 'All titles'),
+    browse: facetTitle ?? rated ?? (filters.genre ? filters.genre : 'All titles'),
   }
 
   const total = data?.total ?? 0
@@ -154,6 +167,7 @@ export function Browse({ mode }: BrowseProps) {
       <BrowseFilters
         state={filters}
         genres={genres.data ?? []}
+        contentRatings={contentRatings.data ?? []}
         busy={isFetching && !isLoading}
       />
 
