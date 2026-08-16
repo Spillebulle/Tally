@@ -30,7 +30,10 @@ watching now, and syncs ratings and your watchlist in *both* directions.
 | **Anime, separated** | Anime gets its own section, detected from your library layout, metadata agent, genres and MyAnimeList — not just "is it a cartoon". |
 | **Multi-user** | Each account links its own Plex identity and sees its own history and ratings. |
 | **Rich metadata** | Posters and descriptions from TMDB, TheTVDB and MyAnimeList. |
-| **Stats** | Activity heatmap, genre breakdown, rating distribution, streaks. |
+| **Stats worth reading** | Activity heatmap, weekday and hour patterns, sessions and binges, rewatches, show completion and drop-off, watchlist conversion, library coverage, how your ratings compare to the crowd, and ranked lists of everything. Any custom date range, compared against the period before it or the same period last year. |
+| **Click any chart** | A bar, a heatmap day, a decade, a studio — it takes you to the plays or the titles behind it, with the filters already applied. |
+| **Filters that go deep** | Multi-select and exclusion on genres, ranges for year, runtime, rating and dates, cast and crew, library and server — on the grid, the watchlist and your history alike. Save a view and it comes back. |
+| **Dashboards** | A JSON and CSV time-series API for Grafana, and a `/metrics` endpoint for Prometheus. See [Dashboards](#dashboards). |
 
 ---
 
