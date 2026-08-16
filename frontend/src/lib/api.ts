@@ -13,6 +13,8 @@ import type {
   PlexAuthStart,
   Server,
   Stats,
+  StatsGranularity,
+  StatsPreset,
   SyncRun,
   SyncStatus,
   User,
@@ -133,6 +135,27 @@ export interface MediaQuery extends Query {
   limit?: number
 }
 
+/**
+ * The window `/api/stats` should cover.
+ *
+ * Three ways to ask and the server resolves whichever it was into one `range`
+ * block, so the page never re-derives a boundary that depends on the viewer's
+ * timezone: a named `preset`, an explicit `since`/`until` pair (which wins over
+ * a preset), or the legacy `days`. `tz` is the viewer's IANA zone — the server
+ * resolves `tz` → the stored preference → UTC and reports which it used.
+ */
+export interface StatsQuery extends Query {
+  preset?: StatsPreset
+  since?: string
+  until?: string
+  days?: number
+  /** Also aggregate the window immediately before this one. */
+  compare?: boolean
+  granularity?: StatsGranularity
+  anime_only?: boolean
+  tz?: string
+}
+
 export const api = {
   auth: {
     status: () => get<AuthStatus>('/api/auth/status'),
@@ -215,6 +238,15 @@ export const api = {
   stats: {
     get: (days = 365, anime_only = false) =>
       get<Stats>('/api/stats', { days, anime_only }),
+    /**
+     * The full window vocabulary: a named preset, or an explicit `since`/`until`
+     * pair, plus the viewer's zone.
+     *
+     * Alongside `get` rather than replacing it — the dashboard asks a fixed
+     * "last 365 days" question and has no window to describe, so widening its
+     * call would only make it spell out a default.
+     */
+    query: (params: StatsQuery) => get<Stats>('/api/stats', { ...params }),
     summary: () =>
       get<{
         library_movies: number
