@@ -10,6 +10,7 @@ from sqlalchemy import String, and_, case, cast, func, or_, select, true
 
 from ..deps import CurrentUser, DbSession
 from ..media_filters import (
+    NEARLY_FINISHED_PERCENT,
     AnimeFilter,
     MediaFilters,
     SortField,
@@ -176,8 +177,11 @@ async def continue_watching(
 
     for state, item in rows:
         percent = progress_percent(state) or 0.0
-        # Anything essentially finished belongs in history, not here.
-        if percent >= 95:
+        # Anything essentially finished belongs in history, not here. The
+        # cut-off is shared with the `in_progress` browse filter — see
+        # `media_filters.in_progress_condition`, which asks the same question
+        # in SQL — so the two shelves cannot disagree about "still watching".
+        if percent >= NEARLY_FINISHED_PERCENT:
             continue
         if item.show_id:
             covered_show_ids.add(item.show_id)

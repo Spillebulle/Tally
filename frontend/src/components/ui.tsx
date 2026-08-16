@@ -200,7 +200,9 @@ export function Segmented<T extends string>({
     <div
       role="radiogroup"
       aria-label={label}
-      className="inline-flex rounded-xl border border-line bg-raised p-1"
+      // Wraps: the stats timeframe control offers seven windows, and a fixed
+      // row of seven pushed the page sideways on a phone.
+      className="inline-flex flex-wrap rounded-xl border border-line bg-raised p-1"
     >
       {options.map((option) => (
         <button

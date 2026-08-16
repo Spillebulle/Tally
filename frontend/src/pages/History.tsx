@@ -1,10 +1,12 @@
 import { Link, useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api'
+import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
+import { HISTORY_SORTS, useBrowseFilters } from '@/lib/browse-filters'
 import type { HistoryPage, WatchEvent } from '@/lib/types'
 import { cn, compactNumber, displaySubtitle, formatDateTime } from '@/lib/utils'
-import { Pagination, usePageParam } from '@/components/BrowseFilters'
+import { BrowseFilters } from '@/components/BrowseFilters'
+import { Pagination, usePageParam } from '@/components/Pagination'
 import { Artwork } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { ClockIcon, XIcon } from '@/components/Icons'
@@ -19,6 +21,18 @@ const SOURCE_LABELS: Record<WatchEvent['source'], string> = {
   import: 'Imported',
 }
 
+/**
+ * The type split, as one control — and it keeps its own parameter name.
+ *
+ * The watchlist's equivalent is `?kind=`, whose values are `movie|show|anime`.
+ * These are `movie|episode|anime`: a history row is a *play*, and you watch an
+ * episode, not a series. One parameter name carrying two vocabularies is worse
+ * than two names carrying one each — a shared `?kind=show` would arrive here
+ * meaning nothing, and there would be no honest way to say so.
+ *
+ * It is also the name History has always written, so every bookmarked
+ * `?filter=anime` keeps working rather than quietly widening to everything.
+ */
 const FILTERS = [
   { value: 'all', label: 'Everything' },
   { value: 'movie', label: 'Movies' },
@@ -62,7 +76,7 @@ export function History() {
   // link to "my anime history, page 3" could not exist. The page number is
   // read and written by the same helper the grids use, so `?page=` means one
   // thing across the app.
-  const [params, setParams] = useSearchParams()
+  const [params] = useSearchParams()
   const requestedFilter = params.get('filter')
   const filter: Filter = FILTERS.some((option) => option.value === requestedFilter)
     ? (requestedFilter as Filter)
@@ -71,25 +85,59 @@ export function History() {
   const queryClient = useQueryClient()
   const { notify } = useToast()
 
-  const setFilter = (next: Filter) => {
-    const updated = new URLSearchParams(params)
-    if (next === 'all') updated.delete('filter')
-    else updated.set('filter', next)
-    updated.delete('page')
-    setParams(updated, { replace: true })
-  }
+  const filters = useBrowseFilters({
+    sorts: HISTORY_SORTS,
+    defaultSort: 'watched_at',
+    /**
+     * Home videos stay visible here. The grids hide them because a phone
+     * recording is not a title in the sense those pages mean — but a play of
+     * one is real history, and quietly dropping rows out of a diary is how a
+     * user comes to believe Tally lost them. The shared default is `exclude`,
+     * so this page has to say otherwise rather than inherit it.
+     */
+    defaults: { personal: 'all' },
+    /**
+     * `status` and `unwatched` mean nothing on a page where every row is a
+     * play: "unwatched" returns nothing at all and a watch status returns
+     * nearly everything. `watched` is the item-level "last watched between",
+     * which would sit beside `window`'s "watched between" saying almost the
+     * same thing about a different set of rows — the play window is the one
+     * this page is about, so it is the one that stays.
+     */
+    omit: ['status', 'watched'],
+  })
 
-  const query = {
+  const setFilter = (next: Filter) =>
+    filters.update('filter', next === 'all' ? null : next)
+
+  const query: MediaQuery = {
+    ...filters.query,
     media_type: filter === 'movie' || filter === 'episode' ? filter : undefined,
+    // `anime_only` rather than the shared `anime` tri-state: it is the
+    // parameter this endpoint has always taken, and it is kept as an alias, so
+    // it is the one spelling that is right both before and after the API grows
+    // the full filter set.
     anime_only: filter === 'anime' || undefined,
     offset: page * PAGE_SIZE,
     limit: PAGE_SIZE,
   }
 
-  const { data, isLoading, isError, error, refetch } = useQuery({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: ['history', query],
     queryFn: () => api.history.list(query),
     placeholderData: keepPreviousData,
+  })
+
+  // The same two lists the grids offer, over everything: History shows films,
+  // episodes and anime together, so narrowing either list to one of them would
+  // hide genres the page can actually display.
+  const genres = useQuery({
+    queryKey: ['genres', 'all'],
+    queryFn: () => api.media.genres('all'),
+  })
+  const contentRatings = useQuery({
+    queryKey: ['content-ratings', 'all'],
+    queryFn: () => api.media.contentRatings('all'),
   })
 
   const remove = useMutation({
@@ -126,7 +174,15 @@ export function History() {
 
   const total = data?.total ?? 0
   const pageCount = Math.ceil(total / PAGE_SIZE)
-  const grouped = groupByDay(data?.events ?? [])
+  const events = data?.events ?? []
+  // The day headings are only true while the list is in time order. Sorted by
+  // title, consecutive rows come from unrelated dates, and grouping them would
+  // print a heading per row and call each one a day's viewing.
+  const byDay = filters.values.sort === 'watched_at'
+  const grouped = byDay ? groupByDay(events) : []
+  // `filter` is this page's own parameter rather than one of the shared ones,
+  // so it is the one thing `filters.active` cannot know about.
+  const narrowed = filters.active || filter !== 'all' || Boolean(filters.values.q)
 
   return (
     <div>
@@ -143,6 +199,13 @@ export function History() {
         }
       />
 
+      <BrowseFilters
+        state={filters}
+        genres={genres.data ?? []}
+        contentRatings={contentRatings.data ?? []}
+        busy={isFetching && !isLoading}
+      />
+
       {isLoading ? (
         <div className="space-y-3">
           {Array.from({ length: 8 }, (_, index) => (
@@ -152,23 +215,39 @@ export function History() {
       ) : isError ? (
         <ErrorState error={error} onRetry={() => void refetch()} />
       ) : total === 0 ? (
-        <EmptyState
-          icon={<ClockIcon />}
-          title="No watch history yet"
-          description="Sync with Plex to import what you have already watched, or mark something watched from its page."
-        />
-      ) : (
+        // An empty page means two different things: nothing watched at all, or
+        // nothing matching the filters. Telling someone with 4,000 plays and a
+        // narrow date window to go and run a sync would be daft.
+        narrowed ? (
+          <EmptyState
+            icon={<ClockIcon />}
+            title="No plays match those filters"
+            description="Try widening them, or clear them to see everything you have watched."
+            action={
+              <button type="button" onClick={filters.clear} className="btn-outline mt-2">
+                Clear filters
+              </button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={<ClockIcon />}
+            title="No watch history yet"
+            description="Sync with Plex to import what you have already watched, or mark something watched from its page."
+          />
+        )
+      ) : byDay ? (
         <div className="space-y-8">
-          {grouped.map(([day, events]) => (
+          {grouped.map(([day, plays]) => (
             <section key={day}>
               <h2 className="sticky top-16 z-10 -mx-1 mb-2 bg-canvas/90 px-1 py-1.5 text-sm font-semibold text-muted backdrop-blur">
                 {dayLabel(day)}
                 <span className="ml-2 font-normal text-muted/70">
-                  {events.length} {events.length === 1 ? 'play' : 'plays'}
+                  {plays.length} {plays.length === 1 ? 'play' : 'plays'}
                 </span>
               </h2>
               <ul className="space-y-2">
-                {events.map((event) => (
+                {plays.map((event) => (
                   <HistoryRow
                     key={event.id}
                     event={event}
@@ -179,6 +258,16 @@ export function History() {
             </section>
           ))}
         </div>
+      ) : (
+        <ul className="space-y-2">
+          {events.map((event) => (
+            <HistoryRow
+              key={event.id}
+              event={event}
+              onRemove={() => remove.mutate(event.id)}
+            />
+          ))}
+        </ul>
       )}
 
       <Pagination

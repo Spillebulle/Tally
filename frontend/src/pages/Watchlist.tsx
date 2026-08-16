@@ -4,12 +4,9 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { MediaCard, PaginatedWatchlist } from '@/lib/types'
-import {
-  BrowseFilters,
-  Pagination,
-  useBrowseFilters,
-  WATCHLIST_SORTS,
-} from '@/components/BrowseFilters'
+import { useBrowseFilters, WATCHLIST_SORTS } from '@/lib/browse-filters'
+import { BrowseFilters } from '@/components/BrowseFilters'
+import { Pagination, usePageParam } from '@/components/Pagination'
 import { Artwork, Poster, PosterSkeleton } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented, Spinner } from '@/components/ui'
 import { BookmarkIcon, PlusIcon, SearchIcon } from '@/components/Icons'
@@ -39,6 +36,8 @@ export function Watchlist() {
     sorts: WATCHLIST_SORTS,
     defaultSort: 'watchlist_added',
     defaultOrder: 'asc',
+    // See Browse: `since`/`until` are History's, and mean nothing here.
+    omit: ['window'],
   })
   // Checked, not cast — an unknown kind would reach the API as a `media_type`
   // it does not accept, and answer 422 instead of showing the watchlist.
@@ -48,7 +47,7 @@ export function Watchlist() {
     : 'all'
   // In the URL beside the filters — see the note in BrowseFilters. Changing a
   // filter drops it, so nothing has to reset the offset here.
-  const page = filters.page
+  const { page, setPage } = usePageParam()
 
   const query: MediaQuery = {
     ...filters.query,
@@ -224,7 +223,7 @@ export function Watchlist() {
       <Pagination
         page={page}
         pageCount={pageCount}
-        onPage={filters.setPage}
+        onPage={setPage}
         ready={!isLoading}
       />
     </div>
