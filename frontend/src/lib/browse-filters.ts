@@ -1,5 +1,5 @@
 import { useSearchParams } from 'react-router-dom'
-import type { PersonalFilter, WatchStatus } from './types'
+import type { LibraryOption, PersonalFilter, ServerOption, WatchStatus } from './types'
 import { localDateKey, parseLocalDateLabel, STATUS_LABELS } from './utils'
 
 /**
@@ -36,6 +36,14 @@ import { localDateKey, parseLocalDateLabel, STATUS_LABELS } from './utils'
  * Adding a filter means appending one entry to the table. If it needs a kind of
  * control that does not exist yet, add a `control.kind` and one branch in
  * `BrowseFilters`; nothing else in this file, and nothing in the pages.
+ *
+ * A facet that takes several values is one entry too — `multiFilter` — and it
+ * buys the repeated parameter, the parallel `_not`, the any/all toggle where
+ * AND means something, a chip per value with its own ×, and the chip group. The
+ * URL carries one occurrence per value (`?genre=Crime&genre=Drama`), which is
+ * backwards compatible by construction: a single occurrence parses exactly as
+ * the single value it always did, so every bookmark and every facet link keeps
+ * working.
  *
  * The rendering half lives in `components/BrowseFilters.tsx`; the page stepper,
  * which History uses without any of this, lives in `components/Pagination.tsx`.
@@ -100,6 +108,39 @@ export const STATUS_FILTERS: Array<{ value: StatusValue; label: string }> = [
 export type RangeValue = { min?: number; max?: number }
 
 /**
+ * A facet that takes several values, and can refuse some.
+ *
+ * The URL carries one occurrence per value — `?genre=Crime&genre=Drama` — with
+ * a parallel `?genre_not=` for exclusions and `?genre_mode=all` for AND.
+ *
+ * Repeated keys rather than a comma-separated list, because studio names
+ * contain commas ("Warner Bros., Inc."), and rather than a `-Horror` prefix
+ * operator, because values legitimately start with one. The real reason,
+ * though, is that a single occurrence parses exactly as the single value it
+ * always did: every bookmark, every facet link on an item page and every stats
+ * drill keeps working without being touched.
+ */
+export interface MultiValue {
+  include: string[]
+  exclude: string[]
+  /**
+   * AND across `include` rather than OR.
+   *
+   * Only offered where a row can hold several values at once. A title has one
+   * studio, one certificate and one network, so "all" over those can only ever
+   * return nothing — a control that can only produce a wrong answer.
+   */
+  all: boolean
+}
+
+/** The values a multi filter is narrowing on, for a page title or a subtitle. */
+export const namesOf = (value: MultiValue): string =>
+  value.include.join(', ')
+
+/** How far a free-text search reaches. `title` unless the user widens it. */
+export type SearchScope = 'title' | 'all'
+
+/**
  * A pair of inclusive day bounds, each a **local** `YYYY-MM-DD`.
  *
  * The URL holds days, not instants, because that is what a person picked and
@@ -115,13 +156,29 @@ export type PlexPresence = 'all' | 'true' | 'false'
 /** The subset of a media/history query these controls own. */
 export interface FilterQuery {
   q?: string
-  genre?: string
-  content_rating?: string
-  studio?: string
+  /** `all` widens the search from titles to overviews and your own notes. */
+  q_scope?: SearchScope
+  /**
+   * The repeatable facets. Each is sent as one parameter per value — the API
+   * takes `?genre=Crime&genre=Drama` — which is why `api.ts` appends per
+   * element rather than stringifying the array to "a,b".
+   */
+  genre?: string[]
+  genre_not?: string[]
+  genre_mode?: 'all'
+  content_rating?: string[]
+  content_rating_not?: string[]
+  studio?: string[]
+  studio_not?: string[]
+  network?: string[]
+  network_not?: string[]
+  anime_format?: string[]
+  anime_format_not?: string[]
+  library_id?: string[]
+  server_id?: string[]
   director?: string
-  network?: string
+  actor?: string
   release_status?: string
-  anime_format?: string
   watch_status?: WatchStatus
   unwatched?: true
   has_notes?: true
@@ -154,14 +211,18 @@ export interface FilterQuery {
 /** Every filter, and the type of the value it holds. */
 export interface FilterValues {
   q: string
+  q_scope: SearchScope
   status: StatusValue
-  genre: string
-  content_rating: string
-  studio: string
+  genre: MultiValue
+  content_rating: MultiValue
+  studio: MultiValue
+  network: MultiValue
+  anime_format: MultiValue
+  libraries: MultiValue
+  servers: MultiValue
   director: string
-  network: string
+  actor: string
   release_status: string
-  anime_format: string
   rating: RangeValue
   community: RangeValue
   years: RangeValue
@@ -188,10 +249,21 @@ export interface FilterChoice<V> {
   label: string
 }
 
-/** Whatever the page fetched for the selects that offer real library values. */
+/** Whatever the page fetched for the controls that offer real library values. */
 export interface FilterLists {
   genres: string[]
   contentRatings: string[]
+  /** From `/api/media/places` — only the servers this account can see. */
+  libraries: LibraryOption[]
+  servers: ServerOption[]
+}
+
+/** An empty set of lists, for a caller that has not fetched them (or any). */
+export const NO_LISTS: FilterLists = {
+  genres: [],
+  contentRatings: [],
+  libraries: [],
+  servers: [],
 }
 
 /** The rest of the query, for the filters whose default depends on it. */
@@ -232,10 +304,37 @@ export type FilterControl =
   | { kind: 'search'; placeholder: string }
   | { kind: 'chips' }
   | { kind: 'select'; lists?: keyof FilterLists }
+  | {
+      /**
+       * A chip per value, cycling off → include → exclude → off.
+       *
+       * A `<select multiple>` is unusable — it needs a modifier key nobody
+       * discovers, it drops the whole selection on a stray click, and it cannot
+       * say "not this" at all. Chips are the vocabulary this app already has,
+       * and they hold three states legibly.
+       */
+      kind: 'multi'
+      /**
+       * Hide the control below this many options, unless one is already set.
+       *
+       * A picker offering one library is a control that cannot change the
+       * answer. Two is the point at which it becomes a choice.
+       */
+      minOptions?: number
+      /** Offer the any/all toggle. Set by `multiFilter` from the same flag. */
+      andable?: boolean
+    }
   | { kind: 'segmented'; caption: string }
   | { kind: 'toggle'; on: string }
   | { kind: 'daterange'; caption: string }
   | { kind: 'none' }
+
+/** One chip in the row: what it says, and what removing it leaves behind. */
+export interface FilterChipDef<V> {
+  text: string
+  /** The value to write when the × is pressed. */
+  next: V
+}
 
 /**
  * One filter, defined once.
@@ -268,13 +367,39 @@ export interface FilterDef<V> {
   group?: FilterGroup
   /** Untrusted input: anything unrecognised falls back to the page default. */
   read: (ctx: FilterCtx) => V
-  /** The URL form. A parameter mapped to `null` is removed. */
-  write: (value: V, ctx: FilterCtx) => Record<string, string | null>
+  /**
+   * The URL form. A parameter mapped to `null` is removed; an array is written
+   * as one occurrence per element, which is how the multi-value facets keep
+   * `?genre=Crime&genre=Drama` rather than inventing a separator.
+   */
+  write: (value: V, ctx: FilterCtx) => Record<string, string | string[] | null>
   /** The filter's contribution to the request. */
   toQuery: (value: V) => Partial<FilterQuery>
   control: FilterControl
   /** The choices a select or segmented control offers. */
   choices?: (lists: FilterLists) => Array<FilterChoice<V>>
+  /**
+   * The values a *multi* control offers, one chip each.
+   *
+   * Separate from `choices`, which offers whole values: a chip stands for one
+   * element of the value, not for the value.
+   */
+  options?: (lists: FilterLists) => Array<FilterChoice<string>>
+  /**
+   * The chips this filter contributes, when one value is not one chip.
+   *
+   * Each carries the value its × writes, so removing one genre from three
+   * leaves the other two rather than clearing the filter.
+   */
+  chips?: (value: V, lists: FilterLists) => Array<FilterChipDef<V>>
+  /**
+   * Renders only when the rest of the query makes it mean something.
+   *
+   * "Search in titles / everything" over an empty search box is a control with
+   * no subject. Table-driven, so the rendering half still knows nothing about
+   * what any particular filter means.
+   */
+  showWhen?: (values: FilterValues) => boolean
   /**
    * Names a value that is not among `choices`.
    *
@@ -358,6 +483,99 @@ function textFilter(
     control,
     describe: (value) => value,
     ...extra,
+  }
+}
+
+/**
+ * A facet that takes several values, refuses some, and optionally ANDs them.
+ *
+ * One entry buys the whole set: the repeated parameter, the parallel `_not`,
+ * the `_mode` toggle where AND means something, a chip per value with its own
+ * ×, the chip group that offers the library's real values, and the request.
+ * The URL is the only place any of it lives.
+ */
+function multiFilter(
+  key: FilterKey,
+  /** The query parameter, which is not always the key: `libraries` → `library_id`. */
+  param: string,
+  label: string,
+  extra: {
+    group?: FilterGroup
+    control?: FilterControl
+    /** Offer the any/all toggle. Only true where a row can hold several values. */
+    andable?: boolean
+    options?: (lists: FilterLists) => Array<FilterChoice<string>>
+    /** Untrusted input: a value this rejects is dropped, not sent. */
+    valid?: (raw: string) => boolean
+  } = {},
+): FilterDef<MultiValue> {
+  const { andable, options, valid } = extra
+  const notParam = `${param}_not`
+  const modeParam = `${param}_mode`
+  const labelFor = (value: string, lists: FilterLists) =>
+    options?.(lists).find((choice) => choice.value === value)?.label ?? value
+
+  /** Trim, drop the empties a hand-edited URL leaves, and de-duplicate. */
+  const clean = (raw: string[]): string[] => {
+    const out: string[] = []
+    for (const entry of raw) {
+      const value = entry.trim()
+      if (!value || out.includes(value)) continue
+      if (valid && !valid(value)) continue
+      out.push(value)
+    }
+    return out
+  }
+
+  return {
+    key,
+    params: andable ? [param, notParam, modeParam] : [param, notParam],
+    label,
+    role: 'filter',
+    group: extra.group,
+    read: ({ params }) => {
+      const include = clean(params.getAll(param))
+      return {
+        include,
+        exclude: clean(params.getAll(notParam)),
+        // "All" of one value is the same set as "any" of it, so the mode is
+        // not a filter yet — and a default must never survive into the URL.
+        all:
+          Boolean(andable) && include.length > 1 && params.get(modeParam) === 'all',
+      }
+    },
+    write: ({ include, exclude, all }) => ({
+      [param]: include,
+      [notParam]: exclude,
+      ...(andable
+        ? { [modeParam]: all && include.length > 1 ? 'all' : null }
+        : {}),
+    }),
+    toQuery: ({ include, exclude, all }) =>
+      ({
+        [param]: include.length ? include : undefined,
+        [notParam]: exclude.length ? exclude : undefined,
+        ...(andable && all && include.length > 1 ? { [modeParam]: 'all' } : {}),
+      }) as Partial<FilterQuery>,
+    // `andable` is declared once, here, and the control carries it so the
+    // rendering half can offer the toggle without knowing which filter it is.
+    control:
+      extra.control?.kind === 'multi'
+        ? { ...extra.control, andable: Boolean(andable) }
+        : (extra.control ?? { kind: 'none' }),
+    options,
+    chips: (value, lists) => [
+      ...value.include.map((name) => ({
+        text: labelFor(name, lists),
+        next: { ...value, include: value.include.filter((v) => v !== name) },
+      })),
+      ...value.exclude.map((name) => ({
+        // Reads as "Genre not Horror" once the chip's label is in front of it.
+        text: `not ${labelFor(name, lists)}`,
+        next: { ...value, exclude: value.exclude.filter((v) => v !== name) },
+      })),
+    ],
+    describe: (value) => value.include.join(', '),
   }
 }
 
@@ -592,6 +810,31 @@ export function filterTable(page: FilterPage): FilterTable {
       control: { kind: 'search', placeholder: 'Search these titles…' },
     },
 
+    /**
+     * How far the search reaches: titles, or titles plus overviews and your
+     * own notes.
+     *
+     * `title` stays the default deliberately — an ordinary search that starts
+     * matching plot summaries returns half the library for "murder". It is
+     * part of the search rather than a filter, so "Clear all" keeps it, and it
+     * only appears once there is a search term for it to widen.
+     */
+    q_scope: {
+      key: 'q_scope',
+      params: ['q_scope'],
+      label: 'Search in',
+      role: 'search',
+      read: ({ params }) => (params.get('q_scope') === 'all' ? 'all' : 'title'),
+      write: (value) => ({ q_scope: value === 'all' ? 'all' : null }),
+      toQuery: (value) => (value === 'all' ? { q_scope: 'all' } : {}),
+      control: { kind: 'segmented', caption: 'Search in' },
+      choices: () => [
+        { value: 'title', label: 'Titles' },
+        { value: 'all', label: 'Everything' },
+      ],
+      showWhen: (values) => Boolean(values.q),
+    },
+
     status: {
       key: 'status',
       params: ['status'],
@@ -614,44 +857,50 @@ export function filterTable(page: FilterPage): FilterTable {
       choices: () => STATUS_FILTERS,
     },
 
-    genre: textFilter(
-      'genre',
-      'Genre',
-      { kind: 'select', lists: 'genres' },
-      {
-        choices: (lists) => [
-          { value: '', label: 'All genres' },
-          ...lists.genres.map((name) => ({ value: name, label: name })),
-        ],
-      },
-    ),
+    /**
+     * The one facet where "all of these" is a real question — a title carries
+     * several genres, so Crime *and* Drama names a smaller set than either.
+     *
+     * It stays on the bar rather than behind the disclosure, in its own
+     * horizontally-scrolling row like the status chips: it is the filter people
+     * reach for constantly, and the chips put the selected ones first so the
+     * active state is visible without scrolling.
+     */
+    genre: multiFilter('genre', 'genre', 'Genre', {
+      control: { kind: 'multi' },
+      andable: true,
+      options: (lists) => lists.genres.map((name) => ({ value: name, label: name })),
+    }),
 
-    content_rating: textFilter(
-      'content_rating',
-      'Certificate',
-      { kind: 'select', lists: 'contentRatings' },
-      {
-        group: 'title',
-        choices: (lists) => [
-          { value: '', label: 'Any certificate' },
-          ...lists.contentRatings.map((name) => ({ value: name, label: name })),
-        ],
-      },
-    ),
+    content_rating: multiFilter('content_rating', 'content_rating', 'Certificate', {
+      group: 'title',
+      control: { kind: 'multi' },
+      options: (lists) =>
+        lists.contentRatings.map((name) => ({ value: name, label: name })),
+    }),
 
-    // Reached by clicking the value on an item page. Named in a chip so
-    // whatever is narrowing the grid is still visible and still undoable. They
+    // Reached by clicking the value on an item page: a library holds a dozen
+    // certificates but hundreds of studios and networks, and a chip group is
+    // not a way to find one name in a thousand. Each value still gets a chip,
+    // so whatever is narrowing the grid is visible and undoable — and they
     // carry a group anyway, so a control that ever becomes offerable lands in
     // the right panel without a second edit.
-    studio: textFilter('studio', 'Studio', { kind: 'none' }, {
-      group: 'title',
-      chip: (value) => value || null,
-    }),
-    network: textFilter('network', 'Network', { kind: 'none' }, {
-      group: 'title',
-      chip: (value) => value || null,
-    }),
+    studio: multiFilter('studio', 'studio', 'Studio', { group: 'title' }),
+    network: multiFilter('network', 'network', 'Network', { group: 'title' }),
+
     director: textFilter('director', 'Director', { kind: 'none' }, {
+      group: 'title',
+      chip: (value) => value || null,
+    }),
+    /**
+     * The other half of a credit list, and the same shape as `director`.
+     *
+     * Sparse today on purpose rather than by oversight: credits are fetched
+     * when somebody opens a detail page, so only titles that have been looked
+     * at carry any. What is recorded matches exactly; what is missing has
+     * simply never been fetched.
+     */
+    actor: textFilter('actor', 'Actor', { kind: 'none' }, {
       group: 'title',
       chip: (value) => value || null,
     }),
@@ -676,24 +925,54 @@ export function filterTable(page: FilterPage): FilterTable {
       },
     ),
 
-    anime_format: textFilter(
-      'anime_format',
-      'Format',
-      { kind: 'select' },
-      {
-        group: 'title',
-        // Upper-cased on the way in — see `media_repo.upsert_from_plex`.
-        choices: () => [
-          { value: '', label: 'Any format' },
-          { value: 'TV', label: 'TV series' },
-          { value: 'MOVIE', label: 'Film' },
-          { value: 'OVA', label: 'OVA' },
-          { value: 'ONA', label: 'ONA' },
-          { value: 'SPECIAL', label: 'Special' },
-          { value: 'MUSIC', label: 'Music' },
-        ],
-      },
-    ),
+    anime_format: multiFilter('anime_format', 'anime_format', 'Format', {
+      group: 'title',
+      control: { kind: 'multi' },
+      // Upper-cased on the way in — see `media_repo.upsert_from_plex`, which
+      // is why the value is shouted and only the label is presentable.
+      options: () => [
+        { value: 'TV', label: 'TV series' },
+        { value: 'MOVIE', label: 'Film' },
+        { value: 'OVA', label: 'OVA' },
+        { value: 'ONA', label: 'ONA' },
+        { value: 'SPECIAL', label: 'Special' },
+        { value: 'MUSIC', label: 'Music' },
+      ],
+    }),
+
+    /**
+     * Where the file lives.
+     *
+     * Both offer only what this account can see — `/api/media/places` scopes
+     * itself through `UserServerAccess` — and both hide themselves below two
+     * options, because a picker offering the only library there is cannot
+     * change the answer.
+     */
+    libraries: multiFilter('libraries', 'library_id', 'Library', {
+      group: 'library',
+      control: { kind: 'multi', minOptions: 2 },
+      valid: (raw) => /^\d+$/.test(raw),
+      options: (lists) =>
+        lists.libraries.map((library) => ({
+          value: String(library.id),
+          // A two-server household calls half its libraries "Movies".
+          label:
+            lists.servers.length > 1
+              ? `${library.title} · ${library.server_name}`
+              : library.title,
+        })),
+    }),
+
+    servers: multiFilter('servers', 'server_id', 'Server', {
+      group: 'library',
+      control: { kind: 'multi', minOptions: 2 },
+      valid: (raw) => /^\d+$/.test(raw),
+      options: (lists) =>
+        lists.servers.map((server) => ({
+          value: String(server.id),
+          label: server.name,
+        })),
+    }),
 
     /**
      * Your own rating, on Plex's 0–10 scale.
@@ -954,6 +1233,10 @@ export function filterTable(page: FilterPage): FilterTable {
   }
 }
 
+/** Whether one written parameter says anything. An empty list says nothing. */
+const wrote = (written: string | string[] | null): boolean =>
+  Array.isArray(written) ? written.length > 0 : written !== null && written !== ''
+
 /** Writes one filter's value into a query string, removing what it defaults to. */
 function applyWrite(
   next: URLSearchParams,
@@ -962,16 +1245,17 @@ function applyWrite(
   ctx: FilterCtx,
 ) {
   for (const [param, written] of Object.entries(def.write(value, ctx))) {
-    if (written === null || written === '') next.delete(param)
-    else next.set(param, written)
+    // Delete first in every case: `set` replaces one occurrence, and a facet
+    // that was carrying three values has three to clear before appending.
+    next.delete(param)
+    if (Array.isArray(written)) for (const entry of written) next.append(param, entry)
+    else if (written !== null && written !== '') next.set(param, written)
   }
 }
 
 /** Does this filter put anything in the URL — i.e. is it narrowing the grid? */
 export const isSet = (def: AnyFilterDef, value: unknown, ctx: FilterCtx): boolean =>
-  Object.values(def.write(value, ctx)).some(
-    (written) => written !== null && written !== '',
-  )
+  Object.values(def.write(value, ctx)).some(wrote)
 
 /** A stable identity for a value, so a select can match one without `===`. */
 export const identity = (def: AnyFilterDef, value: unknown, ctx: FilterCtx): string =>
@@ -1016,6 +1300,25 @@ export function chipTextFor(
     .find((choice) => identity(def, choice.value, ctx) === here)
   if (preset) return preset.label
   return def.describe?.(value) ?? String(value)
+}
+
+/**
+ * The chips one filter contributes, and what removing each one leaves.
+ *
+ * Usually one chip clearing the whole filter. A multi-value facet gives one per
+ * value instead, because "Genre Crime, Drama, Thriller ×" can only be undone
+ * all at once — and the chip row is the only place a value the control has
+ * scrolled out of view can be removed.
+ */
+export function chipsFor(
+  def: AnyFilterDef,
+  value: unknown,
+  lists: FilterLists,
+  ctx: FilterCtx,
+): Array<FilterChipDef<unknown>> {
+  if (def.chips) return def.chips(value, lists)
+  const text = chipTextFor(def, value, lists, ctx)
+  return text ? [{ text, next: defaultValueOf(def) }] : []
 }
 
 export interface BrowseFilterState {
@@ -1079,11 +1382,12 @@ export function useBrowseFilters(page: FilterPage): BrowseFilterState {
    *
    * `replace`, so refining a view does not cost a back step each time.
    */
-  const commit = (patch: Record<string, string | null>) => {
+  const commit = (patch: Record<string, string | string[] | null>) => {
     const next = new URLSearchParams(params)
     for (const [key, value] of Object.entries(patch)) {
-      if (value === null || value === '') next.delete(key)
-      else next.set(key, value)
+      next.delete(key)
+      if (Array.isArray(value)) for (const entry of value) next.append(key, entry)
+      else if (value !== null && value !== '') next.set(key, value)
     }
     const after: FilterCtx = { params: next }
     for (const def of defs) applyWrite(next, def, def.read(after), after)

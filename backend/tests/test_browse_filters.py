@@ -11,12 +11,17 @@ import pytest
 from sqlalchemy import select
 
 from app.models import (
+    CreditKind,
+    MediaCredit,
     MediaItem,
     MediaType,
+    Person,
+    PlexLibrary,
     PlexMapping,
     PlexServer,
     User,
     UserMediaState,
+    UserServerAccess,
 )
 from app.security import encrypt_secret
 
@@ -643,3 +648,440 @@ async def test_has_notes_is_yours_alone(authed_client, db):
 
     assert await _titles(authed_client, has_notes=True) == ["Mine"]
     assert len(await _titles(authed_client, has_notes=False)) == 3
+
+
+# ---------------------------------------------------------------------------
+# Repeated keys: several values, exclusions, and "all of these"
+# ---------------------------------------------------------------------------
+
+
+async def _genre_shelf(db) -> None:
+    """Four films whose genres overlap, plus one carrying no studio at all."""
+    db.add_all(
+        [
+            MediaItem(
+                guid_key="tmdb:movie:1",
+                media_type=MediaType.MOVIE,
+                title="Heat",
+                genres=["Crime", "Drama"],
+                studio="Warner Bros., Inc.",
+            ),
+            MediaItem(
+                guid_key="tmdb:movie:2",
+                media_type=MediaType.MOVIE,
+                title="Fargo",
+                genres=["Crime", "Comedy"],
+                studio="Gramercy",
+            ),
+            MediaItem(
+                guid_key="tmdb:movie:3",
+                media_type=MediaType.MOVIE,
+                title="Up",
+                genres=["Drama"],
+                studio="Pixar",
+            ),
+            MediaItem(
+                guid_key="tmdb:movie:4",
+                media_type=MediaType.MOVIE,
+                title="Nosferatu",
+                genres=["Horror"],
+            ),
+        ]
+    )
+    await db.commit()
+
+
+async def test_a_facet_repeated_means_any_of_those_values(authed_client, db):
+    """`?genre=Crime&genre=Drama` is either, and one occurrence is unchanged.
+
+    Repeated keys rather than a separator, because studio names contain commas
+    — and a single occurrence has to keep parsing exactly as it always did, or
+    every bookmark, every facet link on an item page and every stats drill
+    changes meaning at once.
+    """
+    await _genre_shelf(db)
+
+    assert sorted(await _titles(authed_client, genre=["Crime", "Drama"])) == [
+        "Fargo",
+        "Heat",
+        "Up",
+    ]
+    assert sorted(await _titles(authed_client, genre=["Crime"])) == ["Fargo", "Heat"]
+    assert sorted(await _titles(authed_client, genre="Crime")) == ["Fargo", "Heat"]
+    # A comma is a character in a studio name, not a separator between two.
+    assert await _titles(authed_client, studio="Warner Bros., Inc.") == ["Heat"]
+
+
+async def test_all_asks_for_every_value_at_once(authed_client, db):
+    """`genre_mode=all` is AND across the included values; omitted is "any".
+
+    Offered for genre alone: a title has one studio, one certificate and one
+    network, so "all" over those could only ever return nothing.
+    """
+    await _genre_shelf(db)
+
+    assert await _titles(authed_client, genre=["Crime", "Drama"], genre_mode="all") == [
+        "Heat"
+    ]
+    assert sorted(
+        await _titles(authed_client, genre=["Crime", "Drama"], genre_mode="any")
+    ) == ["Fargo", "Heat", "Up"]
+
+
+async def test_excluding_a_value_keeps_the_rows_that_carry_none(authed_client, db):
+    """`?studio_not=Pixar` must not also drop everything with no studio.
+
+    Written as `NOT (studio = 'Pixar')` it would: SQL's NOT over a NULL
+    comparison is NULL, and a row the WHERE cannot prove true is dropped — so
+    the films with no studio recorded, the ones most obviously not made by
+    Pixar, would vanish. Hence `facet_absent`, a single `NOT EXISTS`.
+    """
+    await _genre_shelf(db)
+
+    assert sorted(await _titles(authed_client, studio_not="Pixar")) == [
+        "Fargo",
+        "Heat",
+        # Carries no studio at all, and is still not a Pixar film.
+        "Nosferatu",
+    ]
+    assert sorted(await _titles(authed_client, genre_not=["Crime", "Horror"])) == ["Up"]
+    # Include and exclude compose: Crime, but not the funny one.
+    assert await _titles(authed_client, genre=["Crime"], genre_not=["Comedy"]) == ["Heat"]
+
+
+async def test_exclusion_reaches_an_episode_through_its_show(authed_client, db):
+    """`facet_absent` mirrors `facet_source`.
+
+    The episodes of a Crime series are Crime, so excluding Crime has to exclude
+    them too — otherwise the two halves of one filter disagree about what an
+    episode's genre is.
+    """
+    await _crime_series(db)
+    db.add(
+        MediaItem(guid_key="tvdb:9", media_type=MediaType.EPISODE, title="Orphan")
+    )
+    await db.commit()
+
+    assert await _titles(authed_client, media_type="episode", genre_not="Crime") == [
+        "Orphan"
+    ]
+
+
+async def test_several_values_do_not_fan_the_count_out(authed_client, db):
+    """A row matching two of the values is still one row, and one in the total.
+
+    A join would produce a row per match, `count_stmt` would count them all,
+    and the pager would offer pages that render empty.
+    """
+    show, episode = await _crime_series(db)
+
+    response = await authed_client.get(
+        "/api/media",
+        params={"media_type": "episode", "genre": ["Crime", "Drama"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+    assert [card["title"] for card in response.json()["items"]] == [episode.title]
+
+    response = await authed_client.get(
+        "/api/media", params={"media_type": "show", "genre": ["Crime", "Drama"]}
+    )
+    assert response.json()["total"] == 1
+    assert [card["title"] for card in response.json()["items"]] == [show.title]
+
+
+async def test_an_empty_repeated_value_is_not_a_filter(authed_client, db):
+    """`?genre=&genre=Crime` is what a hand-edited URL leaves behind.
+
+    Matched literally, the empty half asks for rows whose genre is the empty
+    string — a narrower grid nobody asked for.
+    """
+    await _genre_shelf(db)
+
+    assert sorted(await _titles(authed_client, genre=["", "Crime"])) == ["Fargo", "Heat"]
+    assert len(await _titles(authed_client, genre=[""])) == 4
+    # And the wildcards still have to be escaped, on every value.
+    assert await _titles(authed_client, genre=["%", "_"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Credits
+# ---------------------------------------------------------------------------
+
+
+async def _billed(db, item: MediaItem, name: str, kind: CreditKind, tmdb_id: int) -> None:
+    person = Person(tmdb_id=tmdb_id, name=name)
+    db.add(person)
+    await db.flush()
+    db.add(MediaCredit(media_item_id=item.id, person_id=person.id, kind=kind))
+
+
+async def test_actor_matches_by_name_and_returns_each_title_once(authed_client, db):
+    """`actor=` mirrors `director=`: a correlated EXISTS through the credits.
+
+    A join would return one row per credit, so a title carrying forty cast rows
+    would come back forty times and be counted forty times.
+    """
+    heat = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Heat")
+    up = MediaItem(guid_key="tmdb:movie:2", media_type=MediaType.MOVIE, title="Up")
+    db.add_all([heat, up])
+    await db.flush()
+    await _billed(db, heat, "Al Pacino", CreditKind.CAST, 1158)
+    await _billed(db, heat, "Robert De Niro", CreditKind.CAST, 380)
+    await _billed(db, heat, "Michael Mann", CreditKind.DIRECTOR, 2489)
+    await _billed(db, up, "Ed Asner", CreditKind.CAST, 15009)
+    await db.commit()
+
+    response = await authed_client.get("/api/media", params={"actor": "Al Pacino"})
+    assert response.json()["total"] == 1
+    assert [card["title"] for card in response.json()["items"]] == ["Heat"]
+    # The kinds do not bleed into each other: a director is not in the cast.
+    assert await _titles(authed_client, actor="Michael Mann") == []
+    assert await _titles(authed_client, director="Michael Mann") == ["Heat"]
+    assert await _titles(authed_client, actor="Nobody At All") == []
+
+
+# ---------------------------------------------------------------------------
+# How wide a search reaches
+# ---------------------------------------------------------------------------
+
+
+async def _searchable(db, user: User) -> None:
+    db.add_all(
+        [
+            MediaItem(
+                guid_key="tmdb:movie:1",
+                media_type=MediaType.MOVIE,
+                title="Arrival",
+                overview="A linguist is recruited to talk to visiting heptapods.",
+            ),
+            MediaItem(
+                guid_key="tmdb:movie:2",
+                media_type=MediaType.MOVIE,
+                title="Heptapod",
+                overview="Nothing to do with anything.",
+            ),
+            MediaItem(
+                guid_key="tmdb:movie:3",
+                media_type=MediaType.MOVIE,
+                title="Solaris",
+                overview="A psychologist visits a space station.",
+            ),
+        ]
+    )
+    await db.commit()
+    solaris = (
+        await db.execute(select(MediaItem).where(MediaItem.title == "Solaris"))
+    ).scalar_one()
+    db.add(
+        UserMediaState(
+            user_id=user.id, media_item_id=solaris.id, notes="lend to heptapod fans"
+        )
+    )
+    await db.commit()
+
+
+async def test_search_stays_on_titles_unless_asked_to_widen(authed_client, db):
+    """The default matters: an ordinary search that started matching plot words
+    would answer "murder" with half the library."""
+    user = await _owner(db)
+    await _searchable(db, user)
+
+    assert await _titles(authed_client, q="heptapod") == ["Heptapod"]
+    assert sorted(await _titles(authed_client, q="heptapod", q_scope="all")) == [
+        # The title,
+        "Arrival",
+        # the overview,
+        "Heptapod",
+        # and the viewer's own note.
+        "Solaris",
+    ]
+    # A scope the URL made up is not a wider search — it is a 422, so a stale
+    # link says so rather than quietly changing what a search means.
+    response = await authed_client.get(
+        "/api/media", params={"q": "heptapod", "q_scope": "everything"}
+    )
+    assert response.status_code == 422
+
+
+async def test_another_accounts_notes_cannot_change_your_results(authed_client, db):
+    """Notes are per-user, and the widened search is the only thing that reads
+    them from a query the viewer did not write.
+
+    The clause can only ever be evaluated inside the `user_id`-scoped join —
+    which is why `q_scope=all` moves the whole `q` clause into
+    `state_conditions`. Written anywhere else it would count one account's
+    private notes into another account's total.
+    """
+    user = await _owner(db)
+    housemate = User(username="housemate", password_hash="x")
+    db.add(housemate)
+    item = MediaItem(
+        guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Stalker"
+    )
+    db.add(item)
+    await db.flush()
+    db.add(
+        UserMediaState(
+            user_id=housemate.id, media_item_id=item.id, notes="heptapod something"
+        )
+    )
+    await db.commit()
+
+    response = await authed_client.get(
+        "/api/media", params={"q": "heptapod", "q_scope": "all"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 0
+    assert response.json()["items"] == []
+
+    # And the same note found by its own owner proves the search works at all,
+    # rather than the count above being zero for some unrelated reason.
+    db.add(
+        UserMediaState(user_id=user.id, media_item_id=item.id, notes="heptapod again")
+    )
+    await db.commit()
+    assert await _titles(authed_client, q="heptapod", q_scope="all") == ["Stalker"]
+
+
+# ---------------------------------------------------------------------------
+# Where the file lives
+# ---------------------------------------------------------------------------
+
+
+async def _two_servers(db, user: User) -> tuple[PlexServer, PlexServer]:
+    """One server this account can reach, and one it cannot."""
+    mine = PlexServer(
+        machine_identifier="machine-mine",
+        name="Basement",
+        base_url="https://plex.example:32400",
+        access_token_encrypted=encrypt_secret("server-token"),
+        owner_user_id=user.id,
+    )
+    theirs = PlexServer(
+        machine_identifier="machine-theirs",
+        name="Somebody Else's",
+        base_url="https://other.example:32400",
+        access_token_encrypted=encrypt_secret("other-token"),
+    )
+    db.add_all([mine, theirs])
+    await db.flush()
+    db.add(
+        UserServerAccess(
+            user_id=user.id,
+            server_id=mine.id,
+            access_token_encrypted=encrypt_secret("user-token"),
+        )
+    )
+    db.add_all(
+        [
+            PlexLibrary(
+                server_id=mine.id, section_key="1", title="Films", section_type="movie"
+            ),
+            PlexLibrary(
+                server_id=mine.id, section_key="2", title="TV", section_type="show"
+            ),
+            PlexLibrary(
+                server_id=theirs.id,
+                section_key="1",
+                title="Their Films",
+                section_type="movie",
+            ),
+        ]
+    )
+    await db.commit()
+    return mine, theirs
+
+
+async def test_library_and_server_filters_read_the_mapping(authed_client, db):
+    """Both are correlated EXISTS through `PlexMapping`, so a title held twice
+    is still one row and one in the total."""
+    user = await _owner(db)
+    mine, theirs = await _two_servers(db, user)
+    films = (
+        await db.execute(select(PlexLibrary).where(PlexLibrary.title == "Films"))
+    ).scalar_one()
+    shows = (
+        await db.execute(select(PlexLibrary).where(PlexLibrary.title == "TV"))
+    ).scalar_one()
+
+    held = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Held")
+    elsewhere = MediaItem(
+        guid_key="tmdb:movie:2", media_type=MediaType.MOVIE, title="Elsewhere"
+    )
+    db.add_all([held, elsewhere])
+    await db.flush()
+    db.add_all(
+        [
+            # Two mappings for one item in one library: an EXISTS rather than a
+            # join, so it must come back once and count once.
+            PlexMapping(
+                media_item_id=held.id,
+                server_id=mine.id,
+                library_id=films.id,
+                rating_key="1",
+            ),
+            PlexMapping(
+                media_item_id=held.id,
+                server_id=mine.id,
+                library_id=films.id,
+                rating_key="2",
+            ),
+            PlexMapping(
+                media_item_id=elsewhere.id,
+                server_id=theirs.id,
+                library_id=None,
+                rating_key="9",
+            ),
+        ]
+    )
+    await db.commit()
+
+    response = await authed_client.get(
+        "/api/media", params={"library_id": [films.id, shows.id]}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+    assert [card["title"] for card in response.json()["items"]] == ["Held"]
+
+    assert await _titles(authed_client, library_id=shows.id) == []
+    assert await _titles(authed_client, server_id=mine.id) == ["Held"]
+    assert await _titles(authed_client, server_id=theirs.id) == ["Elsewhere"]
+    assert sorted(await _titles(authed_client, server_id=[mine.id, theirs.id])) == [
+        "Elsewhere",
+        "Held",
+    ]
+    # A library id that is not a number is not a narrower grid — it is a 422.
+    response = await authed_client.get("/api/media", params={"library_id": "basement"})
+    assert response.status_code == 422
+
+
+async def test_the_picker_lists_only_what_this_account_can_see(authed_client, db):
+    """Scoped through `UserServerAccess`, like the sync engine's `servers_for`.
+
+    A picker listing every row in `plex_servers` would disclose the names of
+    servers and libraries this account has no relationship with — the same
+    "fail closed on scope" rule the webhook and the PIN poll follow.
+    """
+    user = await _owner(db)
+    await _two_servers(db, user)
+
+    response = await authed_client.get("/api/media/places")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert [server["name"] for server in payload["servers"]] == ["Basement"]
+    assert [library["title"] for library in payload["libraries"]] == ["Films", "TV"]
+    # Each library says whose it is: "Films" is what half the libraries in a
+    # two-server household are called.
+    assert {library["server_name"] for library in payload["libraries"]} == {"Basement"}
+
+
+async def test_the_picker_is_a_route_not_an_item_id(authed_client):
+    """`/api/media/places` is declared above `/api/media/{item_id}`.
+
+    Declared after it, FastAPI would parse "places" as an item id and answer
+    422 — which is why `/genres` and `/content-ratings` sit where they do.
+    """
+    response = await authed_client.get("/api/media/places")
+    assert response.status_code == 200
+    assert response.json() == {"servers": [], "libraries": []}
