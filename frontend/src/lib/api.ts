@@ -11,6 +11,7 @@ import type {
   Paginated,
   PlexAuthPoll,
   PlexAuthStart,
+  Seasonality,
   Server,
   Stats,
   StatsGranularity,
@@ -184,6 +185,18 @@ export interface StatsQuery extends Query {
   tz?: string
 }
 
+/**
+ * `/api/stats/seasonality` — all of history, so there is no window to name.
+ *
+ * The scope and the zone still apply, and they are the only two things that
+ * can change the answer, which is why this is a separate query key from the
+ * windowed one rather than a flag on it.
+ */
+export interface SeasonalityQuery extends Query {
+  anime_only?: boolean
+  tz?: string
+}
+
 export const api = {
   auth: {
     status: () => get<AuthStatus>('/api/auth/status'),
@@ -277,6 +290,16 @@ export const api = {
      * call would only make it spell out a default.
      */
     query: (params: StatsQuery) => get<Stats>('/api/stats', { ...params }),
+    /**
+     * The month-of-year profile over all history.
+     *
+     * A second request rather than a block on the first: it walks every play
+     * the user has ever recorded, and the stats page should not pay for that
+     * every time a filter chip moves. It therefore also gets its own loading,
+     * error and empty states on the page.
+     */
+    seasonality: (params: SeasonalityQuery = {}) =>
+      get<Seasonality>('/api/stats/seasonality', { ...params }),
     summary: () =>
       get<{
         library_movies: number

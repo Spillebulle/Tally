@@ -36,6 +36,42 @@
  * one could land on a grid guaranteed not to contain the thing that was
  * clicked — an anime genre, a home video's rating. `/browse` is the mode that
  * exists for arriving with a filter already applied; see `Browse.tsx`.
+ *
+ * ---
+ *
+ * ## What is deliberately *not* drillable
+ *
+ * A mark only gets a link when the destination can express what the mark
+ * means. Where it cannot, the honest answer is no link at all: a drill that
+ * lands on a wider set than the one clicked is a silent lie, and the user has
+ * no way to tell — they see a page of results and believe it is the subset.
+ *
+ * **Weekday, hour, and the punch-card cells.** These are *recurring* buckets:
+ * "Saturdays", "21:00", "Saturdays at 21:00" — hundreds of disjoint hours
+ * scattered across the window, not a contiguous stretch of it. `/history`
+ * takes `since`/`until`, a single window, so nothing it reads can say this. The
+ * nearest expressible link is the whole window, which contains every other
+ * weekday and hour too, so it would answer a different question with a
+ * plausible-looking page.
+ *
+ * What it would take, precisely: a repeating-bucket predicate on
+ * `GET /api/history` — say `weekday=5` and `hour=21`, resolved in the caller's
+ * timezone the way `routers/stats.py` already resolves its buckets (local
+ * `astimezone(tz)`, never a fixed offset in SQL) — plus the matching filter on
+ * `MediaFilters`/`browse-filters.ts` so History can show and clear it. Until
+ * both halves exist, these marks stay read-only.
+ *
+ * **The seasonality months profile**, for the same reason: "every January
+ * there has ever been" is the same recurring shape. Its *cells* are a different
+ * matter — a specific January of a specific year is a contiguous window, and
+ * those do drill.
+ *
+ * **A decade drill is expressible** now that `min_year`/`max_year` exist on the
+ * browse filters — but nothing on `GET /api/stats` is decade-shaped today
+ * (`SeasonalityOut.years` counts the years you *watched* in, not the years
+ * titles were released), so there is nothing here to hang it on. `browseLink`
+ * already takes the pair, so a release-decade series can drill the day one
+ * arrives.
  */
 
 /** What `/browse` opens on. A value equal to one of these is left out. */
@@ -87,6 +123,14 @@ export interface BrowseDrill {
   min_rating?: number
   max_rating?: number
   year?: number
+  /**
+   * A release-year range — the pair behind the "Decade" control.
+   *
+   * `year` pins one; these two name a span, so `min_year: 1990, max_year: 1999`
+   * is the 1990s. Both go through `MediaItem.year` on the API.
+   */
+  min_year?: number
+  max_year?: number
   favorites?: boolean
   on_plex?: boolean | 'all'
   personal?: 'all' | 'exclude' | 'only'
@@ -130,6 +174,19 @@ export function historyLink(drill: HistoryDrill): string {
     },
     HISTORY_DEFAULTS,
   )
+}
+
+// --- one title ------------------------------------------------------------
+
+/**
+ * A mark that *is* one item goes to that item, not to a filtered view of it.
+ *
+ * The third destination, and the only one that needs no parameters: a row of
+ * the most-rewatched ranking names a single title, and a grid or a log filtered
+ * down to it would be a worse version of the page that already exists for it.
+ */
+export function itemLink(mediaItemId: number): string {
+  return `/item/${mediaItemId}`
 }
 
 // --- local time, spelled out ----------------------------------------------
@@ -201,4 +258,29 @@ export function bucketWindow(label: string): { since: Date; until: Date } {
     since: startOfDay(new Date(year, month - 1, 1)),
     until: endOfDay(new Date(year, month, 0)),
   }
+}
+
+/**
+ * One calendar year, as a local window.
+ *
+ * Built from the year number rather than from a `YYYY` label through
+ * `bucketWindow`, which reads a two-part label and would take a bare `2024` as
+ * a year with no month at all. 31 December is spelled out rather than reached
+ * with `new Date(year + 1, 0, 0)` — same answer, and this one says what it is.
+ */
+export function yearWindow(year: number): { since: Date; until: Date } {
+  return {
+    since: startOfDay(new Date(year, 0, 1)),
+    until: endOfDay(new Date(year, 11, 31)),
+  }
+}
+
+/**
+ * One month of one year, as a local window.
+ *
+ * `month` is 1-12, matching `TimeBucket.index` for a month, so a caller never
+ * has to remember which end of the API uses a zero-based month.
+ */
+export function monthWindow(year: number, month: number): { since: Date; until: Date } {
+  return bucketWindow(`${year}-${String(month).padStart(2, '0')}`)
 }
