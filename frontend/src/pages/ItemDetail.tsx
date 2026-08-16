@@ -7,6 +7,7 @@ import type { Credit, MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
 import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/lib/utils'
 import { certificateLabel } from '@/lib/certificates'
 import { Artwork, PosterRail } from '@/components/Poster'
+import { RatingBadge } from '@/components/RatingBadge'
 import {
   BookmarkIcon,
   CheckIcon,
@@ -227,6 +228,7 @@ export function ItemDetail() {
       // Written the way the board writes it; the *link* still carries the raw
       // value, which is the only thing `?content_rating=` matches.
       value: certificateLabel(item.content_rating),
+      mark: item.content_rating,
       to: facetLink('content_rating', item.content_rating),
     },
     ...directors.map((person, index) => ({
@@ -598,21 +600,31 @@ export function ItemDetail() {
                       className="flex justify-between gap-4"
                     >
                       <dt className="text-muted">{fact.term}</dt>
-                      <dd className="truncate text-right capitalize text-ink">
+                      <dd className="flex min-w-0 items-center justify-end gap-2 text-right capitalize text-ink">
+                        {fact.mark && (
+                          <RatingBadge
+                            raw={fact.mark}
+                            label={fact.value}
+                            // The label is printed next to it, so an
+                            // unrecognised certificate draws nothing here
+                            // rather than boxing the same word twice.
+                            fallback="none"
+                          />
+                        )}
                         {fact.to ? (
                           // Underlined at rest, not on hover: touch has no
                           // hover, so a hover-only cue leaves half the users
                           // with no way of knowing this row goes anywhere.
                           <Link
                             to={fact.to}
-                            className="underline decoration-muted decoration-dotted
+                            className="truncate underline decoration-muted decoration-dotted
                                        underline-offset-4 hover:text-accent
                                        hover:decoration-accent"
                           >
                             {fact.value}
                           </Link>
                         ) : (
-                          fact.value
+                          <span className="truncate">{fact.value}</span>
                         )}
                       </dd>
                     </div>
@@ -689,6 +701,15 @@ interface Fact {
   term: string
   value: string
   to?: string
+  /**
+   * A raw certificate to draw the board's mark for, beside the value.
+   *
+   * The raw string rather than the label, because which mark stands for a
+   * certificate is decided by the board that issued it, and only the raw value
+   * names that. `value` stays the text — the mark is recognised at a glance
+   * but not always read at 20px, and the row has room for both.
+   */
+  mark?: string
 }
 
 /**
