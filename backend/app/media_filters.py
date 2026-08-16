@@ -41,6 +41,20 @@ WatchlistSortField = Literal[
 ]
 
 
+def like_escape(value: str) -> str:
+    r"""Escape the three characters LIKE gives a meaning to.
+
+    `%` and `_` are wildcards and `\` is the escape character itself, so a
+    value carrying any of them matches more rows than it names. No real genre
+    does — but every free-text filter added here inherits this pattern, and a
+    `studio` or `q` containing `%` silently widening the grid is the kind of
+    bug nobody reports because it looks like the data.
+
+    Callers must pass ``escape="\\"`` to `ilike` for this to take effect.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def unwatched_condition():
     """"Never played by this user", for a query that LEFT JOINs `UserMediaState`.
 
@@ -142,18 +156,22 @@ class MediaFilters:
             conditions.append(MediaItem.is_personal_media.is_(False))
 
         if self.q:
-            pattern = f"%{self.q.strip()}%"
+            pattern = f"%{like_escape(self.q.strip())}%"
             conditions.append(
                 or_(
-                    MediaItem.title.ilike(pattern),
-                    MediaItem.original_title.ilike(pattern),
-                    MediaItem.sort_title.ilike(pattern),
+                    MediaItem.title.ilike(pattern, escape="\\"),
+                    MediaItem.original_title.ilike(pattern, escape="\\"),
+                    MediaItem.sort_title.ilike(pattern, escape="\\"),
                 )
             )
         if self.genre:
             # genres is a JSON array; a LIKE on its text form is the portable
             # filter for SQLite and is fast enough at self-hosted library sizes.
-            conditions.append(cast(MediaItem.genres, String).ilike(f'%"{self.genre}"%'))
+            conditions.append(
+                cast(MediaItem.genres, String).ilike(
+                    f'%"{like_escape(self.genre)}"%', escape="\\"
+                )
+            )
         if self.year:
             conditions.append(MediaItem.year == self.year)
         if self.content_rating:
@@ -240,17 +258,26 @@ def apply_filters(
         stmt = stmt.where(clause)
         count_stmt = count_stmt.where(clause)
 
+    # `watched` and `rating` read from the joined state row, and
+    # `needs_state_join` returns True for exactly those two sorts — so the join
+    # is always there when they are selected. There used to be an `else`
+    # fallback on each (community rating, created_at) which read like a working
+    # feature and could never run; worse, it promised the wrong thing, since a
+    # user who sorts by "your rating" did not ask for the crowd's.
     columns = {
         "title": func.coalesce(MediaItem.sort_title, MediaItem.title),
         "year": MediaItem.year,
         "added": MediaItem.created_at,
         "release": MediaItem.first_aired,
-        "watched": UserMediaState.last_watched_at if needs_state else MediaItem.created_at,
-        "rating": UserMediaState.rating if needs_state else MediaItem.community_rating,
+        "watched": UserMediaState.last_watched_at,
+        "rating": UserMediaState.rating,
         **(sort_columns or {}),
     }
     column = columns[sort]
-    return (
-        stmt.order_by(column.desc().nulls_last() if order == "desc" else column.asc()),
-        count_stmt,
-    )
+    # `nulls_last()` in *both* directions. SQLite sorts NULL first ascending, so
+    # `?sort=year&order=asc` used to open on every year-less row — and a thin
+    # history row legitimately has no year, no first_aired and no rating, so
+    # this was the top of the page on real data. A row that cannot answer the
+    # question belongs at the end of the answer either way.
+    ordered = column.desc().nulls_last() if order == "desc" else column.asc().nulls_last()
+    return stmt.order_by(ordered), count_stmt
