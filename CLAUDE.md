@@ -257,6 +257,45 @@ plain `DateTime` column reintroduces the whole bug class — always use
 It also coerces a bare `date` to midnight UTC on bind, so a sloppy
 `column >= some_date` filter does not explode. Prefer passing real datetimes.
 
+### A day belongs to the viewer, not to the database
+
+Storage is UTC and stays UTC. But *which day a play happened on* is a question
+about the person watching, and it has no answer until you know their zone. Get
+that wrong and the error is invisible: every number is plausible, just filed
+under the wrong date.
+
+It was wrong in both directions at once. `stats.py` compared `date.today()` —
+the **container's** local date — against `watched_at.date()`, which is **UTC**;
+the two agree only when the container runs `TZ=UTC`, and drift by a day
+otherwise. Meanwhile the frontend already parsed `activity_by_day` labels as
+*local* days via `parseLocalDateLabel`, so the two halves of the app disagreed
+about what a label meant. A 23:30 play in Oslo landed on tomorrow.
+
+The rule now:
+
+* **The zone is resolved, never assumed** — `?tz=` → `User.preferences["timezone"]`
+  → UTC, through `timezones.resolve()`. The response reports the zone it
+  actually used, so a fallback is visible rather than silent.
+* **Filter in UTC, bucket in local.** Range bounds are built as local midnight
+  and converted to UTC, so `WHERE watched_at >= :since` still uses
+  `ix_watch_events_user_time`. Day, month, weekday, hour and streak buckets are
+  assigned in Python from `watched_at.astimezone(tz)`.
+* **Never bucket with a fixed offset in SQL.** `strftime('%H', watched_at,
+  '+120 minutes')` is wrong for half the year, and SQLite cannot do IANA
+  conversion at all. Python is also cheap here — the endpoint already walks
+  every row in the window.
+* **A zone name is untrusted input.** `ZoneInfo` resolves keys against the
+  filesystem, so `timezones.resolve()` length- and shape-checks the name before
+  `ZoneInfo` ever sees it. Setting the preference rejects an unloadable zone
+  with a 422 rather than storing something that quietly means UTC.
+* **`tzdata` is a real dependency, not belt-and-braces.** `zoneinfo` reads the
+  *system* tz database and `python:3.12-slim` need not carry one; without the
+  package every zone silently becomes UTC, which is indistinguishable from the
+  user simply not having set one.
+
+Half-open windows, `[since, until)`, so two adjacent ranges cannot both claim
+the same play.
+
 ### Two-way sync needs a `plex_*` mirror per field
 
 The conflict model works because each syncable field stores **both** the local
