@@ -34,10 +34,24 @@ export function Browse({ mode }: BrowseProps) {
   const queryClient = useQueryClient()
   const { notify } = useToast()
 
-  const filters = useBrowseFilters(
-    SORTS,
-    mode === 'search' || mode === 'browse' ? 'title' : 'added',
-  )
+  /**
+   * A home video is not a film, a show or an anime, so the three grids that
+   * name a category leave it out — the same call the backend makes about
+   * seasons and episodes. Search and the all-titles grid promise everything and
+   * have to keep the promise: it is where a misread one is found, and the only
+   * thing stopping a wrong guess from hiding a film for good.
+   *
+   * A page *default*, not a fixed clause: the filter bar can still override it,
+   * and like every other default it never reaches the URL until it is changed.
+   */
+  const personalDefault: PersonalFilter =
+    mode === 'search' || mode === 'browse' ? 'all' : 'exclude'
+
+  const filters = useBrowseFilters({
+    sorts: SORTS,
+    defaultSort: mode === 'search' || mode === 'browse' ? 'title' : 'added',
+    defaults: { personal: personalDefault },
+  })
   // Checked, not cast: `?kind=` reaches the API as `media_type`, which is a
   // literal there, so a mistyped one would answer 422 rather than "all".
   const requestedKind = params.get('kind')
@@ -57,16 +71,6 @@ export function Browse({ mode }: BrowseProps) {
     return 'exclude'
   }, [mode])
 
-  /**
-   * A home video is not a film, a show or an anime, so the three grids that
-   * name a category leave it out — the same call the backend makes about
-   * seasons and episodes. Search and the all-titles grid promise everything and
-   * have to keep the promise: it is where a misread one is found, and the only
-   * thing stopping a wrong guess from hiding a film for good.
-   */
-  const personalFilter: PersonalFilter =
-    mode === 'search' || mode === 'browse' ? 'all' : 'exclude'
-
   const mediaType = useMemo(() => {
     if (mode === 'movies') return 'movie'
     if (mode === 'shows') return 'show'
@@ -78,7 +82,6 @@ export function Browse({ mode }: BrowseProps) {
     ...filters.query,
     media_type: mediaType,
     anime: animeFilter,
-    personal: personalFilter,
     offset: page * PAGE_SIZE,
     limit: PAGE_SIZE,
   }
@@ -109,19 +112,17 @@ export function Browse({ mode }: BrowseProps) {
     onError: (error: Error) => notify(error.message, 'error'),
   })
 
-  const search = filters.search
+  const { q: search, genre, rating, director, studio, content_rating } = filters.values
 
   const rated =
-    filters.minRating != null && filters.minRating === filters.maxRating
-      ? `Rated ${filters.minRating}/10`
-      : null
+    rating.min != null && rating.min === rating.max ? `Rated ${rating.min}/10` : null
 
   // A facet clicked on an item page is the reason this view exists, so it names
   // the page — the same courtesy the genre and rating arrivals already get.
   const facetTitle =
-    (filters.facets.director && `Directed by ${filters.facets.director}`) ||
-    filters.facets.studio ||
-    (filters.facets.content_rating && `Rated ${filters.facets.content_rating}`) ||
+    (director && `Directed by ${director}`) ||
+    studio ||
+    (content_rating && `Rated ${content_rating}`) ||
     null
 
   const titles: Record<BrowseMode, string> = {
@@ -131,7 +132,7 @@ export function Browse({ mode }: BrowseProps) {
     search: search ? `Results for “${search}”` : 'Search',
     // Name what was clicked, so arriving here from the stats page explains
     // itself rather than showing an unexplained subset of the library.
-    browse: facetTitle ?? rated ?? (filters.genre ? filters.genre : 'All titles'),
+    browse: facetTitle ?? rated ?? (genre ? genre : 'All titles'),
   }
 
   const total = data?.total ?? 0
@@ -145,7 +146,7 @@ export function Browse({ mode }: BrowseProps) {
           isLoading
             ? 'Loading…'
             : `${compactNumber(total)} ${total === 1 ? 'title' : 'titles'}${
-                filters.genre ? ` in ${filters.genre}` : ''
+                genre ? ` in ${genre}` : ''
               }`
         }
         actions={

@@ -35,7 +35,11 @@ export function Watchlist() {
   // "Recently watchlisted" is the one people mean on this page, so it leads.
   // Oldest first: a watchlist is a queue, and the thing you added first is the
   // one you have been meaning to watch longest.
-  const filters = useBrowseFilters(WATCHLIST_SORTS, 'watchlist_added', 'asc')
+  const filters = useBrowseFilters({
+    sorts: WATCHLIST_SORTS,
+    defaultSort: 'watchlist_added',
+    defaultOrder: 'asc',
+  })
   // Checked, not cast — an unknown kind would reach the API as a `media_type`
   // it does not accept, and answer 422 instead of showing the watchlist.
   const requestedKind = params.get('kind')
@@ -104,7 +108,9 @@ export function Watchlist() {
   const total = data?.total ?? 0
   const pageCount = Math.ceil(total / PAGE_SIZE)
   const syncedCount = entries.filter((entry) => entry.synced_with_plex).length
-  const narrowed = filters.active || kind !== 'all' || Boolean(filters.search)
+  // `kind` is this page's own parameter rather than one of the shared filters,
+  // so it is the one thing `filters.active` cannot know about.
+  const narrowed = filters.active || kind !== 'all' || Boolean(filters.values.q)
 
   return (
     <div>
@@ -114,7 +120,7 @@ export function Watchlist() {
           isLoading
             ? 'Loading…'
             : `${total} ${total === 1 ? 'title' : 'titles'}${
-                filters.genre ? ` in ${filters.genre}` : ''
+                filters.values.genre ? ` in ${filters.values.genre}` : ''
               } · ${syncedCount} of ${entries.length} shown in sync with Plex`
         }
         actions={
