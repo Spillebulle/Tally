@@ -19,9 +19,19 @@ from fastapi import Query
 from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.sql import Select
 
-from .models import MediaItem, MediaType, PlexMapping, UserMediaState, WatchStatus
+from .models import (
+    CreditKind,
+    MediaCredit,
+    MediaItem,
+    MediaType,
+    Person,
+    PlexMapping,
+    UserMediaState,
+    WatchStatus,
+)
 
 AnimeFilter = Literal["all", "only", "exclude"]
+PersonalFilter = Literal["all", "only", "exclude"]
 SortOrder = Literal["asc", "desc"]
 
 # Sorts every browse page understands. The watchlist adds one of its own.
@@ -29,6 +39,17 @@ SortField = Literal["title", "year", "added", "watched", "rating", "release"]
 WatchlistSortField = Literal[
     "watchlist_added", "title", "year", "added", "watched", "rating", "release"
 ]
+
+
+def unwatched_condition():
+    """"Never played by this user", for a query that LEFT JOINs `UserMediaState`.
+
+    A row with no state at all has never been touched, so the null case is part
+    of the answer and not an oversight. Shared so that anything else offering
+    "unwatched" — the recommendations shelf, for one — cannot quietly disagree
+    with the browse filter about what the word means.
+    """
+    return or_(UserMediaState.id.is_(None), UserMediaState.view_count == 0)
 
 
 class MediaFilters:
@@ -39,9 +60,25 @@ class MediaFilters:
         q: str | None = None,
         media_type: MediaType | None = None,
         anime: AnimeFilter = "all",
+        # Home videos are off by default. A phone recording played once through
+        # Plex is not a title in the sense these pages mean, and it is the same
+        # judgement `default_types` already makes about seasons and episodes:
+        # kept out of the flat list, not deleted, and one parameter away.
+        # `exclude` rather than a hidden hard-coded clause precisely so a
+        # misclassified film is recoverable without a database change.
+        personal: PersonalFilter = "exclude",
         watch_status: WatchStatus | None = None,
         genre: str | None = None,
         year: int | None = None,
+        # The three facets a detail page links out on. Each is an exact match
+        # on the value that page displayed, so the chip and the filter bar
+        # describe the same set of rows.
+        content_rating: str | None = None,
+        studio: str | None = None,
+        # By name, not by person id, so the URL says who — matching how `genre`
+        # and `studio` read. Two directors sharing a name would widen the grid
+        # slightly; an opaque id in every link is the worse trade.
+        director: str | None = None,
         unwatched: bool = False,
         favorites: bool = False,
         on_plex: bool | None = None,
@@ -53,9 +90,13 @@ class MediaFilters:
         self.q = q
         self.media_type = media_type
         self.anime = anime
+        self.personal = personal
         self.watch_status = watch_status
         self.genre = genre
         self.year = year
+        self.content_rating = content_rating
+        self.studio = studio
+        self.director = director
         self.unwatched = unwatched
         self.favorites = favorites
         self.on_plex = on_plex
@@ -95,6 +136,11 @@ class MediaFilters:
         elif self.anime == "exclude":
             conditions.append(MediaItem.is_anime.is_(False))
 
+        if self.personal == "only":
+            conditions.append(MediaItem.is_personal_media.is_(True))
+        elif self.personal == "exclude":
+            conditions.append(MediaItem.is_personal_media.is_(False))
+
         if self.q:
             pattern = f"%{self.q.strip()}%"
             conditions.append(
@@ -110,6 +156,24 @@ class MediaFilters:
             conditions.append(cast(MediaItem.genres, String).ilike(f'%"{self.genre}"%'))
         if self.year:
             conditions.append(MediaItem.year == self.year)
+        if self.content_rating:
+            conditions.append(MediaItem.content_rating == self.content_rating)
+        if self.studio:
+            conditions.append(MediaItem.studio == self.studio)
+        if self.director:
+            # A correlated EXISTS rather than a join, for the same reason
+            # `on_plex` uses one: a title with two directors must not come back
+            # twice — and it would, on the pair of rows a join produces.
+            directed = (
+                select(MediaCredit.id)
+                .join(Person, Person.id == MediaCredit.person_id)
+                .where(
+                    MediaCredit.media_item_id == MediaItem.id,
+                    MediaCredit.kind == CreditKind.DIRECTOR,
+                    Person.name == self.director,
+                )
+            )
+            conditions.append(directed.exists())
         return conditions
 
     def state_conditions(self) -> list:
@@ -118,9 +182,7 @@ class MediaFilters:
         if self.watch_status is not None:
             conditions.append(UserMediaState.status == self.watch_status)
         if self.unwatched:
-            conditions.append(
-                or_(UserMediaState.id.is_(None), UserMediaState.view_count == 0)
-            )
+            conditions.append(unwatched_condition())
         if self.favorites:
             conditions.append(UserMediaState.is_favorite.is_(True))
         if self.min_rating is not None:

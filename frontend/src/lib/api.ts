@@ -6,6 +6,7 @@ import type {
   HistoryPage,
   Library,
   MediaCard,
+  MediaCredits,
   MediaDetail,
   Paginated,
   PlexAuthPoll,
@@ -110,8 +111,14 @@ export interface MediaQuery extends Query {
   q?: string
   media_type?: string
   anime?: string
+  /** Defaults to `exclude` on the server: home videos are not titles. */
+  personal?: string
   watch_status?: string
   genre?: string
+  /** The facets a detail page links out on, each an exact match. */
+  content_rating?: string
+  studio?: string
+  director?: string
   year?: number
   unwatched?: boolean
   favorites?: boolean
@@ -144,9 +151,15 @@ export const api = {
   media: {
     list: (query: MediaQuery) => get<Paginated<MediaCard>>('/api/media', query),
     genres: (anime?: string) => get<string[]>('/api/media/genres', { anime }),
+    contentRatings: (anime?: string) =>
+      get<string[]>('/api/media/content-ratings', { anime }),
     detail: (id: number) => get<MediaDetail>(`/api/media/${id}`),
+    credits: (id: number) => get<MediaCredits>(`/api/media/${id}/credits`),
     children: (id: number, season?: number) =>
       get<MediaCard[]>(`/api/media/${id}/children`, { season }),
+    // Unwatched titles sharing the most genres, best-rated first within a tier.
+    recommendations: (id: number, limit = 12) =>
+      get<MediaCard[]>(`/api/media/${id}/recommendations`, { limit }),
     continueWatching: () =>
       get<ContinueWatchingItem[]>('/api/media/continue-watching'),
     recentlyWatched: (limit = 20) =>

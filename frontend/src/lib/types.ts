@@ -8,6 +8,8 @@ export type WatchStatus =
   | 'dropped'
 
 export type AnimeFilter = 'all' | 'only' | 'exclude'
+/** Home videos: kept out of the grids by default, never deleted. */
+export type PersonalFilter = 'all' | 'only' | 'exclude'
 
 export interface User {
   id: number
@@ -31,6 +33,8 @@ export interface MediaCard {
   year: number | null
   poster_url: string | null
   is_anime: boolean
+  /** A home video, recognised from the name the camera gave the file. */
+  is_personal_media: boolean
   season_number: number | null
   episode_number: number | null
   show_id: number | null
@@ -89,6 +93,21 @@ export interface MediaDetail
   leaf_count: number | null
   state: UserState | null
   available_on_plex: boolean
+}
+
+/** One credited person on a title (`CreditOut` in schemas.py). */
+export interface Credit {
+  person_id: number
+  name: string
+  /** Who they played. Null for a director. */
+  character: string | null
+  /** A TMDB URL — credential-free, so the browser fetches it directly. */
+  profile_url: string | null
+}
+
+export interface MediaCredits {
+  cast: Credit[]
+  directors: Credit[]
 }
 
 export interface Paginated<T> {

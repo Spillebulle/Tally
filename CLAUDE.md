@@ -32,6 +32,7 @@ backend/app/
     ├── plex_tv.py     plex.tv cloud: OAuth PINs, resources, Discover watchlist
     ├── plex_server.py one Plex Media Server: libraries, history, sessions, writes
     ├── guids.py       Plex GUID → external ids; also the anime agent signal
+    ├── titles.py      "is this the same title?" — one rule, providers + merge
     ├── media_repo.py  Plex metadata → canonical MediaItem rows
     ├── sync_service.py the two-way engine
     ├── webhooks.py    Plex Pass webhook ingestion
@@ -131,6 +132,89 @@ where the refusals are the more important half. And like the recovered year, the
 cleaned title goes **onto `item.title` only, never into `build_guid_key`**: the
 history import re-upserts the same entry on every overlapping sync, so a cleaned
 title in the key would mint a fresh duplicate on each one.
+
+**And some of those filenames hide no title at all.** `2020-03-31 19.42.27` is
+a phone recording played once through Plex; so is `IMG_4821`. It arrives typed
+`movie`, so nothing downstream could tell it from a film nobody can identify —
+and that is a row Tally retries *forever*, spending a TMDB call a week on a
+question with no answer and taking a slot from the bounded
+`METADATA_BACKFILL_BATCH` while it does. `looks_like_capture_filename`, in the
+same module, recognises a camera's own naming scheme — a full date **with a
+time on it**, or a known device prefix followed by a serial — and
+`MediaItem.is_personal_media` records the verdict, which is what lets the
+backfill's SQL drop the row rather than load it. `enrich_existing` is the only
+thing that marks a row already stored; there is deliberately no startup repair,
+because the backfill already reaches exactly these rows and one turn through it
+is the entire cost.
+
+The verdict is **re-evaluated on every import, never latched**: if Plex matches
+the file later and hands back a real title, the row is a film again — otherwise
+one misread would hide a film permanently. The gate is the mirror of the
+release-name parser's: a bare date is a plausible film title, and `9-1-1`,
+`Space 1999` and `Apollo 13` are titles, so the refusals are the tested half
+again.
+
+### A search result must name the thing that was searched for
+
+Everything above is about not minting a row from a payload that cannot name
+itself. The other half is what happens *next*: for a row that has no external
+id, whatever the metadata providers answer with **becomes** its identity, and a
+wrong answer there is worse than no answer at all.
+
+TMDB and TVDB search are fuzzy and always reply. Ask for a title they do not
+have and you get the most popular thing that shares a word, and `results[0]`
+was taken on faith. Four wrong ids on a live instance, every one a *prefix*:
+
+    "Anti-Social" → "Anti-Social Limited"   (a Canadian documentary)
+    "Men"         → "Men in Black"
+    "Society"     → "Dead Poets Society"
+    "Thelma"      → "Thelma & Louise"
+
+So `services/titles.py` holds one definition of "same title" — exact once
+accents, case and punctuation are stripped, and **a prefix does not count** —
+and both halves of the rule use it: the providers refuse a search hit that does
+not match, and `merge_duplicates` refuses to fuse rows that do not.
+`mal._titles_match` stays forgiving on purpose; a MAL hit only scores the anime
+classifier, and `mal_id` merges nothing.
+
+Three things make a wrong id worse than none, and they are why this is not
+merely cosmetic:
+
+* **It is permanent.** `backfill_missing_metadata` selects rows with *no* id at
+  all, so attaching a wrong one removes the row from the only pass that would
+  ever look again.
+* **It poisons a merge group.** `merge_duplicates` pairs on the id, so the ghost
+  can no longer collapse into the real row — and, before the group was
+  partitioned by title, it also blocked pairs it had no business joining.
+* **It is silent.** No id shows as a blank tile somebody eventually notices.
+
+Only the *search* path is checked. A known id, or an id cross-referenced through
+`/find`, is exact — the caller already knew which record it wanted — and Plex
+titles legitimately differ from TMDB's ("Marvel's Daredevil"), so checking there
+would throw away good matches for no safety.
+
+The year gets the same suspicion. `search()` retries without it whenever the
+year-filtered page held nothing that *names* the title, not merely when it came
+back empty. A thin row's year can come from a release-name tag rather than from
+the film, and TMDB's `year=` is a hard filter: it does not empty the page, it
+removes the right film and leaves a wrong one behind. That is the whole
+mechanism of the "Anti-Social" match.
+
+**The rule has a cost, and it partly reverses release-name recovery.** A
+recovered filename that misspells the film by one character is now refused:
+item 52633 is the standing example, `Mars.Needs.Mom` against *Mars Needs Moms*,
+and it went from tmdb 50321 with a poster to no id and a blank tile. (Four of
+the five recovered rows still heal; that one does not.) Accepted anyway, the
+same looseness admits "Alien" against "Aliens" and "The Jungle Book 2" against
+"The Jungle Book 3" — the identical silent error, on films the library really
+holds. A missing poster is visible; a wrong id is not. Refusals log at **INFO**
+for exactly this reason: `docker logs tally | grep -i refus` is the only thing
+that explains a blank tile.
+
+Such a row then stays in `backfill_missing_metadata` forever, *because* no id
+was attached — one search a week, indefinitely. That unbounded retry is the
+intended shape, not an oversight: it is also the only way the row heals if TMDB
+later gains the alternative title.
 
 ### Every timestamp column must be `UtcDateTime`
 
@@ -276,11 +360,44 @@ dependency, so declaring it gives an endpoint the whole parameter set), and the
 UI in `components/BrowseFilters.tsx`. Add a filter to those and both pages get
 it; add it to one router and the pages silently disagree.
 
+One filter is off by default: `personal="exclude"` keeps home videos out, the
+same judgement `default_types` already makes about seasons and episodes. It is
+a *parameter* rather than a hard-coded clause on purpose — a misclassified film
+has to be recoverable without touching the database — and `Browse.tsx` sends
+`all` for search and the all-titles grid, which promise everything and are
+where a wrong guess is found. A row is never deleted for this; the watch event
+is real history.
+
 Each page still owns its own `sort`/`order`, because the valid sorts and the
 sensible default differ — the watchlist has `watchlist_added` (when *you*
 watchlisted it, `WatchlistEntry.added_at`) and opens on it, which is a different
 date from `added` (when it reached your library, `MediaItem.created_at`). Keep
 them distinct; collapsing them loses the only ordering that page actually wants.
+
+**The whole browse query lives in the URL** — filters, sort, order and the page
+number — because that is the only place a navigation cannot lose it. The page
+number was component state once, so returning from a title landed on page one
+of an unfiltered grid. `useBrowseFilters` owns all of it; `usePageParam` and
+`Pagination` are shared by the grids, the watchlist *and* History, so `?page=`
+means one thing everywhere (1-based as written, 0-based as used).
+
+Three rules keep it honest, and each was a bug first:
+
+* **Paging pushes, filtering replaces.** Stepping back from page three to page
+  two is what Back is for; one history entry per filter chip — or per
+  keystroke — buries whatever the user actually wants to go back to.
+* **A default never survives into the URL.** Picking the sort a page already
+  opens on says nothing, and a link spelling out every default reads as noise.
+  Changing a filter also drops `page`: narrowing renumbers the results, so
+  "page 4" of the old filter is not a place that still exists.
+* **A URL is untrusted input.** `sort`, `order`, `status`, `kind` and
+  `media_type` are all `Literal`s on the API, so one stale or mistyped word is
+  a 422 and an error card where the grid should be; the rating bounds are
+  `ge=0, le=10` with the same result. Everything read from the query string is
+  checked against what the API accepts and falls back to the page default. A
+  page number past the end is clamped once the real total arrives — never
+  before it, or the first render would throw the page away a moment ahead of
+  its own results.
 
 `media_filters.py` must **not** get `from __future__ import annotations` —
 FastAPI resolves `MediaFilters.__init__`'s annotations at import time to build
@@ -493,7 +610,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 142 tests
+cd backend && .venv/bin/python -m pytest -q
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```

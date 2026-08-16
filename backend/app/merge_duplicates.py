@@ -31,8 +31,6 @@ It runs unattended on startup, so it is deliberately timid:
 from __future__ import annotations
 
 import logging
-import re
-import unicodedata
 from collections import defaultdict
 
 from sqlalchemy import func, select, update
@@ -45,6 +43,7 @@ from .models import (
     WatchEvent,
     WatchlistEntry,
 )
+from .services.titles import normalise_title
 
 log = logging.getLogger(__name__)
 
@@ -84,9 +83,9 @@ async def _duplicate_groups(db: AsyncSession) -> list[list[int]]:
 
     tvdb earns its place because shows are frequently tvdb-keyed: a show whose
     duplicate pair carries no tmdb or imdb id was previously never collapsed,
-    even though `tvdb_id` is already in `_FILLABLE`. The `_titles_agree` guard
-    applies to every pass equally, so a wrong id alone still cannot fuse two
-    unrelated rows.
+    even though `tvdb_id` is already in `_FILLABLE`. The `_title_partitions`
+    guard applies to every pass equally, so a wrong id alone still cannot fuse
+    two unrelated rows.
     """
     groups: list[list[int]] = []
     claimed: set[int] = set()
@@ -105,19 +104,6 @@ async def _duplicate_groups(db: AsyncSession) -> list[list[int]]:
                 claimed.update(members)
                 groups.append(members)
     return groups
-
-
-def _normalised_title(value: str) -> str:
-    """Case, accents and punctuation removed — "Wall·E" and "wall-e" agree.
-
-    Deliberately not `slugify`, which keeps separators because it is building a
-    stable key. Here the question is only "is this the same title spelled
-    differently", and Plex and TMDB differ on punctuation constantly.
-    """
-    ascii_only = (
-        unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode()
-    )
-    return re.sub(r"[^a-z0-9]+", "", ascii_only.lower())
 
 
 def _title_partitions(items: list[MediaItem]) -> list[list[MediaItem]]:
@@ -147,7 +133,7 @@ def _title_partitions(items: list[MediaItem]) -> list[list[MediaItem]]:
     """
     buckets: dict[str, list[MediaItem]] = defaultdict(list)
     for item in sorted(items, key=lambda item: item.id):
-        buckets[_normalised_title(item.title or "")].append(item)
+        buckets[normalise_title(item.title)].append(item)
     return list(buckets.values())
 
 

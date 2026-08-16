@@ -106,6 +106,7 @@ class MediaItemOut(ORMModel):
     imdb_id: str | None
     mal_id: int | None
     is_anime: bool
+    is_personal_media: bool = False
     anime_format: str | None
     season_number: int | None
     episode_number: int | None
@@ -143,6 +144,7 @@ class MediaCard(ORMModel):
     year: int | None
     poster_url: str | None
     is_anime: bool
+    is_personal_media: bool = False
     season_number: int | None = None
     episode_number: int | None = None
     show_id: int | None = None
@@ -154,6 +156,23 @@ class MediaCard(ORMModel):
     watched_episodes: int | None = None
     total_episodes: int | None = None
     on_watchlist: bool = False
+
+
+class CreditOut(BaseModel):
+    """One credited person on one title."""
+
+    person_id: int
+    name: str
+    # Who they played. Null for a director.
+    character: str | None = None
+    # A TMDB URL, which needs no credentials — so unlike Plex artwork this is a
+    # real URL the browser fetches itself rather than a proxied path.
+    profile_url: str | None = None
+
+
+class MediaCreditsOut(BaseModel):
+    cast: list[CreditOut] = []
+    directors: list[CreditOut] = []
 
 
 class PaginatedMedia(BaseModel):
