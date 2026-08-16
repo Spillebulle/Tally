@@ -65,6 +65,76 @@ class PlexSession:
     session_key: str | None
 
 
+# ---------------------------------------------------------------------------
+# What "device" and "player" mean
+# ---------------------------------------------------------------------------
+#
+# `WatchEvent.device` and `WatchEvent.player` are written by three paths that
+# each see a different shape of Plex payload — the history import, the webhook,
+# and (indirectly) the session poller — and they used to disagree about which
+# column held what. The history import wrote `device=str(entry["deviceID"])`, a
+# server-local integer, and never set `player` at all; the webhook wrote
+# `device=Player.product` and `player=Player.title`, i.e. the opposite way round
+# from `PlexSession`. Group by either column and the axis mixed "12345" with
+# "Plex for Apple TV" with "Living Room TV".
+#
+# One meaning each, and both writers obey it:
+#
+#   device -> the *thing in the room*. The client's own name: "Living Room TV",
+#             "Sam's iPhone", "SHIELD Android TV".
+#   player -> the *app* it was played through: "Plex for Apple TV", "Plex Web".
+#             Falls back to the platform ("Roku", "iOS") when Plex only names
+#             that, which is all `/devices` offers.
+#
+# Neither column ever holds a numeric id again. A `deviceID` is a foreign key
+# into one server's device table, meaningless to a reader and impossible to
+# group with anything, so when it cannot be resolved to a name the column stays
+# NULL — see `SyncService._device_directory`.
+#
+# Both are cosmetic. Nothing keys, dedupes or filters on them, so every path
+# here degrades to None rather than failing.
+
+# `WatchEvent.device` / `.player` are String(255).
+_NAME_MAX = 255
+
+
+def _name(value: Any) -> str | None:
+    """A display name out of a Plex payload, or nothing."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:_NAME_MAX] if text else None
+
+
+def player_identity(block: Any) -> tuple[str | None, str | None]:
+    """`(device, player)` out of a Plex `Player` block, per the rule above.
+
+    Sessions carry `device`, `title`, `product` and `platform`; a webhook's
+    `Player` carries only `title` (and `uuid`), which is why `title` is the
+    device fallback rather than the player one — it names the client, not the
+    app. Reading it as the app is exactly the swap this function exists to stop.
+
+    Takes `Any` rather than a dict because one of its callers is the webhook,
+    where the whole payload is attacker-supplied and a `"Player": []` would
+    otherwise be an `AttributeError` — i.e. a 5xx, which is the one answer that
+    makes Plex retry and then disable the webhook.
+    """
+    if not isinstance(block, dict):
+        return None, None
+    device = _name(block.get("device")) or _name(block.get("title"))
+    player = _name(block.get("product")) or _name(block.get("platform"))
+    return device, player
+
+
+@dataclass(slots=True)
+class PlexDevice:
+    """One row of the server's own device list (`/devices`)."""
+
+    id: str
+    name: str | None
+    platform: str | None
+
+
 def _ts(value: Any) -> datetime | None:
     """Plex hands out unix seconds; normalise to aware UTC datetimes."""
     if value in (None, "", 0):
@@ -271,8 +341,16 @@ class PlexServerClient:
             f"No reachable connection for Plex server (tried {len(urls)}): {last_error}"
         )
 
-    async def _get_json(self, path: str, params: dict | None = None) -> dict[str, Any]:
-        resp = await self._request("GET", path, params=params)
+    async def _get_json(
+        self,
+        path: str,
+        params: dict | None = None,
+        *,
+        record_failures: bool = True,
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "GET", path, params=params, record_failures=record_failures
+        )
         if resp is None:
             return {}
         try:
@@ -280,8 +358,15 @@ class PlexServerClient:
         except ValueError:
             return {}
 
-    async def _container(self, path: str, params: dict | None = None) -> dict[str, Any]:
-        return (await self._get_json(path, params)).get("MediaContainer", {}) or {}
+    async def _container(
+        self,
+        path: str,
+        params: dict | None = None,
+        *,
+        record_failures: bool = True,
+    ) -> dict[str, Any]:
+        payload = await self._get_json(path, params, record_failures=record_failures)
+        return payload.get("MediaContainer", {}) or {}
 
     # -- basics -----------------------------------------------------------
 
@@ -298,6 +383,38 @@ class PlexServerClient:
     async def accounts(self) -> list[dict[str, Any]]:
         """Server-side account list. Maps plex.tv users to server accountIDs."""
         return (await self._container("/accounts")).get("Account", []) or []
+
+    async def devices(self) -> list[PlexDevice]:
+        """The server's own device table — what a history row's `deviceID` names.
+
+        A history row identifies the client as a bare integer and nothing else,
+        so this is the only way to turn 12345 into "Living Room TV". One call
+        answers for the whole history; callers must fetch it **once per run**
+        and cache it (see `SyncService._device_directory`), never once per row —
+        a history import is hundreds of requests in seconds already, and the
+        incident recorded in CLAUDE.md is what happens when that number grows.
+
+        Best-effort, in both directions. `record_failures=False` keeps a device
+        list Plex will not serve — this may well be owner-only, and a non-owner
+        token gets a 403 with an HTML body that `_get_json` turns into `{}` —
+        from tripping the unreachable-server backoff and taking the sync with
+        it. An empty list therefore means "could not ask" as much as "no
+        devices", and both answers are handled the same way: no name, no harm.
+        """
+        container = await self._container("/devices", record_failures=False)
+        out: list[PlexDevice] = []
+        for entry in container.get("Device", []) or []:
+            device_id = entry.get("id")
+            if device_id is None:
+                continue
+            out.append(
+                PlexDevice(
+                    id=str(device_id),
+                    name=_name(entry.get("name")),
+                    platform=_name(entry.get("platform")),
+                )
+            )
+        return out
 
     async def preferences(self) -> dict[str, Any]:
         """Server settings, keyed by their Plex id.
@@ -458,6 +575,9 @@ class PlexServerClient:
             user = (meta.get("User") or {})
             player = (meta.get("Player") or {})
             account_id = user.get("id")
+            # One rule for both columns, shared with the history import and the
+            # webhook — see `player_identity`.
+            device_name, player_name = player_identity(player)
             out.append(
                 PlexSession(
                     rating_key=str(meta.get("ratingKey")),
@@ -466,8 +586,8 @@ class PlexServerClient:
                     state=player.get("state", "unknown"),
                     view_offset_ms=int(meta.get("viewOffset") or 0),
                     duration_ms=int(meta.get("duration") or 0),
-                    player=player.get("product") or player.get("platform"),
-                    device=player.get("device") or player.get("title"),
+                    player=player_name,
+                    device=device_name,
                     session_key=str(meta.get("sessionKey")) if meta.get("sessionKey") else None,
                 )
             )

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -61,6 +61,7 @@ from .plex_server import (
     PlexServerClient,
     PlexServerError,
     _ts,
+    player_identity,
 )
 from .plex_tv import PlexAuthError, PlexTVClient, PlexTVError
 
@@ -139,11 +140,36 @@ def _duration_ms(value: Any) -> int | None:
         return None
 
 
+def _watch_context(
+    entry: dict[str, Any], devices: dict[str, tuple[str | None, str | None]]
+) -> tuple[str | None, str | None]:
+    """`(device, player)` for a history row, per the rule in `plex_server`.
+
+    A history row usually names the client only as `deviceID`, a server-local
+    integer — so the server's own device table is the only thing that can turn
+    it into words. Some rows do carry a `Player` block; that is Plex answering
+    the question directly, so it is preferred over the lookup.
+
+    What it never does is fall back to the id itself. `device` holds names, and
+    a column holding names *and* integers is one a chart cannot group.
+    """
+    device, player = player_identity(entry.get("Player") or entry.get("Device"))
+    device_id = entry.get("deviceID")
+    if device_id is not None:
+        named_device, named_player = devices.get(str(device_id), (None, None))
+        device = device or named_device
+        player = player or named_player
+    return device, player
+
+
 class SyncService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.plex_tv = PlexTVClient()
         self._clients: dict[tuple[int, int], PlexServerClient] = {}
+        # The server's device table, per (user, server), fetched at most once
+        # per SyncService — which is once per sync run. See `_device_directory`.
+        self._devices: dict[tuple[int, int], dict[str, tuple[str | None, str | None]]] = {}
         # Set for the duration of full_sync so the steps below can report where
         # they are and notice a cancel request. None when a step is called on
         # its own, e.g. the session poller.
@@ -596,11 +622,15 @@ class SyncService:
         started = utcnow()
         imported = 0
 
+        # One fetch for the whole run, before the loop rather than inside it.
+        devices = await self._device_directory(user, server, client)
+        await self._rename_stored_device_ids(user, server, devices)
+
         try:
             async for page in client.iter_history(account_id=account_id, since=since):
                 for entry in page:
                     if await self._ingest_history_entry(
-                        user, server, entry, repo, client
+                        user, server, entry, repo, client, devices=devices
                     ):
                         imported += 1
                 await self.db.commit()
@@ -614,6 +644,120 @@ class SyncService:
         await self.db.commit()
         stats.history_events += imported
 
+    async def _device_directory(
+        self, user: User, server: PlexServer, client: PlexServerClient
+    ) -> dict[str, tuple[str | None, str | None]]:
+        """`deviceID` -> (device name, player name), fetched once per run.
+
+        A history row names its client as a bare integer, so every row would
+        otherwise need its own lookup — hundreds of requests in seconds on top
+        of the hundreds the import already makes, which is precisely the burst
+        that took DNS resolution down for the whole container once already.
+        One call answers for every row, and the answer is cached on the service
+        instance, which lives exactly as long as the run.
+
+        The failure is cached too. An empty directory is the common answer for
+        a shared-library user — `/devices` may be owner-only — and re-asking a
+        server that just said no, once per history row, is the same burst by
+        another name.
+        """
+        cache_key = (user.id, server.id)
+        if cache_key in self._devices:
+            return self._devices[cache_key]
+
+        directory: dict[str, tuple[str | None, str | None]] = {}
+        try:
+            for device in await client.devices():
+                directory[device.id] = (device.name, device.platform)
+        except Exception as exc:
+            # Deliberately everything. A device name is cosmetic — it decorates
+            # a play that is recorded correctly without it — and no cosmetic
+            # lookup may be able to fail a history import. `devices()` already
+            # declines to record a transport failure against the backoff, so
+            # this catches the rest: a malformed body, an unexpected shape, a
+            # client that has no such call.
+            log.debug("Could not read the device list from %s: %s", server.name, exc)
+
+        self._devices[cache_key] = directory
+        return directory
+
+    async def _rename_stored_device_ids(
+        self,
+        user: User,
+        server: PlexServer,
+        devices: dict[str, tuple[str | None, str | None]],
+    ) -> None:
+        """Turn the numeric `device` values already stored into names.
+
+        Every play imported before this change holds `str(deviceID)` in
+        `device` — a server-local integer sitting in the same column as
+        "Living Room TV", which is what made a "where do you watch" chart
+        unreadable. There is no migration for it: the history sync reads
+        incrementally and never revisits a 2019 play, so nothing would rewrite
+        those rows. This does, on the one path that already holds both the
+        device table and the user's own token, at no extra network cost.
+
+        Two guards keep it honest:
+
+        * It runs **only** when the server actually answered with devices. An
+          empty directory means "could not ask" as much as "no devices", and
+          clearing names on the strength of a question that was never answered
+          would destroy what a later owner-token run could have recovered.
+        * An id the server no longer lists is cleared rather than kept. It is a
+          foreign key into a table that has dropped it: no reader can resolve
+          it, and left in place it goes on polluting the axis forever. The play
+          itself — its time, item, duration and library — is untouched.
+
+        It terminates: after one pass no numeric `device` remains for this
+        (user, server), so later runs do one scan that finds nothing.
+        """
+        if not devices:
+            return
+
+        stored = await self.db.execute(
+            select(WatchEvent.device)
+            .where(
+                WatchEvent.user_id == user.id,
+                WatchEvent.server_id == server.id,
+                WatchEvent.device.is_not(None),
+            )
+            .distinct()
+        )
+        numeric = [value for value in stored.scalars() if value and value.isdigit()]
+        if not numeric:
+            return
+
+        renamed = 0
+        cleared = 0
+        for device_id in numeric:
+            name, platform = devices.get(device_id, (None, None))
+            await self.db.execute(
+                update(WatchEvent)
+                .where(
+                    WatchEvent.user_id == user.id,
+                    WatchEvent.server_id == server.id,
+                    WatchEvent.device == device_id,
+                )
+                .values(
+                    device=name,
+                    # Never overwrite a player a webhook already named; these
+                    # rows have none, but adoption means some might.
+                    player=func.coalesce(WatchEvent.player, platform),
+                )
+            )
+            if name:
+                renamed += 1
+            else:
+                cleared += 1
+        await self.db.commit()
+        log.info(
+            "Normalised stored device ids on %s: %d resolved to a name, %d "
+            "cleared as unresolvable",
+            server.name,
+            renamed,
+            cleared,
+        )
+
     async def _ingest_history_entry(
         self,
         user: User,
@@ -621,6 +765,8 @@ class SyncService:
         entry: dict[str, Any],
         repo: MediaRepository,
         client: PlexServerClient,
+        *,
+        devices: dict[str, tuple[str | None, str | None]] | None = None,
     ) -> bool:
         viewed_at = _ts(entry.get("viewedAt"))
         if viewed_at is None:
@@ -717,6 +863,7 @@ class SyncService:
         library_id = (
             await repo.library_id_for(server.id, rating_key) if rating_key else None
         )
+        device, player = _watch_context(entry, devices or {})
 
         if (event := adopted.scalar_one_or_none()) is not None:
             event.dedupe_key = dedupe_key
@@ -727,6 +874,14 @@ class SyncService:
             # A webhook names no library, so adopting its row is the only chance
             # that play has to gain one.
             event.library_id = event.library_id or library_id
+            # Both writers speak the same vocabulary now, so an adopted row must
+            # not end up holding whichever one happened to touch it last. The
+            # history import's names come from the server's own device table and
+            # are the better answer where it has one; the webhook's stand where
+            # it does not, which is every row on a server that will not serve
+            # `/devices`.
+            event.device = device or event.device
+            event.player = player or event.player
             await self.db.flush()
             return False
 
@@ -741,7 +896,11 @@ class SyncService:
                 duration_ms=_duration_ms(entry.get("duration")),
                 server_id=server.id,
                 library_id=library_id,
-                device=entry.get("deviceID") and str(entry.get("deviceID")) or None,
+                # Names, never the id — see `_watch_context`. `device` used to
+                # hold `str(deviceID)`, which is why the two writers could not
+                # be grouped together.
+                device=device,
+                player=player,
             )
         )
         await self.db.flush()
