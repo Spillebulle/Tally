@@ -1,7 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Norwegian age limit 15">
-  <title>Norwegian age limit 15</title>
-  <rect x=".8" y=".8" width="98.4" height="98.4" rx="6.5" fill="#fff" stroke="#EB5C24" stroke-width="1.6"/>
-  <rect x="19.2" y="19.2" width="61.6" height="61.6" rx="1" fill="none" stroke="#EB5C24" stroke-width="8.6"/>
-  <text x="50" y="50" text-anchor="middle" dominant-baseline="central" fill="#000"
-        font-family="Helvetica,Arial,'Liberation Sans',sans-serif" font-weight="700" font-size="40" textLength="37" lengthAdjust="spacingAndGlyphs">15</text>
+<?xml version="1.0"?>
+<svg viewBox="0 0 62 62" width="62" height="62" xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg">
+ <g class="layer">
+  <title>Layer 1</title>
+  <path d="m4.69,0.76c-0.16,0 -3.92,0.06 -3.92,3.92l0,52.97c0,0.16 0.06,3.92 3.92,3.92l52.96,0c0.16,0 3.93,-0.06 3.93,-3.92l0,-52.97c0,-0.16 -0.06,-3.92 -3.93,-3.92l-52.96,0zm52.96,61.57l-52.96,0c-4.63,0 -4.69,-4.64 -4.69,-4.68l0,-52.97c0,-4.63 4.64,-4.68 4.69,-4.68l52.96,0c4.64,0 4.69,4.64 4.69,4.68l0,52.97c0,4.63 -4.64,4.68 -4.69,4.68" fill="#f26531" id="svg_1"/>
+  <path d="m11.88,11.87l0,38.59l38.59,0l0,-38.59l-38.59,0z" fill="#fff" id="svg_2"/>
+  <path d="m14.43,47.91l33.49,0l0,-33.49l-33.49,0l0,33.49zm38.58,5.1l-43.68,0l0,-43.69l43.68,0l0,43.69z" fill="#f26531" id="svg_3"/>
+  <path d="m26.62,40.46l0,-18.55c-1.89,0.05 -5.32,0.16 -7.2,0.21l0,2.73l3.71,0l0,15.61l3.49,0zm15.44,-5.82c0,-3.53 -2.44,-5.52 -6.24,-5.52c-0.55,0 -1.02,0 -1.65,0.02l0,-4.37l7.02,0l0,-2.83l-10.37,0l0,10.16c2.2,-0.21 3.38,-0.21 4.61,-0.21c1.94,0 3.14,0.87 3.14,3.04c0,1.68 -1.33,2.78 -3.4,2.78c-1.6,0 -2.7,-0.11 -4.17,-0.47l-0.84,2.85c1.1,0.37 2.62,0.63 5.01,0.63c3.96,0 6.89,-2.15 6.89,-6.08" id="svg_4"/>
+ </g>
 </svg>

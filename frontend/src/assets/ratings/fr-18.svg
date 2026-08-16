@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   id="svg15"
+   version="1.1"
+   xml:space="preserve"
+   enable-background="new 0 0 269.292 269.292"
+   overflow="visible"
+   viewBox="0 0 269.292 269.292"
+   height="269.292"
+   width="269.292"><metadata
+   id="metadata21"><rdf:RDF><cc:Work
+       rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type
+         rdf:resource="http://purl.org/dc/dcmitype/StillImage" /><dc:title></dc:title></cc:Work></rdf:RDF></metadata><defs
+   id="defs19" />
+
+		<g
+   id="Calque_1">
+			<rect
+   id="rect2"
+   height="269.292"
+   width="269.292" /> 
+			<circle
+   id="circle4"
+   r="113.386"
+   cy="134.646"
+   cx="134.646"
+   fill="#FFFFFF" /> 
+			<g
+   id="g12">
+				<path
+   id="path6"
+   d="M65.034,131.454v23.94h-45v-23.94H65.034z" />
+				<path
+   id="path8"
+   d="M112.012,67.193v135.72h-26.1V90.593h-12.96v-23.4H112.012z" />
+				<path
+   id="path10"
+   d="M152.151,129.474c-12.24-4.14-18.54-15.84-18.54-28.62c0-19.98,13.32-35.82,34.02-35.82      c20.521,0,33.84,15.84,33.84,35.82c0,12.78-6.119,24.3-18.539,28.8v0.18c16.92,5.4,23.58,18.9,23.58,36      c0,22.32-16.201,39.24-38.881,39.24s-39.06-16.92-39.06-39.24c0-17.46,6.66-30.42,23.58-36V129.474z M156.111,162.414      c0,7.02,1.98,19.26,11.34,19.26c9.18,0,11.52-12.6,11.52-19.26s-2.879-19.62-11.699-19.62      C158.091,142.793,156.111,155.394,156.111,162.414z M167.091,115.793c8.279,0,8.279-10.26,8.279-15.3      c0-4.86-0.9-14.4-8.279-14.4c-6.48,0-7.381,9.36-7.381,14.22C159.71,105.533,160.431,115.793,167.091,115.793z" />
+			</g>
+		</g>
+	</svg>

@@ -13,25 +13,25 @@
  *
  * ## Where the marks come from
  *
- * `assets/ratings/*.svg`, with `assets/ratings/PROVENANCE.md` recording the
- * source and licence of every file. All but one board's are vendored from
- * Wikimedia Commons and are **public domain** — the symbols are simple
- * geometry and text, which is not copyrightable. The exception is Norway,
- * rebuilt from Medietilsynet's own classification guidelines; see below.
+ * `assets/ratings/*.svg`, vendored from Wikimedia Commons, with
+ * `assets/ratings/PROVENANCE.md` recording the source and licence of every
+ * file. All are **public domain** — the symbols are simple geometry and text,
+ * which is not copyrightable.
  *
  * The symbols are nonetheless **trademarks** of their boards. They are used
  * here to state the certificate a title actually carries, which is what they
  * exist to do.
  *
- * Eleven boards have their real marks: BBFC (UK), MPA (US film), US TV
+ * Seventeen boards have their real marks: BBFC (UK), MPA (US film), US TV
  * Parental Guidelines, FSK (Germany), Kijkwijzer (Netherlands), Medietilsynet
- * (Norway), ACB (Australia), DJCTQ (Brazil), Eirin (Japan), Mibact (Italy) and
- * OFLC (New Zealand).
+ * (Norway), ACB (Australia), DJCTQ (Brazil), Eirin (Japan), Mibact (Italy),
+ * OFLC (New Zealand), CSA/Arcom (France), IFCO (Ireland), KAVI (Finland),
+ * Medierådet (Denmark), ICAA (Spain) and KMRB (South Korea).
  *
  * ## Everything else gets a plain age disc
  *
- * A board with no free mark — France, Ireland, Sweden, Denmark, Finland, Spain
- * — gets a neutral disc on one shared ramp, with the country kept beside it.
+ * A board with no free mark — Sweden is the one that matters in practice —
+ * gets a neutral disc on one shared ramp, with the country kept beside it.
  * That is Tally showing an age rating, *not* a claim to be reproducing that
  * board's mark. Adding a board is one asset plus one table entry.
  *
@@ -149,11 +149,80 @@ const EIRIN: Marks = {
   'R-18+': ['eirin-r18', 'Eirin R18+'],
 }
 
-/** Mibact (Italy). `T` — tutti, all ages — has no mark and falls through. */
+/** Mibact (Italy). */
 const MIBACT: Marks = {
+  T: ['it-t', 'T — tutti, all ages'],
   VM6: ['it-vm6', 'VM6 — vietato ai minori di 6 anni'],
+  VM10: ['it-vm10', 'VM10 — vietato ai minori di 10 anni'],
   VM14: ['it-vm14', 'VM14 — vietato ai minori di 14 anni'],
   VM18: ['it-vm18', 'VM18 — vietato ai minori di 18 anni'],
+}
+
+/**
+ * CSA / Arcom (France). The signage introduced in 2002, which is what the
+ * country uses; `Tous publics` is a phrase rather than a symbol and has none.
+ */
+const CSA: Marks = {
+  '10': ['fr-10', 'Déconseillé aux moins de 10 ans'],
+  '-10': ['fr-10', 'Déconseillé aux moins de 10 ans'],
+  '12': ['fr-12', 'Déconseillé aux moins de 12 ans'],
+  '-12': ['fr-12', 'Déconseillé aux moins de 12 ans'],
+  '16': ['fr-16', 'Déconseillé aux moins de 16 ans'],
+  '-16': ['fr-16', 'Déconseillé aux moins de 16 ans'],
+  '18': ['fr-18', 'Interdit aux moins de 18 ans'],
+  '-18': ['fr-18', 'Interdit aux moins de 18 ans'],
+}
+
+/** IFCO (Ireland), cinema marks. */
+const IFCO: Marks = {
+  G: ['ifco-g', 'IFCO G — General'],
+  PG: ['ifco-pg', 'IFCO PG — Parental Guidance'],
+  '12A': ['ifco-12a', 'IFCO 12A'],
+  '15A': ['ifco-15a', 'IFCO 15A'],
+  '16': ['ifco-16', 'IFCO 16'],
+  '18': ['ifco-18', 'IFCO 18'],
+}
+
+/** KAVI (Finland). `K-7` and `7` are the same rating, spelled two ways. */
+const KAVI: Marks = {
+  S: ['fi-s', 'S — sallittu, all ages'],
+  T: ['fi-s', 'T — tillåten, all ages'],
+  '7': ['fi-7', 'K-7 — ikäraja 7'],
+  'K-7': ['fi-7', 'K-7 — ikäraja 7'],
+  '12': ['fi-12', 'K-12 — ikäraja 12'],
+  'K-12': ['fi-12', 'K-12 — ikäraja 12'],
+  '16': ['fi-16', 'K-16 — ikäraja 16'],
+  'K-16': ['fi-16', 'K-16 — ikäraja 16'],
+  '18': ['fi-18', 'K-18 — ikäraja 18'],
+  'K-18': ['fi-18', 'K-18 — ikäraja 18'],
+}
+
+/** Medierådet (Denmark), 2021 marks. */
+const MEDIERAADET: Marks = {
+  A: ['dk-a', 'Tilladt for alle'],
+  F: ['dk-a', 'Tilladt for alle'],
+  '7': ['dk-7', 'Tilladt for alle, men frarådes børn under 7 år'],
+  '11': ['dk-11', 'Tilladt for børn over 11 år'],
+  '15': ['dk-15', 'Tilladt for børn over 15 år'],
+}
+
+/** ICAA (Spain). */
+const ICAA: Marks = {
+  A: ['icaa-a', 'ICAA A — apta para todos los públicos'],
+  APTA: ['icaa-a', 'ICAA A — apta para todos los públicos'],
+  '7': ['icaa-7', 'ICAA 7 — no recomendada para menores de 7 años'],
+  '12': ['icaa-12', 'ICAA 12 — no recomendada para menores de 12 años'],
+  '16': ['icaa-16', 'ICAA 16 — no recomendada para menores de 16 años'],
+  '18': ['icaa-18', 'ICAA 18 — no recomendada para menores de 18 años'],
+  X: ['icaa-x', 'ICAA X — película X'],
+}
+
+/** KMRB (South Korea), 2021 marks. */
+const KMRB: Marks = {
+  ALL: ['kmrb-all', 'KMRB All — all ages'],
+  '12': ['kmrb-12', 'KMRB 12'],
+  '15': ['kmrb-15', 'KMRB 15'],
+  '19': ['kmrb-19', 'KMRB 19'],
 }
 
 /** OFLC (New Zealand), 2022 labels. */
@@ -184,6 +253,12 @@ const BY_REGION: Record<string, Marks> = {
   JP: EIRIN,
   IT: MIBACT,
   NZ: OFLC,
+  FR: CSA,
+  IE: IFCO,
+  FI: KAVI,
+  DK: MEDIERAADET,
+  ES: ICAA,
+  KR: KMRB,
 }
 
 /** The shared ramp: green through red as the age rises. Not any board's palette. */
@@ -196,8 +271,15 @@ function ageColour(age: number): { fill: string; ink: string } {
   return { fill: '#C62828', ink: '#FFFFFF' }
 }
 
-/** "All ages", as the boards variously spell it. */
-const ALL_AGES = new Set(['A', 'AL', 'T', 'TOUS', 'L'])
+/**
+ * "All ages", as the boards variously spell it.
+ *
+ * Only reached for a board with no mark of its own — Sweden's `Btl`
+ * (barntillåten) is the live example. Without this the word falls through to
+ * bare text and sits next to `SE 7` and `SE 11`, which do get a disc, so the
+ * one rating meaning "anyone may watch" is the only one drawn as nothing.
+ */
+const ALL_AGES = new Set(['A', 'AL', 'T', 'TOUS', 'TOUS-PUBLICS', 'TP', 'L', 'S', 'U', 'BTL', 'ALL'])
 
 function fromTable(table: Marks, key: string): RatingMark | null {
   const hit = table[key]
