@@ -5,6 +5,7 @@ import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { Credit, MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
 import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/lib/utils'
+import { certificateLabel } from '@/lib/certificates'
 import { Artwork, PosterRail } from '@/components/Poster'
 import {
   BookmarkIcon,
@@ -14,6 +15,7 @@ import {
   SparkIcon,
   XIcon,
 } from '@/components/Icons'
+import { Select } from '@/components/Dropdown'
 import { ErrorState, Spinner, StarRating, StatusBadge } from '@/components/ui'
 
 const STATUS_OPTIONS: WatchStatus[] = [
@@ -222,7 +224,9 @@ export function ItemDetail() {
     },
     item.content_rating && {
       term: 'Rated',
-      value: item.content_rating,
+      // Written the way the board writes it; the *link* still carries the raw
+      // value, which is the only thing `?content_rating=` matches.
+      value: certificateLabel(item.content_rating),
       to: facetLink('content_rating', item.content_rating),
     },
     ...directors.map((person, index) => ({
@@ -419,24 +423,23 @@ export function ItemDetail() {
                 />
               </div>
               <div>
-                <label htmlFor="status" className="label mb-1.5 block">
-                  Status
-                </label>
-                <select
-                  id="status"
+                <span className="label mb-1.5 block">Status</span>
+                {/* The same dropdown the browse filters use, so a select looks
+                    and behaves the same wherever it is met. */}
+                <Select
+                  label="Status"
                   value={item.state?.status ?? ''}
-                  onChange={(event) =>
-                    setStatus.mutate((event.target.value || null) as WatchStatus | null)
+                  onChange={(next) =>
+                    setStatus.mutate((next || null) as WatchStatus | null)
                   }
-                  className="input h-9 w-auto py-0 text-sm"
-                >
-                  <option value="">Not set</option>
-                  {STATUS_OPTIONS.map((status) => (
-                    <option key={status} value={status}>
-                      {STATUS_LABELS[status]}
-                    </option>
-                  ))}
-                </select>
+                  options={[
+                    { value: '', label: 'Not set' },
+                    ...STATUS_OPTIONS.map((status) => ({
+                      value: status,
+                      label: STATUS_LABELS[status],
+                    })),
+                  ]}
+                />
               </div>
             </div>
 

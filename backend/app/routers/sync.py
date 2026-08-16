@@ -368,7 +368,16 @@ async def _reclassify_library(db: AsyncSession, library: PlexLibrary) -> None:
 
     # Back to auto: re-run the classifier per item, using what each item already
     # knows. This is metadata Tally has locally, so it costs no API calls.
-    from ..services.guids import ExternalIds
+    #
+    # "What each item knows" has to mean *all* of it. This built an `ExternalIds`
+    # by hand and passed no `metadata` at all, so the classifier scored on the
+    # Plex genre list alone — no origin country, no original language, no TMDB
+    # keywords, and no `anilist_id` to force on. Everything except a title
+    # tagged with a literal "Anime" genre therefore came back not-anime, and the
+    # verdict was written straight across the library. Setting the chip to
+    # "auto" was a way to erase anime detection, not to redo it.
+    # `stored_signals` is the single reader of those columns.
+    from ..services.media_repo import stored_signals
     from ..services.metadata.anime import classify
 
     result = await db.execute(
@@ -378,14 +387,11 @@ async def _reclassify_library(db: AsyncSession, library: PlexLibrary) -> None:
         )
     )
     for item in result.scalars():
+        ids, signals = stored_signals(item)
         verdict = classify(
             genres=item.genres or [],
-            ids=ExternalIds(
-                tmdb_id=item.tmdb_id,
-                tvdb_id=item.tvdb_id,
-                imdb_id=item.imdb_id,
-                mal_id=item.mal_id,
-            ),
+            ids=ids,
+            metadata=signals,
             library_title=library.title,
             library_override=None,
             mal_matched=item.mal_id is not None,
@@ -482,7 +488,7 @@ async def reclassify_anime(background: BackgroundTasks, admin: AdminUser) -> dic
     async def run() -> None:
         async with session_scope() as db:
             from ..models import PlexMapping
-            from ..services.guids import ExternalIds
+            from ..services.media_repo import stored_signals
             from ..services.metadata import get_metadata_service as get_service
 
             service = get_service()
@@ -508,12 +514,12 @@ async def reclassify_anime(background: BackgroundTasks, admin: AdminUser) -> dic
                 )
             )
             for item in result.scalars():
-                ids = ExternalIds(
-                    tmdb_id=item.tmdb_id,
-                    tvdb_id=item.tvdb_id,
-                    imdb_id=item.imdb_id,
-                    mal_id=item.mal_id,
-                )
+                # The row's own language, origin country and keywords go in as
+                # well as its ids. Without them this pass depended entirely on
+                # TMDB answering *again*, and wrote a verdict scored on nothing
+                # whenever it did not — an unset key, a rate limit, an open
+                # circuit breaker — over one scored on a real answer.
+                ids, signals = stored_signals(item)
                 library_title, library_override = libraries_by_item.get(
                     item.id, (None, None)
                 )
@@ -526,6 +532,7 @@ async def reclassify_anime(background: BackgroundTasks, admin: AdminUser) -> dic
                         plex_genres=item.genres or [],
                         library_title=library_title,
                         library_override=library_override,
+                        known=signals,
                     )
                 except Exception:
                     continue

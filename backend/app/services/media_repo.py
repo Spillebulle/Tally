@@ -8,6 +8,7 @@ by different agents, and also show up on the plex.tv watchlist with only a
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -17,7 +18,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from ..models import MediaItem, MediaType, PlexLibrary, PlexMapping, PlexServer, utcnow
 from .guids import ExternalIds, build_guid_key, extract_ids
-from .metadata import MetadataService, get_metadata_service
+from .metadata import MetadataResult, MetadataService, get_metadata_service
 from .metadata.anime import library_looks_like_anime
 from .plex_server import PlexServerClient
 from .release_names import looks_like_capture_filename, parse_release_name
@@ -76,6 +77,63 @@ def metadata_is_incomplete() -> ColumnElement[bool]:
         MediaItem.original_language.is_(None),
         MediaItem.origin_countries.is_(None),
         and_(MediaItem.studio.is_(None), MediaItem.network.is_(None)),
+    )
+
+
+# The two anime-forcing agents leave their mark on `guid_key` and nowhere else:
+# there is no `anidb_id` column, so a HAMA-scanned row's strongest signal is
+# unrecoverable from the ids alone. `build_guid_key` writes `anidb:show:1234`
+# for exactly these, which is the trace `stored_signals` reads back.
+_ANIME_KEY_RE = re.compile(r"^(anidb|mal):(?:movie|show):(\d+)$")
+
+
+def stored_signals(item: MediaItem) -> tuple[ExternalIds, MetadataResult]:
+    """Everything the anime classifier can be told about a row, offline.
+
+    `classify` reads five things off a `MetadataResult` — genres, origin
+    country, original language, keywords — and Tally has stored all of them on
+    the row since `_apply_enrichment` started keeping them. Nothing read them
+    back. Every offline reclassification path built an `ExternalIds` from the id
+    columns, passed `metadata=None`, and so scored on Plex's genre list alone:
+
+        Animation + Japanese origin    5   <- gone
+        Anime-ish keyword (TMDB)       3   <- gone
+        Japanese language + animated   3   <- gone
+
+    which is nearly the whole table below the two forcing signals. A library
+    switched back to *auto* was then re-scored with those absent and the result
+    written across it, so everything except the handful of titles carrying an
+    explicit "Anime" genre tag (score 6) came back not-anime — a full library
+    reduced to a couple of dozen entries by a pass whose job was to re-detect
+    them.
+
+    Cheap by construction: this is a read of columns already loaded, no provider
+    call, so it is equally usable from a startup repair and from a request.
+    """
+    ids = ExternalIds(
+        tmdb_id=item.tmdb_id,
+        tvdb_id=item.tvdb_id,
+        imdb_id=item.imdb_id,
+        mal_id=item.mal_id,
+        # Was omitted everywhere, and it is one of the four values
+        # `ExternalIds.anime_hinted` — a *forcing* signal — is made of.
+        anilist_id=item.anilist_id,
+    )
+    if (match := _ANIME_KEY_RE.match(item.guid_key or "")) is not None:
+        agent, value = match.group(1), int(match.group(2))
+        if agent == "anidb":
+            ids.anidb_id = value
+        else:
+            ids.mal_id = ids.mal_id or value
+
+    return ids, MetadataResult(
+        genres=list(item.genres or []),
+        # `[]` and NULL mean different things on the row (asked-and-nothing vs
+        # never-asked) but not to the classifier, which only ever intersects
+        # them. Both arrive here as an empty list and score nothing.
+        origin_countries=list(item.origin_countries or []),
+        original_language=item.original_language,
+        keywords=list(item.keywords or []),
     )
 
 
@@ -414,13 +472,7 @@ class MediaRepository:
         if not item.year and item.first_aired:
             item.year = item.first_aired.year
 
-        ids = ExternalIds(
-            tmdb_id=item.tmdb_id,
-            tvdb_id=item.tvdb_id,
-            imdb_id=item.imdb_id,
-            mal_id=item.mal_id,
-            anilist_id=item.anilist_id,
-        )
+        ids, _ = stored_signals(item)
         await self._apply_enrichment(
             item, ids=ids, library=None, genres=item.genres or []
         )
@@ -443,6 +495,11 @@ class MediaRepository:
                 plex_genres=genres,
                 library_title=library.title if library else None,
                 library_override=library.anime_override if library else None,
+                # What the row already holds, as a floor under the answer. A
+                # weekly artwork retry that reaches a rate-limited TMDB used to
+                # re-score the anime verdict on an empty `MetadataResult` and
+                # write it back; now the worst it can do is repeat itself.
+                known=stored_signals(item)[1],
             )
         except Exception as exc:
             log.warning("Enrichment failed for %r: %s", item.title, exc)

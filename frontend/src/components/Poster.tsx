@@ -321,7 +321,16 @@ export function PosterRail({
         <h2 className="text-lg font-semibold tracking-tight text-ink">{title}</h2>
         {action}
       </div>
-      <div className="scroll-x scrollbar-none -mx-1 flex gap-4 px-1 pb-2">
+      {/* The padding is room for the hover lift, not spacing: `scroll-x` is a
+          scroll container on *both* axes (see index.css), and a tile that
+          translates up by 4px and grows `shadow-lift` leaves the padding box
+          and is clipped. With no top padding the clip line fell exactly under
+          the heading, so a hovered card looked like it slid behind the
+          section title — a z-index would not have helped, because a clip is
+          not a stacking order. Each padding is taken straight back as a
+          negative margin, so nothing moves and the rail still starts flush
+          with the heading above it. */}
+      <div className="scroll-x scrollbar-none -mx-2 -mt-2 flex gap-4 px-2 pb-2 pt-2">
         {(loading ? Array.from({ length: 8 }) : cards).map((card, index) => (
           <div key={loading ? index : (card as MediaCard).id} className="w-[140px] shrink-0 sm:w-[160px]">
             {loading ? (

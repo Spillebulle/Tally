@@ -20,12 +20,13 @@ import {
   type AnyFilterDef,
   type BrowseFilterState,
   type DateRangeValue,
-  type FilterChoice,
   type FilterCtx,
   type FilterLists,
   type MultiValue,
 } from '@/lib/browse-filters'
 import { cn } from '@/lib/utils'
+import { CertificateBadge } from './Certificate'
+import { MultiSelect, Select } from './Dropdown'
 import { ChevronRightIcon, SearchIcon } from './Icons'
 import { Segmented } from './ui'
 
@@ -46,12 +47,17 @@ import { Segmented } from './ui'
  * answer: what the *title* is, what *you* did with it, where in your *library*
  * it sits.
  *
- * The panel *pushes the page down* rather than floating over it. There is no
- * popover primitive in this app, and the touch rules point the same way: a
- * floating layer needs outside-click dismissal, focus trapping and an escape
- * hatch, all of which are ways to get a control stuck over the content. It also
- * opens by itself when the URL arrives with one of its filters already set, so
- * a shared link explains what is narrowing the grid instead of hiding it.
+ * The panel *pushes the page down* rather than floating over it — a layer the
+ * size of a card, dropped over the grid, is a way to get a control stuck on
+ * top of the content. It also opens by itself when the URL arrives with one of
+ * its filters already set, so a shared link explains what is narrowing the grid
+ * instead of hiding it.
+ *
+ * The one thing that *does* float is a dropdown, which belongs to the control
+ * it hangs off and cannot shove the page down every time somebody glances at
+ * the genre list. That is `components/Dropdown.tsx`, and it pays what a
+ * floating layer owes — Escape, outside-click, focus-out, and unmounted rather
+ * than faded when closed.
  *
  * ## The chip row says everything, on purpose
  *
@@ -116,7 +122,15 @@ function DraftInput({
   )
 }
 
-/** A select over a filter's choices, rendered by index so any value type works. */
+/**
+ * A dropdown over a filter's choices, addressed by index.
+ *
+ * By index, because a filter's value is not always a string — a decade is
+ * `{min, max}`, a status is a word, a rating is a pair — and only the table
+ * knows how to tell two of them apart. `identity` is that comparison; the
+ * dropdown never sees a filter value at all, only the position of the one that
+ * is selected.
+ */
 function ChoiceSelect({
   def,
   value,
@@ -137,143 +151,62 @@ function ChoiceSelect({
   const selected = choices.findIndex((choice) => identity(def, choice.value, ctx) === here)
 
   return (
-    <select
-      aria-label={def.label}
-      value={selected < 0 ? 0 : selected}
-      onChange={(event) => onPick(choices[Number(event.target.value)]?.value)}
+    <Select
+      label={def.label}
+      options={choices.map((choice, index) => ({
+        value: String(index),
+        label: choice.label,
+      }))}
+      value={String(selected < 0 ? 0 : selected)}
+      onChange={(next) => onPick(choices[Number(next)]?.value)}
       className={className}
-    >
-      {choices.map((choice, index) => (
-        <option key={choice.label} value={index}>
-          {choice.label}
-        </option>
-      ))}
-    </select>
+    />
   )
 }
 
 /**
- * A chip per value, cycling off → include → exclude → off.
+ * A multi-value facet, as a searchable dropdown.
  *
- * Three states in one control, because the alternative is two controls saying
- * "include" and "exclude" over the same list of genres, and a `<select
- * multiple>` — which needs a modifier key nobody discovers, loses the whole
- * selection on a stray click, and cannot express "not this" at all.
+ * The three states and the any/all toggle are exactly what the chip row before
+ * it had — this changes the control, not the filter. What it adds is the thing
+ * a flat row could not do: a library with sixty genres, twenty certificates or
+ * a dozen libraries per server does not fit on a bar, and the row that held
+ * them scrolled sideways, which hides values behind a gesture nobody makes.
  *
- * Nothing here is carried by colour alone: an excluded value is struck through
- * and prefixed with a minus, and its accessible name says which state it is in.
- *
- * The selected values sort to the front. A library with fifty genres scrolls,
- * and a filter you cannot see is a filter you cannot remove — the chip row
- * above is the other half of that guarantee.
+ * The chip row above is untouched and is still the other half of the guarantee:
+ * every value in force is listed there with its own ×, whether or not this
+ * control is open.
  */
-function MultiChips({
+function MultiControl({
   def,
   value,
   lists,
   onChange,
-  wrap,
 }: {
   def: AnyFilterDef
   value: MultiValue
   lists: FilterLists
   onChange: (next: MultiValue) => void
-  /** Wrap in the panel; scroll sideways on the bar, like the status chips. */
-  wrap: boolean
 }) {
-  const options = def.options?.(lists) ?? []
-  const known = new Set(options.map((choice) => choice.value))
-  // A value arrived at from a link — a stats drill, a bookmark, a facet click
-  // — need not be one the library list offers. Appended rather than dropped:
-  // a control showing "any genre" over a grid filtered to one is a control
-  // that lies.
-  const arrived: Array<FilterChoice<string>> = [...value.include, ...value.exclude]
-    .filter((name) => !known.has(name))
-    .map((name) => ({ value: name, label: name }))
-
-  const rank = (choice: FilterChoice<string>) =>
-    value.include.includes(choice.value) ? 0 : value.exclude.includes(choice.value) ? 1 : 2
-  // Stable by specification, so equal ranks keep the library's own ordering.
-  const ordered = [...arrived, ...options].sort((a, b) => rank(a) - rank(b))
-
-  const cycle = (name: string): MultiValue => {
-    if (value.include.includes(name)) {
-      return {
-        ...value,
-        include: value.include.filter((entry) => entry !== name),
-        exclude: [...value.exclude, name],
-      }
-    }
-    if (value.exclude.includes(name)) {
-      return { ...value, exclude: value.exclude.filter((entry) => entry !== name) }
-    }
-    return { ...value, include: [...value.include, name] }
-  }
-
-  const andable = def.control.kind === 'multi' && def.control.andable
+  const control = def.control.kind === 'multi' ? def.control : null
   return (
-    // The toggle drops below the chips on a phone. Beside them it squeezed the
-    // scrolling row against the edge of the screen and wrapped its own two
-    // options into a stack, which read as a menu floating over the chips.
-    //
-    // Stacked, the chip row must still stretch to the full width — sized to its
-    // content it takes the whole vocabulary with it and pushes the *page*
-    // sideways, which is the one thing the sideways-scrolling row exists to
-    // prevent. Hence no `items-start` here, and `self-start` on the toggle.
-    <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
-      <div
-        className={cn(
-          'flex min-w-0 gap-2',
-          wrap ? 'flex-wrap' : 'scroll-x scrollbar-none pb-1',
-        )}
-      >
-        {ordered.map((choice) => {
-          const included = value.include.includes(choice.value)
-          const excluded = value.exclude.includes(choice.value)
-          return (
-            <button
-              key={choice.value}
-              type="button"
-              onClick={() => onChange(cycle(choice.value))}
-              aria-label={`${def.label}: ${choice.label}${
-                included ? ', included' : excluded ? ', excluded' : ''
-              }`}
-              title={
-                included
-                  ? `Exclude ${choice.label}`
-                  : excluded
-                    ? `Stop excluding ${choice.label}`
-                    : `Include ${choice.label}`
-              }
-              className={cn(
-                'chip shrink-0',
-                included && 'chip-active',
-                excluded && 'border-danger/50 bg-danger/10 text-danger line-through',
-              )}
-            >
-              {excluded && <span aria-hidden="true">−</span>}
-              {choice.label}
-            </button>
-          )
-        })}
-      </div>
-      {/* Only where AND can change the answer: a title has several genres, but
-          one studio and one certificate, so "all" over those is the empty set
-          by construction — and with a single value selected it says nothing. */}
-      {andable && value.include.length > 1 && (
-        <div className="self-start sm:self-auto">
-          <Segmented
-            label={`Match ${def.label.toLowerCase()}`}
-            value={value.all ? 'all' : 'any'}
-            onChange={(next) => onChange({ ...value, all: next === 'all' })}
-            options={[
-              { value: 'any', label: 'Any' },
-              { value: 'all', label: 'All' },
-            ]}
-          />
-        </div>
-      )}
-    </div>
+    <MultiSelect
+      label={def.label}
+      options={(def.options?.(lists) ?? []).map((choice) => ({
+        value: choice.value,
+        label: choice.label,
+      }))}
+      value={value}
+      onChange={onChange}
+      andable={Boolean(control?.andable)}
+      // The table says *that* an option is a badge; drawing one is this file's
+      // business, and the label it boxes was made presentable by the table.
+      renderOption={
+        control?.style === 'badge'
+          ? (option) => <CertificateBadge>{option.label}</CertificateBadge>
+          : undefined
+      }
+    />
   )
 }
 
@@ -631,13 +564,13 @@ export function BrowseFilters({
   const offered = (def: AnyFilterDef) =>
     def.control.kind !== 'none' && !emptyList(def) && !irrelevant(def)
 
-  // The bar itself: the handful nobody should have to open a panel for. A chip
-  // group among them takes a full row rather than a slot in the flex line.
+  // The bar itself: the handful nobody should have to open a panel for. Every
+  // one of them is now a control of a fixed size — the genre facet used to take
+  // a full row of its own, because a chip per genre is as wide as the library's
+  // vocabulary; as a dropdown it is one button like the rest.
   const onBar = defs.filter(
     (def) => !def.group && def.control.kind !== 'chips' && offered(def),
   )
-  const barChips = onBar.filter((def) => def.control.kind === 'multi')
-  const inline = onBar.filter((def) => def.control.kind !== 'multi')
 
   const renderControl = (def: AnyFilterDef, inPanel: boolean) => {
     const value = state.values[def.key]
@@ -725,21 +658,20 @@ export function BrowseFilters({
       }
 
       case 'multi': {
-        const chips = (
-          <MultiChips
+        const control = (
+          <MultiControl
             def={def}
             value={value as MultiValue}
             lists={lists}
             onChange={(next) => set(def, next)}
-            wrap={inPanel}
           />
         )
         return inPanel ? (
           <Field key={def.key} caption={def.label}>
-            {chips}
+            {control}
           </Field>
         ) : (
-          <div key={def.key}>{chips}</div>
+          <span key={def.key}>{control}</span>
         )
       }
 
@@ -752,7 +684,7 @@ export function BrowseFilters({
             lists={lists}
             ctx={ctx}
             onPick={(next) => set(def, next)}
-            className="input h-9 w-auto min-w-[8rem] py-0 text-sm"
+            className="min-w-[8rem]"
           />
         )
         return inPanel ? (
@@ -818,13 +750,8 @@ export function BrowseFilters({
         </div>
       )}
 
-      {/* A chip group gets a row of its own, the way the status chips do: it is
-          as wide as the library's vocabulary, and wrapped into the control bar
-          it would push the sort and the disclosure off the first line. */}
-      {barChips.map((def) => renderControl(def, false))}
-
       <div className="flex flex-wrap items-center gap-2">
-        {inline.map((def) => renderControl(def, false))}
+        {onBar.map((def) => renderControl(def, false))}
 
         <button
           type="button"
@@ -847,7 +774,7 @@ export function BrowseFilters({
           aria-controls="browse-advanced-filters"
           className={cn(
             'btn-outline h-9 gap-1.5 px-3 text-sm',
-            state.advancedCount > 0 && 'border-accent/50 bg-accent-soft text-accent',
+            state.advancedCount > 0 && 'border-line-accent bg-accent-soft text-accent',
           )}
         >
           <ChevronRightIcon

@@ -4,6 +4,7 @@ import { api } from '@/lib/api'
 import { useAuth, useTheme, useToast, type Theme } from '@/lib/app-context'
 import type { ApiKeyCreated, ApiKeyScope, Library, Server } from '@/lib/types'
 import { cn, copyText, formatDateTime, relativeTime } from '@/lib/utils'
+import { Select } from '@/components/Dropdown'
 import { EmptyState, PageHeader, Segmented, Spinner, Toggle } from '@/components/ui'
 import { SyncProgress, syncLabel } from '@/components/Layout'
 import {
@@ -532,7 +533,7 @@ function ApiKeys() {
       </form>
 
       {issued && (
-        <div className="mt-3 rounded-xl border border-accent/40 bg-accent-soft p-3">
+        <div className="mt-3 rounded-xl border border-line-accent bg-accent-soft p-3">
           <p className="text-sm font-medium text-ink">
             Copy this now — it is not shown again
           </p>
@@ -689,27 +690,26 @@ function ContinueWatchingWindow({
 }) {
   return (
     <div>
-      <label htmlFor="cw-window" className="label">
-        Drop off after
-      </label>
-      <select
-        id="cw-window"
-        className="input mt-1.5"
-        value={value === null ? 'plex' : String(value)}
-        onChange={(event) =>
-          onChange(event.target.value === 'plex' ? null : Number(event.target.value))
-        }
-      >
-        <option value="plex">
-          Match Plex{plexWeeks !== null ? ` — ${plexWeeks} weeks` : ''}
-        </option>
-        {WINDOW_CHOICES.map((weeks) => (
-          <option key={weeks} value={weeks}>
-            {weeks} weeks
-          </option>
-        ))}
-        <option value="0">Never — keep everything</option>
-      </select>
+      <span className="label">Drop off after</span>
+      <div className="mt-1.5">
+        {/* The one dropdown the app has — see `components/Dropdown.tsx`. */}
+        <Select
+          label="Drop off after"
+          value={value === null ? 'plex' : String(value)}
+          onChange={(next) => onChange(next === 'plex' ? null : Number(next))}
+          options={[
+            {
+              value: 'plex',
+              label: `Match Plex${plexWeeks !== null ? ` — ${plexWeeks} weeks` : ''}`,
+            },
+            ...WINDOW_CHOICES.map((weeks) => ({
+              value: String(weeks),
+              label: `${weeks} weeks`,
+            })),
+            { value: '0', label: 'Never — keep everything' },
+          ]}
+        />
+      </div>
       <p className="mt-2 text-xs text-muted">
         {plexSummary(plexWeeks)} {inForceSummary(effectiveWeeks)}
       </p>

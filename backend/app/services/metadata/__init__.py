@@ -53,7 +53,19 @@ class MetadataService:
         plex_genres: list[str] | None = None,
         library_title: str | None = None,
         library_override: bool | None = None,
+        known: MetadataResult | None = None,
     ) -> Enrichment:
+        """Ask the providers about a title and score whether it is anime.
+
+        ``known`` is what the caller already holds about this row — see
+        `media_repo.stored_signals`. It is merged in *after* the providers, so
+        it only ever fills blanks and never overwrites a fresh answer, and it is
+        merged *before* the classifier runs. That ordering is the point: a
+        re-classification made while TMDB is unconfigured, rate-limited or
+        behind an open circuit breaker otherwise scores the item on nothing at
+        all and writes that verdict over a good one. Passing what is already
+        stored makes the pass unable to come back knowing *less* than it did.
+        """
         ids = ids or ExternalIds()
         combined = MetadataResult()
 
@@ -89,6 +101,9 @@ class MetadataService:
                     combined.merge(tvdb_result)
             except Exception as exc:
                 log.debug("TVDB enrichment failed for %r: %s", title, exc)
+
+        if known is not None:
+            combined.merge(known)
 
         mal_matched = False
         if should_try_mal(

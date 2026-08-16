@@ -137,6 +137,84 @@ def test_a_mal_match_alone_does_not_make_a_western_cartoon_anime():
     assert without_mal.score == 3, "keyword weight changed; re-check the MAL total"
 
 
+def test_stored_signals_reconstruct_what_the_classifier_needs():
+    """A row carries every signal the classifier scores on; nothing read them.
+
+    `origin_countries`, `original_language` and `keywords` are columns on
+    `MediaItem`, and every offline reclassification path passed `metadata=None`
+    — so the same title that scored 5+ during import scored 0 the moment it was
+    re-examined, and the verdict was written back over the good one.
+    """
+    from app.models import MediaItem, MediaType
+    from app.services.media_repo import stored_signals
+
+    item = MediaItem(
+        guid_key="tmdb:show:1",
+        media_type=MediaType.SHOW,
+        title="Cowboy Bebop",
+        genres=["Animation", "Action"],
+        origin_countries=["JP"],
+        original_language="ja",
+        keywords=["based on manga"],
+    )
+    ids, signals = stored_signals(item)
+
+    verdict = classify(genres=item.genres, ids=ids, metadata=signals)
+    assert verdict.is_anime, "the stored signals did not reach the threshold"
+
+    # And the same row with nothing passed is exactly the failure being fixed.
+    assert not classify(genres=item.genres).is_anime
+
+
+def test_stored_signals_recover_the_forcing_agents():
+    """`anime_hinted` is a forcing signal, and two of its four inputs were lost.
+
+    There is no `anidb_id` column — a HAMA-scanned row's only trace of its agent
+    is the `anidb:` prefix `build_guid_key` wrote — and `anilist_id`, which does
+    have a column, was simply left out of every hand-built `ExternalIds`.
+    """
+    from app.models import MediaItem, MediaType
+    from app.services.media_repo import stored_signals
+
+    hama = MediaItem(
+        guid_key="anidb:show:1234", media_type=MediaType.SHOW, title="Monster"
+    )
+    ids, signals = stored_signals(hama)
+    assert ids.anidb_id == 1234
+    assert classify(genres=[], ids=ids, metadata=signals).source == "plex_agent"
+
+    listed = MediaItem(
+        guid_key="tmdb:show:2",
+        media_type=MediaType.SHOW,
+        title="Steins;Gate",
+        anilist_id=9253,
+    )
+    assert stored_signals(listed)[0].anime_hinted
+
+    # A plain title stays plain: the prefix match is anchored, so a `tmdb:` key
+    # cannot pick up an agent it never had.
+    plain = MediaItem(guid_key="tmdb:movie:603", media_type=MediaType.MOVIE, title="Heat")
+    assert not stored_signals(plain)[0].anime_hinted
+
+
+def test_stored_signals_do_not_make_western_animation_anime():
+    """The reconstruction must not smuggle in a signal of its own."""
+    from app.models import MediaItem, MediaType
+    from app.services.media_repo import stored_signals
+
+    item = MediaItem(
+        guid_key="tmdb:movie:9",
+        media_type=MediaType.MOVIE,
+        title="The Incredibles",
+        genres=["Animation", "Family"],
+        origin_countries=["US"],
+        original_language="en",
+        keywords=["superhero"],
+    )
+    ids, signals = stored_signals(item)
+    assert not classify(genres=item.genres, ids=ids, metadata=signals).is_anime
+
+
 def test_a_japanese_animated_film_still_classifies_without_mal():
     """The classifier must not have become so cautious it misses real anime."""
     verdict = classify(

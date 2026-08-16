@@ -546,6 +546,180 @@ async def test_continue_watching_ages_out_past_the_on_deck_window(authed_client,
     assert [entry["item"]["title"] for entry in followed] == ["Dune"]
 
 
+async def test_a_two_week_window_drops_a_three_year_old_resume_point(authed_client, db):
+    """The setting the user actually turns, on the timestamp it actually reads.
+
+    The window was computed correctly all along and applied to
+    `UserMediaState.last_watched_at` — but the shelf keeps a row it cannot date,
+    and nothing dated the rows the shelf is made of. `apply_plex_watch_state`
+    read `lastViewedAt` only when Plex called the item *watched*, so every entry
+    whose evidence is a resume position had `last_watched_at` NULL and survived
+    every window. That is the whole of Continue Watching.
+    """
+    from datetime import timedelta
+
+    from app.models import User, UserMediaState, utcnow
+    from app.services.sync_service import SyncService
+
+    user = (await db.execute(select(User))).scalars().first()
+
+    recent = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Dune")
+    abandoned = MediaItem(guid_key="tmdb:movie:2", media_type=MediaType.MOVIE, title="Tenet")
+    db.add_all([recent, abandoned])
+    await db.commit()
+
+    service = SyncService(db)
+    for item, days_ago in ((recent, 3), (abandoned, 3 * 365)):
+        # Exactly the payload a library scan hands it: part-watched, never
+        # scrobbled, so `viewCount` is absent and only `viewOffset` is set.
+        await service.apply_plex_watch_state(
+            user,
+            item,
+            {
+                "viewOffset": 600_000,
+                "duration": 9_000_000,
+                "lastViewedAt": int(
+                    (utcnow() - timedelta(days=days_ago)).timestamp()
+                ),
+            },
+        )
+    await db.commit()
+
+    # Both are mid-film, so both qualify on progress alone.
+    for item in (recent, abandoned):
+        state = await db.scalar(
+            select(UserMediaState).where(UserMediaState.media_item_id == item.id)
+        )
+        assert state.progress_ms == 600_000
+        assert state.last_watched_at is not None, "the resume point was never dated"
+
+    await authed_client.put(
+        "/api/users/me/preferences", json={"continue_watching_weeks": 2}
+    )
+    entries = (await authed_client.get("/api/media/continue-watching")).json()
+    assert [entry["item"]["title"] for entry in entries] == ["Dune"]
+
+
+async def test_an_up_next_card_ages_out_with_its_episodes(authed_client, db):
+    """A show rollup with no date of its own is not a show with no date.
+
+    `recompute_show_state` set the status to WATCHING and left
+    `last_watched_at` NULL on every call the library scan makes, and the
+    "up next" branch keeps an undated row — so a series last touched years ago
+    sat at the top of the shelf under any window. The episodes knew.
+    """
+    from datetime import timedelta
+
+    from app.models import User, UserMediaState, WatchStatus, utcnow
+    from app.services.sync_service import SyncService
+
+    user = (await db.execute(select(User))).scalars().first()
+
+    show = MediaItem(guid_key="tmdb:show:9", media_type=MediaType.SHOW, title="Lost")
+    db.add(show)
+    await db.flush()
+    watched, upcoming = (
+        MediaItem(
+            guid_key=f"tmdb:show:9/s1e{n}",
+            media_type=MediaType.EPISODE,
+            title=f"Episode {n}",
+            show_id=show.id,
+            season_number=1,
+            episode_number=n,
+        )
+        for n in (1, 2)
+    )
+    db.add_all([watched, upcoming])
+    await db.flush()
+    db.add(
+        UserMediaState(
+            user_id=user.id,
+            media_item_id=watched.id,
+            view_count=1,
+            status=WatchStatus.COMPLETED,
+            last_watched_at=utcnow() - timedelta(days=3 * 365),
+        )
+    )
+    await db.commit()
+
+    # The call the library scan makes: no `watched_at` argument.
+    await SyncService(db).recompute_show_state(user, show.id)
+    await db.commit()
+
+    show_state = await db.scalar(
+        select(UserMediaState).where(UserMediaState.media_item_id == show.id)
+    )
+    assert show_state.status == WatchStatus.WATCHING
+    assert show_state.last_watched_at is not None, "the rollup took no date from its episodes"
+
+    await authed_client.put(
+        "/api/users/me/preferences", json={"continue_watching_weeks": 2}
+    )
+    assert (await authed_client.get("/api/media/continue-watching")).json() == []
+
+    # And it comes back when the window is widened, so this is the window
+    # working rather than the shelf simply having lost the show.
+    await authed_client.put(
+        "/api/users/me/preferences", json={"continue_watching_weeks": 0}
+    )
+    kept = (await authed_client.get("/api/media/continue-watching")).json()
+    assert [entry["item"]["title"] for entry in kept] == ["Lost"]
+
+
+async def test_a_server_reporting_zero_weeks_means_no_cutoff(authed_client, db):
+    """0 is the most generous window, not the smallest.
+
+    `func.max()` answered 2 for a pair of servers reporting 0 and 2 — the least
+    generous of the two — so the one value that means "never age anything out"
+    could never win. Unknown (no server said) still falls back to Plex's own
+    default of 16 and must not collapse into either.
+    """
+    from datetime import timedelta
+
+    from app.models import User, UserMediaState, utcnow
+    from app.services import on_deck
+
+    user = (await db.execute(select(User))).scalars().first()
+
+    for name, weeks in (("Basement", 0), ("Attic", 2)):
+        server = PlexServer(
+            machine_identifier=f"machine-{name}",
+            name=name,
+            base_url=f"https://{name}.example:32400",
+            access_token_encrypted="encrypted",
+            on_deck_window_weeks=weeks,
+        )
+        db.add(server)
+        await db.flush()
+        db.add(
+            UserServerAccess(
+                user_id=user.id, server_id=server.id, access_token_encrypted="encrypted"
+            )
+        )
+    await db.commit()
+
+    assert await on_deck.plex_weeks(db, user) == 0
+    assert await on_deck.effective_weeks(db, user) == 0
+    assert await on_deck.cutoff(db, user) is None
+
+    item = MediaItem(guid_key="tmdb:movie:5", media_type=MediaType.MOVIE, title="Heat")
+    db.add(item)
+    await db.flush()
+    db.add(
+        UserMediaState(
+            user_id=user.id,
+            media_item_id=item.id,
+            progress_ms=600_000,
+            duration_ms=9_000_000,
+            last_watched_at=utcnow() - timedelta(days=3 * 365),
+        )
+    )
+    await db.commit()
+
+    entries = (await authed_client.get("/api/media/continue-watching")).json()
+    assert [entry["item"]["title"] for entry in entries] == ["Heat"]
+
+
 async def test_continue_watching_window_defaults_without_a_server(authed_client, db):
     """No server has reported a window, so Plex's own default of 16 weeks applies."""
     from datetime import timedelta
@@ -1544,6 +1718,149 @@ async def test_returning_to_auto_reclassifies_instead_of_flattening(authed_clien
     assert film.is_anime is False
     # And nothing claims an override that no longer exists.
     assert show.anime_source != "library_override"
+
+
+async def test_auto_keeps_an_anime_detected_from_stored_metadata(authed_client, db):
+    """The Anime tab emptying out, reproduced: auto re-scored on genres alone.
+
+    `test_returning_to_auto_reclassifies_instead_of_flattening` only survives
+    because its show carries a literal "Anime" genre tag, which is worth 6 on
+    its own. Almost nothing real does. An ordinary anime series is detected by
+    *Animation + Japanese origin* — a TMDB answer stored on the row — and
+    `_reclassify_library` passed no metadata at all, so switching the chip to
+    auto scored every such title at 0 and wrote `is_anime = False` across the
+    library. What is left is the handful with the explicit tag.
+    """
+    from app.routers.sync import _reclassify_library
+
+    library, show, episode, film = await _library_with_items(db, anime_override=True)
+    await _reclassify_library(db, library)
+
+    # What enrichment actually stores for an anime series: no "Anime" genre
+    # anywhere, just TMDB's Animation genre and a Japanese origin.
+    show.genres = ["Animation", "Action"]
+    show.origin_countries = ["JP"]
+    show.original_language = "ja"
+    show.keywords = ["based on manga"]
+    library.anime_override = None
+    await db.commit()
+
+    await _reclassify_library(db, library)
+
+    for row in (show, episode, film):
+        await db.refresh(row)
+    assert show.is_anime is True, "auto discarded a TMDB-detected anime"
+    assert episode.is_anime is True, "the episode did not follow its show"
+    assert film.is_anime is False
+    assert show.anime_source == "animation+jp+keyword"
+
+
+async def test_startup_repair_promotes_rows_a_weaker_pass_wrote_off(
+    monkeypatch, engine, session_factory
+):
+    """The named repair for what the old classification already produced.
+
+    Picks up: a movie or show currently `is_anime = False` whose stored signals
+    now score at or above the threshold. Stops coming back: the flip itself —
+    the row no longer matches `is_anime = False`. Only ever promotes, and never
+    touches a library the user has marked "not anime".
+    """
+    from app.db import _reclassify_anime_from_stored_signals
+    from app.models import PlexMapping
+
+    monkeypatch.setattr("app.db.SessionLocal", session_factory)
+
+    async with session_factory() as db:
+        server = PlexServer(
+            machine_identifier="m1",
+            name="Basement",
+            base_url="https://plex.example:32400",
+            access_token_encrypted="encrypted",
+        )
+        db.add(server)
+        await db.flush()
+        anime_lib = PlexLibrary(
+            server_id=server.id, section_key="1", title="TV", section_type="show"
+        )
+        refused_lib = PlexLibrary(
+            server_id=server.id,
+            section_key="2",
+            title="Cartoons",
+            section_type="show",
+            anime_override=False,
+        )
+        db.add_all([anime_lib, refused_lib])
+        await db.flush()
+
+        def _show(key, title, **kwargs):
+            return MediaItem(
+                guid_key=key,
+                media_type=MediaType.SHOW,
+                title=title,
+                genres=["Animation"],
+                origin_countries=["JP"],
+                original_language="ja",
+                **kwargs,
+            )
+
+        flattened = _show("tmdb:show:1", "Cowboy Bebop")
+        refused = _show("tmdb:show:2", "Overridden")
+        western = MediaItem(
+            guid_key="tmdb:show:3",
+            media_type=MediaType.SHOW,
+            title="Adventure Time",
+            genres=["Animation"],
+            origin_countries=["US"],
+            original_language="en",
+        )
+        # Already correct, and its source must not be rewritten by a pass that
+        # cannot see the library name that decided it.
+        already = _show("tmdb:show:4", "Naruto", is_anime=True, anime_source="library_name")
+        db.add_all([flattened, refused, western, already])
+        await db.flush()
+
+        episode = MediaItem(
+            guid_key="tmdb:show:1/s1e1",
+            media_type=MediaType.EPISODE,
+            title="Asteroid Blues",
+            show_id=flattened.id,
+        )
+        db.add(episode)
+        db.add_all(
+            [
+                PlexMapping(
+                    media_item_id=flattened.id,
+                    server_id=server.id,
+                    library_id=anime_lib.id,
+                    rating_key="1",
+                ),
+                PlexMapping(
+                    media_item_id=refused.id,
+                    server_id=server.id,
+                    library_id=refused_lib.id,
+                    rating_key="2",
+                ),
+            ]
+        )
+        await db.commit()
+        ids = (flattened.id, refused.id, western.id, already.id, episode.id)
+
+    await _reclassify_anime_from_stored_signals()
+    # Idempotent, and it runs on every boot, so twice is the normal case.
+    await _reclassify_anime_from_stored_signals()
+
+    async with session_factory() as db:
+        rows = {
+            item.id: item
+            for item in (await db.execute(select(MediaItem))).scalars()
+        }
+    flattened, refused, western, already, episode = (rows[i] for i in ids)
+
+    assert flattened.is_anime is True
+    assert episode.is_anime is True, "seasons and episodes must follow their show"
+    assert refused.is_anime is False, "an explicit 'not anime' override was overwritten"
+    assert western.is_anime is False
+    assert already.anime_source == "library_name", "a positive verdict was re-sourced"
 
 
 @pytest.mark.parametrize(

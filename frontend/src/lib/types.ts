@@ -146,7 +146,11 @@ export interface HistoryPage {
 export interface WatchlistEntry {
   id: number
   media_item_id: number
+  /** When *Tally* first recorded the entry, which for a Plex-sourced one is
+   * when the sync first saw it rather than when it was watchlisted. */
   added_at: string
+  /** Plex's own `watchlistedAt`. Null when Discover did not send one. */
+  plex_added_at: string | null
   source: string
   synced_with_plex: boolean
   item: MediaCard | null
@@ -186,6 +190,16 @@ export interface StatCount {
 /** The named windows `/api/stats` resolves server-side. */
 export type StatsPreset = '7d' | '30d' | '90d' | 'ytd' | '12m' | 'last_year' | 'all'
 export type StatsGranularity = 'day' | 'week' | 'month'
+
+/**
+ * Films, television, or both — one scope over the whole stats surface.
+ *
+ * Deliberately not the browse grids' `media_type`, which names a single row
+ * type: a watch history is mostly episodes, so "television" has to mean shows,
+ * seasons and episodes together. A `Literal` on the API, so a stale URL is a
+ * 422 rather than a page that quietly answers a different question.
+ */
+export type StatsMediaScope = 'all' | 'movies' | 'shows'
 
 /**
  * The window the numbers actually cover, as the server resolved it.
@@ -441,6 +455,12 @@ export interface ShowProgress {
  */
 export interface ShowCompletion {
   scope: 'all_time'
+  /**
+   * Whether season 0 counted. False by default and app-wide — a viewer who has
+   * watched every episode of a series should read as finished, not as 88% and
+   * permanently "still going". The block offers the other answer as a toggle.
+   */
+  includes_specials: boolean
   abandoned_under_percent: number
   abandoned_after_days: number
   shows_started: number
@@ -460,7 +480,10 @@ export interface WatchlistWaiting {
   year: number | null
   media_type: MediaType
   poster_url: string
+  /** Plex's `watchlistedAt` where Discover gave one, else Tally's own date. */
   added_at: string
+  /** Which of the two `added_at` is, so the row can say rather than imply. */
+  added_on_plex: boolean
   days_waiting: number
 }
 
@@ -476,6 +499,12 @@ export interface WatchlistConversion {
   range: StatsRange
   tail_days: number
   added: number
+  /**
+   * How many of `added` carry Plex's own watchlist date. Short of `added`, the
+   * rest are dated from when Tally first saw them — a real difference on a
+   * fresh install, where every imported entry shares one instant.
+   */
+  plex_dated: number
   converted: number
   /** A fraction, not a percentage. */
   conversion_rate: number

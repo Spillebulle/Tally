@@ -281,7 +281,12 @@ class NotesRequest(BaseModel):
 class WatchlistEntryOut(ORMModel):
     id: int
     media_item_id: int
+    # When Tally first recorded the entry — for a Plex-sourced one that is when
+    # the sync first saw it, not when the user watchlisted it.
     added_at: datetime
+    # Plex's own answer, from Discover's `watchlistedAt`. Null when Discover did
+    # not send one, which is the only reason `added_at` is still here.
+    plex_added_at: datetime | None = None
     source: str
     synced_with_plex: bool = False
     item: MediaCard | None = None
@@ -427,6 +432,16 @@ class StatCount(BaseModel):
 
 StatsPreset = Literal["7d", "30d", "90d", "ytd", "12m", "last_year", "all"]
 StatsGranularity = Literal["day", "week", "month"]
+
+#: Films, television, or both — the whole stats surface at once.
+#:
+#: Deliberately **not** `MediaFilters.media_type`, which names one row type. A
+#: watch history is mostly episodes, so "television" has to mean shows, seasons
+#: *and* episodes together; asking for `media_type=show` would count only the
+#: rare play recorded against a series row and report a television-only viewer
+#: as having watched almost nothing. A `Literal` so a stale URL is a 422 rather
+#: than a silently wrong page.
+StatsMediaScope = Literal["all", "movies", "shows"]
 
 
 class StatsRange(BaseModel):
@@ -750,9 +765,18 @@ class ShowCompletionOut(BaseModel):
     `abandoned_under_percent` and `abandoned_after_days` are the thresholds
     that produced `abandoned`, echoed because they are a judgement rather than
     a fact and the UI has to be able to state them.
+
+    `includes_specials` is the third such judgement and the one that moves a
+    number people already know: season 0 does **not** count towards completion
+    by default, so somebody who has watched every episode of a series reads as
+    finished rather than as 88% and permanently "still going". It is echoed for
+    the same reason as the thresholds — the block has to be able to say which
+    question it answered — and `completion.py` holds the definition, shared with
+    the item page and the sync so the three cannot drift.
     """
 
     scope: Literal["all_time"] = "all_time"
+    includes_specials: bool = False
     abandoned_under_percent: float
     abandoned_after_days: int
     shows_started: int
@@ -777,17 +801,33 @@ class WatchlistWaiting(BaseModel):
     year: int | None = None
     media_type: MediaType
     poster_url: str
+    # The date this row is actually counted from: Plex's `watchlistedAt` when
+    # Discover gave one, otherwise when Tally first saw the entry.
     added_at: datetime
+    # Which of the two `added_at` is, so the UI can say. A row dated by Tally is
+    # not wrong, it is answering a slightly different question, and a page that
+    # does not distinguish them tells somebody they watchlisted a film on the
+    # day they installed Tally.
+    added_on_plex: bool = False
     days_waiting: int
 
 
 class WatchlistConversionOut(BaseModel):
     """Does watchlisting something mean you watch it?
 
-    The window bounds `WatchlistEntry.added_at` here — which entries are being
-    asked about — rather than `WatchEvent.watched_at`. That is the only bound
-    that makes the question answerable: an entry added outside the window has
-    no conversion to report inside it.
+    The window bounds **when the entry was added** here — which entries are
+    being asked about — rather than `WatchEvent.watched_at`. That is the only
+    bound that makes the question answerable: an entry added outside the window
+    has no conversion to report inside it.
+
+    "When it was added" is `models.watchlist_added_at()`: Plex's own
+    `watchlistedAt` where Discover sent one, and otherwise when Tally first saw
+    the entry. The distinction is not cosmetic — a first sync stamps every
+    imported entry with the same instant, so on `added_at` alone a watchlist
+    built over five years reads as five hundred titles added the afternoon
+    somebody installed Tally, every one of them converting or waiting from that
+    date. `plex_dated` says how many of the entries counted here carry Plex's
+    date, so a page can report the mix rather than implying all of them do.
 
     **A play before the add is not a conversion.** `converted` counts entries
     with a play at or after `added_at`; something you had already seen and
@@ -802,6 +842,9 @@ class WatchlistConversionOut(BaseModel):
     range: StatsRange
     tail_days: int
     added: int
+    # How many of `added` carry Plex's own watchlist date. Anything short of
+    # `added` means the rest are dated from when Tally first saw them.
+    plex_dated: int = 0
     converted: int
     # converted / added, a fraction rather than a percentage. 0.0 when nothing
     # was added in the window.

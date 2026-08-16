@@ -35,6 +35,76 @@ interface Tooltip {
   value: string
 }
 
+/**
+ * How a **clickable** chart mark reacts, so it reads as a control.
+ *
+ * The boxes on this page already say "I lead somewhere" on hover — a tile
+ * lifts, a ranked row fills with `bg-raised`. The charts said nothing, even
+ * though their bars have always navigated, so a whole class of drill-downs was
+ * discoverable only by trying. This is the same statement in the same tokens.
+ *
+ * Three things it deliberately does at once, because hover alone is not an
+ * affordance:
+ *
+ *  - **`bg-raised` on hover**, matching `RankedList`'s rows exactly rather than
+ *    inventing a chart-only treatment.
+ *  - **The same fill on focus**, so a keyboard reaches it. The ring is a focus
+ *    *indicator*; it does not tell you the mark is interactive before you get
+ *    there, and the two answer different questions.
+ *  - **`cursor-pointer`**, which is the only one of the three a pointer user
+ *    reads before committing to a click.
+ *
+ * Touch gets none of these, which is why every chart that drills also says so
+ * in its card description ("Pick one to …") — that sentence is the affordance
+ * on a phone, and it is not optional.
+ */
+const CLICKABLE_MARK =
+  'cursor-pointer rounded-lg transition-colors hover:bg-raised ' +
+  'focus-visible:bg-raised focus-visible:outline-none focus-visible:ring-2 ' +
+  'focus-visible:ring-accent'
+
+/**
+ * The width a chart has to draw in, tracked as its box changes.
+ *
+ * Only for the charts that cannot be sized in CSS. Anything laid out with flex
+ * or grid should stretch on its own — `MatrixChart` fills its box with
+ * `minmax(cell, 1fr)` tracks and `Sparkline` with a fluid `viewBox`, and
+ * neither needs to measure anything. An **SVG with a computed `width`
+ * attribute** is the case that does: `ActivityHeatmap` draws 26 columns of 16px
+ * and therefore claimed 416px however wide the card was, which on a full-width
+ * card is a third of it.
+ *
+ * A `ResizeObserver` rather than a window `resize` listener, because the box
+ * changes without the window doing so — a sidebar, a disclosure opening, a font
+ * loading. The fallback exists for a test runner and for browsers without one,
+ * and errs towards "measure once" rather than never.
+ *
+ * The node arrives through a callback ref: the element does not exist on the
+ * first render, and an effect keyed on a mutable ref would never see it appear.
+ */
+function useMeasuredWidth<T extends HTMLElement>(): [(node: T | null) => void, number] {
+  const [node, setNode] = useState<T | null>(null)
+  const [width, setWidth] = useState(0)
+
+  useEffect(() => {
+    if (!node) return
+    const measure = () => setWidth(node.clientWidth)
+    measure()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure)
+      return () => window.removeEventListener('resize', measure)
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [node])
+
+  return [setNode, width]
+}
+
+const clamp = (value: number, low: number, high: number) =>
+  Math.max(low, Math.min(high, value))
+
 function TooltipBubble({ tip }: { tip: Tooltip | null }) {
   if (!tip) return null
   return (
@@ -211,7 +281,9 @@ export function BarList<T extends StatCount>({
                   'h-full rounded-r-[4px] transition-[width,background-color]',
                   'duration-700 ease-spring',
                   active ? 'bg-accent' : 'bg-series-1',
-                  onSelect && !active && 'group-hover/bar:bg-accent',
+                  onSelect &&
+                    !active &&
+                    'group-hover/bar:bg-accent group-focus-visible/bar:bg-accent',
                 )}
                 style={{ width: `${Math.max(2, (entry.value / max) * 100)}%` }}
               />
@@ -233,11 +305,7 @@ export function BarList<T extends StatCount>({
                 onClick={() => onSelect(entry, index)}
                 aria-pressed={active}
                 aria-label={`${entry.label}: ${entry.value}${unit}${note ? `, ${note}` : ''}`}
-                className={cn(
-                  layout,
-                  'group/bar cursor-pointer rounded-lg py-0.5 focus-visible:outline-none',
-                  'focus-visible:ring-2 focus-visible:ring-accent',
-                )}
+                className={cn(layout, 'group/bar px-1.5 py-1', CLICKABLE_MARK)}
               >
                 {row}
               </button>
@@ -292,6 +360,27 @@ interface ColumnChartProps<T extends StatCount> {
    * name and the table.
    */
   showValues?: boolean
+  /**
+   * How much room one axis label needs, in pixels. Declares "this axis has more
+   * columns than it has room for labels", and turns on both halves of the fix.
+   *
+   * The 24-hour profile is what this exists for and it was **broken**, not
+   * merely crowded: it drew a bar per hour and printed a label on every third
+   * one, so twenty-four bars sat under eight numbers and nothing said which was
+   * which. Bars appeared to fall *between* the labels, which is exactly how a
+   * chart reads when its axis has come unanchored from its marks.
+   *
+   * The fix is not fewer bars and not smaller type. Every column gets a **tick**
+   * — drawn inside the column itself, so it is aligned with its bar by
+   * construction rather than by arithmetic that can drift — and the *labels* are
+   * thinned to whatever actually fits the measured width. On a wide card all
+   * twenty-four hours are named; on a phone every second or third is, and the
+   * unnamed ones still have a tick showing where they are. Thinning the labels
+   * while keeping a mark per bar is the only one of the three obvious options
+   * (rotate, abbreviate, thin) that does not either cost height or drop
+   * information.
+   */
+  minLabelWidth?: number
 }
 
 export function ColumnChart<T extends StatCount>({
@@ -303,7 +392,10 @@ export function ColumnChart<T extends StatCount>({
   activeLabel = null,
   compare,
   showValues = true,
+  minLabelWidth,
 }: ColumnChartProps<T>) {
+  // Only consulted when `minLabelWidth` is set, but hooks cannot be conditional.
+  const [frame, available] = useMeasuredWidth<HTMLDivElement>()
   const total = data.reduce((sum, d) => sum + d.value, 0)
   const compareTotal = compare?.data.reduce((sum, d) => sum + d.value, 0) ?? 0
   if (total === 0 && compareTotal === 0) {
@@ -311,6 +403,14 @@ export function ColumnChart<T extends StatCount>({
   }
   // One scale across both series, or the comparison would be a lie.
   const max = Math.max(...data.map((d) => d.value), ...(compare?.data ?? []).map((d) => d.value), 1)
+
+  // How many columns share one label. 320 stands in for the first render, one
+  // frame before the observer answers: a plausible phone width, so the axis is
+  // never briefly drawn with more labels than it can hold.
+  const columnWidth = (available || 320) / Math.max(1, data.length)
+  const labelEvery = minLabelWidth
+    ? Math.max(1, Math.ceil(minLabelWidth / Math.max(1, columnWidth)))
+    : 1
 
   return (
     // `items-stretch` is load-bearing, not a default worth "tidying" away: the
@@ -323,10 +423,11 @@ export function ColumnChart<T extends StatCount>({
     //
     // Tighter gap on narrow screens: the rating chart went from five columns to
     // ten, and a fixed 8px gutter ate most of the width on a phone.
-    <div className="flex h-44 items-stretch gap-1 sm:gap-2">
+    <div className="flex h-44 items-stretch gap-1 sm:gap-2" ref={frame}>
       {data.map((entry, index) => {
         const height = (entry.value / max) * 100
         const active = activeLabel === entry.label
+        const named = index % labelEvery === 0
         const earlier = compare?.data[index]
         const text = [
           describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`,
@@ -353,7 +454,9 @@ export function ColumnChart<T extends StatCount>({
                   'duration-700 ease-spring',
                   compare ? 'max-w-[11px]' : 'max-w-[24px]',
                   active ? 'bg-accent' : 'bg-series-1',
-                  onSelect && !active && 'group-hover/col:bg-accent',
+                  onSelect &&
+                    !active &&
+                    'group-hover/col:bg-accent group-focus-visible/col:bg-accent',
                 )}
                 style={{ height: `${Math.max(entry.value ? 4 : 0, height)}%` }}
               />
@@ -369,8 +472,19 @@ export function ColumnChart<T extends StatCount>({
                 />
               )}
             </div>
-            <span className={cn('text-xs', active ? 'text-ink' : 'text-muted')}>
-              {formatLabel(entry.label)}
+            <span className="flex flex-col items-center gap-1">
+              {/* A tick per column, drawn *inside* the column, so it is aligned
+                  with its own bar by construction rather than by arithmetic
+                  that can drift. Only where the axis said it is dense — a chart
+                  that names every column needs no help locating them. */}
+              {minLabelWidth ? (
+                <span aria-hidden="true" className="h-1 w-px shrink-0 bg-line" />
+              ) : null}
+              {/* An empty label still occupies its line, so thinning the labels
+                  cannot make one column taller than its neighbours. */}
+              <span className={cn('text-xs', active ? 'text-ink' : 'text-muted')}>
+                {named ? formatLabel(entry.label) : ''}
+              </span>
             </span>
           </>
         )
@@ -393,9 +507,10 @@ export function ColumnChart<T extends StatCount>({
             type="button"
             // The whole column is the hit target, not just the drawn bar — a
             // short bar is only a few pixels tall and would be unclickable.
-            className="group/col flex flex-1 cursor-pointer flex-col items-center gap-2
-                       rounded-lg focus-visible:outline-none focus-visible:ring-2
-                       focus-visible:ring-accent"
+            className={cn(
+              'group/col flex flex-1 flex-col items-center gap-2',
+              CLICKABLE_MARK,
+            )}
             onClick={() => onSelect(entry, index)}
             title={text}
             aria-label={text}
@@ -476,8 +591,23 @@ export function HeatScale({ less = 'Less', more = 'More' }: { less?: string; mor
   )
 }
 
+/**
+ * How small and how large a heatmap cell may get.
+ *
+ * The floor is where a square stops reading as a value and starts reading as
+ * noise; below it the chart scrolls instead of shrinking further. The ceiling
+ * is what stops a fortnight of history rendering as a row of tiles the size of
+ * buttons — a short window genuinely cannot fill a wide card, and stretching to
+ * fill it anyway would make two weeks look like a year's worth of data.
+ */
+const HEAT_CELL_MIN = 9
+const HEAT_CELL_MAX = 24
+
 export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
   const [tip, setTip] = useState<Tooltip | null>(null)
+  // Measured on the outer box rather than on the scroller, so the SVG's own
+  // width can never feed back into the number it is derived from.
+  const [frame, available] = useMeasuredWidth<HTMLDivElement>()
 
   const byDate = new Map(data.map((d) => [d.label, d.value]))
   const max = Math.max(...data.map((d) => d.value), 1)
@@ -521,15 +651,23 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
     }
   })
 
-  const cell = 13
   const gap = 3
+  // Sized to the box rather than fixed at 13px. The old constant meant 26
+  // columns claimed exactly 416px however wide the card was — a third of a
+  // full-width one — which is what made this read as a chart that had not
+  // finished loading. `available || 0` before the first measurement falls back
+  // to the old constant, so a server render or a test runner draws the same
+  // chart it always did.
+  const cell = available
+    ? clamp(Math.floor(available / columns.length) - gap, HEAT_CELL_MIN, HEAT_CELL_MAX)
+    : 13
   const width = columns.length * (cell + gap)
   const height = 7 * (cell + gap) + 18
 
   const level = (value: number): number => heatLevel(value, max)
 
   return (
-    <div className="relative">
+    <div className="relative" ref={frame}>
       <div className="scroll-x scrollbar-thin pb-1">
         <svg
           width={width}
@@ -573,7 +711,13 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
                   className={cn(
                     tier < 0 && 'fill-line/60',
                     'transition-opacity hover:opacity-80',
-                    onSelect && day.value > 0 && 'cursor-pointer',
+                    // The mark's own affordance. A rect cannot take
+                    // `CLICKABLE_MARK` — there is no background to raise — so
+                    // it says the same thing with an accent outline, which is
+                    // also the only treatment legible on a 13px square.
+                    onSelect &&
+                      day.value > 0 &&
+                      'cursor-pointer stroke-2 stroke-transparent hover:stroke-accent',
                   )}
                   onClick={
                     onSelect && day.value > 0
@@ -735,16 +879,27 @@ export function MatrixChart({
 
   return (
     <div>
-      {/* Wide by construction — 24 hours is ~410px — so it scrolls inside its
-          own box and the page body never scrolls sideways. */}
+      {/*
+        Scrolls when it cannot fit, **stretches when it can**, and neither
+        needs measuring: `minmax(cell, 1fr)` is a floor and a share at once, so
+        the tracks grow to fill a wide card and refuse to shrink past legible on
+        a narrow one — at which point this scroller takes over and the page body
+        still never scrolls sideways. The old `inline-grid` of fixed `cell`px
+        tracks claimed the same ~410px whatever the card was, so 24 hours drew
+        into a third of a full-width one and looked broken rather than compact.
+
+        The cells become rectangles on a wide box, which is fine and deliberate:
+        the ramp is read by colour, and the row is read across. Only the
+        *height* is a fixed square-ish size.
+      */}
       <div className="scroll-x scrollbar-thin pb-1">
         <div
           role="grid"
           aria-label="Values by row and column"
           onKeyDown={move}
-          className="inline-grid"
+          className="grid w-full"
           style={{
-            gridTemplateColumns: `auto repeat(${columnCount}, ${cell}px)`,
+            gridTemplateColumns: `auto repeat(${columnCount}, minmax(${cell}px, 1fr))`,
             gap: `${gap}px`,
           }}
         >
@@ -754,8 +909,7 @@ export function MatrixChart({
             <div
               key={name}
               role="columnheader"
-              className="text-center text-[10px] leading-none text-muted"
-              style={{ width: cell }}
+              className="overflow-hidden text-center text-[10px] leading-none text-muted"
             >
               {index % columnLabelEvery === 0 ? name : ''}
             </div>
@@ -789,10 +943,14 @@ export function MatrixChart({
                     'rounded-[3px] transition-opacity hover:opacity-80',
                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
                     tier < 0 && 'bg-line/60',
-                    onSelect && 'cursor-pointer',
+                    // A ring rather than `CLICKABLE_MARK`'s raised background:
+                    // the cell *is* its background, so raising it would erase
+                    // the value. Same accent, same statement.
+                    onSelect && 'cursor-pointer hover:ring-1 hover:ring-accent',
                   ),
                   style: {
-                    width: cell,
+                    // Width comes from the grid track, so the cell can stretch;
+                    // the height is what keeps the ramp reading as a grid.
                     height: cell,
                     ...(tier >= 0 ? { background: `var(--heat-${tier})` } : {}),
                   },
@@ -958,6 +1116,9 @@ export function StackedColumnChart<T extends StackedEntry>({
                 className={cn(
                   'w-full max-w-[24px] self-center transition-[height,background-color]',
                   'duration-700 ease-spring bg-series-1',
+                  // The stack keeps its two validated series, so the hover
+                  // statement is the raised background on the button rather
+                  // than a colour swap that would collide with `--series-2`.
                   // Rounded on top only when it *is* the data end — with a
                   // rewatch segment above it, its top is an internal boundary.
                   entry.rewatch ? '' : 'rounded-t-[4px]',
@@ -984,9 +1145,10 @@ export function StackedColumnChart<T extends StackedEntry>({
           <button
             key={entry.label}
             type="button"
-            className="group/col flex flex-1 cursor-pointer flex-col items-center gap-2
-                       rounded-lg focus-visible:outline-none focus-visible:ring-2
-                       focus-visible:ring-accent"
+            className={cn(
+              'group/col flex flex-1 flex-col items-center gap-2',
+              CLICKABLE_MARK,
+            )}
             onClick={() => onSelect(entry, index)}
             title={text}
             aria-label={text}
@@ -1180,6 +1342,18 @@ function DeltaBadge({ delta }: { delta: StatDelta }) {
  * accessible name that would repeat what is already read out.
  *
  * A single point cannot be a trend, so fewer than two is drawn as nothing.
+ *
+ * **It fills the tile.** It used to carry `width={72}` as an attribute, so the
+ * shape sat in the left third of a tile two hundred-odd pixels wide and read as
+ * a chart that had failed to load. The viewBox stays 72×20 — it is only a
+ * coordinate space — and the element is sized in CSS instead, which means it
+ * follows the tile through every breakpoint with nothing to keep in step.
+ *
+ * `preserveAspectRatio="none"` is the point and is safe *here* specifically: a
+ * sparkline has no axis, no labels and no scale a reader could misread, so
+ * stretching it horizontally changes nothing it claims. `vector-effect:
+ * non-scaling-stroke` keeps the line 1.5px whatever the stretch, which is the
+ * one thing that would otherwise give it away.
  */
 function Sparkline({ points }: { points: number[] }) {
   if (points.length < 2) return null
@@ -1198,9 +1372,8 @@ function Sparkline({ points }: { points: number[] }) {
   return (
     <svg
       viewBox={`0 0 ${width} ${height}`}
-      width={width}
-      height={height}
-      className="mt-1.5 block overflow-visible text-series-1"
+      preserveAspectRatio="none"
+      className="mt-1.5 block h-5 w-full text-series-1"
       aria-hidden="true"
       focusable="false"
     >
@@ -1215,6 +1388,7 @@ function Sparkline({ points }: { points: number[] }) {
         strokeWidth={1.5}
         strokeLinecap="round"
         strokeLinejoin="round"
+        vectorEffect="non-scaling-stroke"
       />
     </svg>
   )
@@ -1263,7 +1437,14 @@ export function StatTile({
           {icon}
         </span>
       )}
-      <div className="min-w-0">
+      {/*
+        `flex-1` as well as `min-w-0`, and the pair is load-bearing. Without it
+        this column sizes to its own content, so the sparkline's `w-full` was
+        100% of "as wide as the word PLAYS" — about 76px in a 270px tile, which
+        is exactly what made the trend line look like a chart that had failed to
+        load. `min-w-0` alone lets it shrink; `flex-1` is what makes it fill.
+      */}
+      <div className="min-w-0 flex-1">
         <p className="label">{label}</p>
         <p className="mt-1 truncate text-2xl font-semibold tracking-tight text-ink">
           {value}
@@ -1285,7 +1466,7 @@ export function StatTile({
       <Link
         to={to}
         aria-label={toLabel ?? `${label}: ${value}`}
-        className={cn(shell, 'hover:border-accent/40 focus-visible:border-accent')}
+        className={cn(shell, 'hover:border-line-accent-soft focus-visible:border-accent')}
       >
         {body}
       </Link>

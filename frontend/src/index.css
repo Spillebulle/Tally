@@ -27,6 +27,16 @@
     --accent-soft: 232 240 252;
     --accent-ink: 255 255 255;
 
+    /* The accent edge of a selected or hovered control, pre-composited.
+       These are exactly `--accent` at 50% / 40% over the surface each control
+       actually sits on — `--accent-soft` for the selected chip, `--surface`
+       for the hovered one — so they *look* identical to the alpha borders they
+       replace, and only the compositing changes. See `.chip` for why that
+       matters. Recompute both if `--accent`, `--accent-soft` or `--surface`
+       moves. */
+    --line-accent: 137 180 233;
+    --line-accent-soft: 170 201 239;
+
     --series-1: 42 120 214;
     --series-2: 235 104 52;
     --series-3: 27 175 122;
@@ -61,6 +71,10 @@
     --accent: 57 135 229;
     --accent-soft: 27 44 70;
     --accent-ink: 255 255 255;
+
+    /* Same two blends against the dark surfaces. */
+    --line-accent: 42 90 150;
+    --line-accent-soft: 37 68 108;
 
     --series-1: 57 135 229;
     --series-2: 217 89 38;
@@ -102,8 +116,20 @@
 }
 
 @layer components {
+  /* Elevation carries the card, not a hairline.
+     The border used to be `border-line`, which drew a grey outline around
+     every card on the dashboard — two strategies for the same job, and on
+     light the outline read as a stray box around content the shadow had
+     already separated. On dark it was very nearly invisible anyway: `--surface`
+     against `--canvas` plus the shadow is what actually reads there, which is
+     why this needs no `.dark` override.
+
+     The 1px stays, transparent. Removing the width would move every card's
+     content by a pixel and reflow the ones that opt into a coloured edge —
+     `StatTile` sets `hover:border-accent/40` over this rule, and a link that
+     grows a border on hover would nudge its own text. */
   .card {
-    @apply rounded-2xl border border-line bg-surface shadow-card;
+    @apply rounded-2xl border border-transparent bg-surface shadow-card;
   }
 
   .btn {
@@ -124,14 +150,27 @@
     @apply btn border border-line bg-surface text-ink hover:bg-raised active:scale-[0.98];
   }
 
+  /* The accent edges are opaque tokens, never `border-accent/50`.
+     A 1px *translucent* border on a rounded element is composited as two
+     separately antialiased rounded-rect paths — `background-clip` is
+     `border-box`, so the opaque fill is painted under the border and the ring
+     is blended on top. Where the two coverages disagree along the caps you get
+     a doubled, stair-stepped stroke, and halving the alpha halves the edge
+     contrast that would otherwise hide it. On a pill sitting at a fractional x
+     (flex items are as wide as their text) the result is visibly jagged, which
+     is what the selected filter chip looked like. `--line-accent` is the same
+     colour, already blended, so the stroke is one uniform edge.
+
+     Anything else that marks a control as selected wants these too, rather
+     than an alpha border of its own. */
   .chip {
     @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-surface
            px-3 py-1 text-xs font-medium text-subtle transition-colors
-           hover:border-accent/40 hover:text-ink;
+           hover:border-line-accent-soft hover:text-ink;
   }
 
   .chip-active {
-    @apply border-accent/50 bg-accent-soft text-accent;
+    @apply border-line-accent bg-accent-soft text-accent;
   }
 
   .input {
@@ -145,7 +184,16 @@
   }
 
   /* Long horizontal content (tables, chart rows) scrolls inside its own box
-     so the page body never scrolls sideways. */
+     so the page body never scrolls sideways.
+
+     It clips *vertically* as well, and nothing here can stop it: CSS resolves
+     `overflow-y` to `auto` as soon as `overflow-x` is not `visible`, so this is
+     a scroll container on both axes whatever it is asked for. Anything inside
+     that leaves its own box — a card lifting on hover, a shadow, a ring — is
+     cut off at the padding edge unless the container reserves the room. Give
+     it padding and take the same amount back as a negative margin, the way
+     `PosterRail` does, rather than reaching for z-index: this is a clip, not a
+     stacking order, and no z-index escapes it. */
   .scroll-x {
     @apply overflow-x-auto overscroll-x-contain;
   }

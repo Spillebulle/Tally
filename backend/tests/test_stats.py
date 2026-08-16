@@ -2426,3 +2426,306 @@ async def test_rankings_take_the_browse_filters(authed_client, db):
     narrowed = await _block(authed_client, "rankings", days=30, tz="UTC", genre="Horror")
     assert [row["label"] for row in narrowed["studios"]] == ["Universal"]
     assert [row["title"] for row in narrowed["top_films"]] == ["The Thing"]
+
+
+# --- the films / television scope -----------------------------------------
+#
+# `?media=` is the page's own control and is deliberately *not*
+# `MediaFilters.media_type`: television has to mean shows, seasons and episodes
+# together, or somebody who only watches television reads as having watched
+# nothing. The tests below are mostly about that word "together", and about the
+# scope reaching every block rather than the two somebody remembered.
+
+
+def _special(show: MediaItem, number: int, **kwargs) -> MediaItem:
+    """An episode Plex filed under season 0."""
+    return MediaItem(
+        guid_key=f"test:{uuid4()}",
+        media_type=MediaType.EPISODE,
+        title=f"Special {number}",
+        show_id=show.id,
+        season_number=0,
+        episode_number=number,
+        **kwargs,
+    )
+
+
+async def _mixed_history(db):
+    """One film and one episode, both played in the same window."""
+    user = await _user(db)
+    (film,) = await _add(db, _movie("Heat", year=1995, genres=["Crime"], studio="Warner"))
+    (show,) = await _add(db, _show("The Wire", year=2002, leaf_count=60, studio="HBO"))
+    (episode,) = await _add(db, _episode(show, 1, year=2002))
+    await _log(db, user, film, _utc_at(3, 12))
+    await _log(db, user, episode, _utc_at(3, 13))
+    return user, film, show, episode
+
+
+async def test_media_scope_splits_films_from_television(authed_client, db):
+    await _mixed_history(db)
+
+    everything = await _stats(authed_client, days=30, tz="UTC")
+    assert everything["watch_events"] == 2
+    assert everything["total_movies_watched"] == 1
+    assert everything["total_episodes_watched"] == 1
+
+    films = await _stats(authed_client, days=30, tz="UTC", media="movies")
+    assert films["watch_events"] == 1
+    assert films["total_movies_watched"] == 1
+    assert films["total_episodes_watched"] == 0
+
+    television = await _stats(authed_client, days=30, tz="UTC", media="shows")
+    assert television["watch_events"] == 1
+    assert television["total_movies_watched"] == 0
+    assert television["total_episodes_watched"] == 1
+    # The whole point of a family rather than one row type: an episode play is
+    # television, and the series it belongs to is counted with it.
+    assert television["total_shows_watched"] == 1
+
+
+async def test_media_scope_is_a_literal_so_a_stale_url_is_a_422(authed_client):
+    response = await authed_client.get("/api/stats", params={"media": "tv"})
+    assert response.status_code == 422
+
+
+async def test_media_scope_reaches_every_block_that_can_be_scoped(authed_client, db):
+    """Not two of them. The scope is applied in `_scope_items`, which every
+    block's item conditions pass through, so this is the test that the wiring
+    holds rather than a test of each aggregation."""
+    user, film, show, episode = await _mixed_history(db)
+    await _watchlist(db, user, film, _utc_at(10, 12))
+    await _watchlist(db, user, show, _utc_at(10, 12))
+    await _plex_mapping(db, film, "server-a")
+    await _plex_mapping(db, show, "server-a")
+    await _rate(db, user, film, 8)
+    await _rate(db, user, show, 6)
+
+    films = {"days": 30, "tz": "UTC", "media": "movies"}
+    television = {"days": 30, "tz": "UTC", "media": "shows"}
+
+    ranked_films = await _block(authed_client, "rankings", **films)
+    assert [row["title"] for row in ranked_films["top_films"]] == ["Heat"]
+    assert ranked_films["top_shows"] == []
+    ranked_tv = await _block(authed_client, "rankings", **television)
+    assert [row["title"] for row in ranked_tv["top_shows"]] == ["The Wire"]
+    assert ranked_tv["top_films"] == []
+
+    # Seasonality, which has no window of its own but takes the same scope.
+    assert (await _seasonality(authed_client, tz="UTC", media="movies"))["plays"] == 1
+    assert (await _seasonality(authed_client, tz="UTC", media="shows"))["plays"] == 1
+
+    # Watchlist conversion — the entries are the subject, not the plays.
+    assert (await _block(authed_client, "watchlist", days=60, tz="UTC"))["added"] == 2
+    assert (await _block(authed_client, "watchlist", days=60, tz="UTC", media="movies"))["added"] == 1
+    assert (await _block(authed_client, "watchlist", days=60, tz="UTC", media="shows"))["added"] == 1
+
+    # Coverage, where the scope meets the inventory's own "movies and shows".
+    covered_films = await _block(authed_client, "coverage", media="movies")
+    assert [row["label"] for row in covered_films["by_type"]] == ["Movies"]
+    covered_tv = await _block(authed_client, "coverage", media="shows")
+    assert [row["label"] for row in covered_tv["by_type"]] == ["Shows"]
+
+    # Rating depth, over the subject set of what was watched.
+    assert (await _block(authed_client, "ratings", **films))["rated"] == 1
+    assert (await _block(authed_client, "ratings", **television))["rated"] == 1
+
+
+async def test_series_progress_answers_nothing_under_the_films_scope(authed_client, db):
+    """A film has no episodes to be part-way through. The parameter is accepted
+    rather than rejected — the page carries one scope and a shared link must not
+    422 on the section that cannot use it — and the answer is zero."""
+    await _mixed_history(db)
+
+    assert (await _block(authed_client, "shows"))["shows_started"] == 1
+    assert (await _block(authed_client, "shows", media="shows"))["shows_started"] == 1
+    films = await _block(authed_client, "shows", media="movies")
+    assert films["shows_started"] == 0
+    assert films["in_progress"] == []
+
+
+async def test_the_scope_still_buckets_days_in_the_viewers_zone(authed_client, db):
+    """The scope narrows *which* rows, never *when* they happened. A play at
+    23:30 UTC is the next day in Auckland whether or not the page is scoped to
+    films, and this pins the two controls together because a scope applied as an
+    extra WHERE is exactly the kind of change that could reach the bucketing."""
+    user = await _user(db)
+    (film,) = await _add(db, _movie("Late Film"))
+    when = _utc_at(2, 23, 30)
+    await _log(db, user, film, when)
+
+    local = when.astimezone(ZoneInfo(AUCKLAND))
+    assert local.date().isoformat() != when.date().isoformat()
+
+    scoped = await _stats(authed_client, days=30, tz=AUCKLAND, media="movies")
+    assert _day(scoped["activity_by_day"], local.date().isoformat()) == 1
+    assert _day(scoped["activity_by_day"], when.date().isoformat()) == 0
+    # And the hour profile, which is the other thing assigned from the local
+    # clock rather than from the stored instant.
+    assert _slot(scoped["by_hour"], local.hour)["plays"] == 1
+
+
+# --- specials do not count towards completion ------------------------------
+
+
+async def test_specials_are_out_of_series_completion_by_default(authed_client, db):
+    """Season 0 is a Christmas episode and six webisodes. Counting them told
+    somebody who had watched every episode of a series that they were at 88%,
+    and kept the series in "still going" forever."""
+    user = await _user(db)
+    # Plex's `leaf_count` counts the specials, so both ends have to be adjusted.
+    (show,) = await _add(db, _show("Firefly", leaf_count=16))
+    episodes = await _add(db, *[_episode(show, number) for number in range(1, 15)])
+    await _add(db, _special(show, 1), _special(show, 2))
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(5, 12))
+
+    default = await _block(authed_client, "shows")
+    assert default["includes_specials"] is False
+    # 14 of 14 real episodes: finished, and not listed as still going.
+    assert default["shows_completed"] == 1
+    assert default["in_progress"] == []
+
+    including = await _block(authed_client, "shows", include_specials=True)
+    assert including["includes_specials"] is True
+    row = including["in_progress"][0]
+    assert row["episodes_watched"] == 14
+    assert row["episodes_total"] == 16
+    assert row["percent_complete"] == 87.5
+
+
+async def test_a_watched_special_does_not_count_towards_completion(authed_client, db):
+    """The numerator half. Watching the Christmas special is not 9% of a series,
+    and with the denominator already corrected it would otherwise read as
+    progress the viewer has not made."""
+    user = await _user(db)
+    (show,) = await _add(db, _show("Doctor Who", leaf_count=12))
+    (episode,) = await _add(db, _episode(show, 1))
+    (special,) = await _add(db, _special(show, 1))
+    await _log(db, user, episode, _utc_at(5, 12))
+    await _log(db, user, special, _utc_at(4, 12))
+
+    row = (await _block(authed_client, "shows"))["in_progress"][0]
+    assert row["episodes_watched"] == 1
+    # 12 from Plex, less the one special Tally holds.
+    assert row["episodes_total"] == 11
+
+    including = (await _block(authed_client, "shows", include_specials=True))["in_progress"][0]
+    assert including["episodes_watched"] == 2
+    assert including["episodes_total"] == 12
+
+
+async def test_an_episode_with_no_season_number_is_not_a_special(authed_client, db):
+    """`NULL != 0` is NULL in SQL, so a naive filter would drop these rows from
+    both halves — silently, and only for the shows Plex never placed."""
+    user = await _user(db)
+    (show,) = await _add(db, _show("Unplaced", leaf_count=4))
+    (episode,) = await _add(
+        db,
+        MediaItem(
+            guid_key=f"test:{uuid4()}",
+            media_type=MediaType.EPISODE,
+            title="Episode 1",
+            show_id=show.id,
+            season_number=None,
+            episode_number=1,
+        ),
+    )
+    await _log(db, user, episode, _utc_at(5, 12))
+
+    row = (await _block(authed_client, "shows"))["in_progress"][0]
+    assert row["episodes_watched"] == 1
+    assert row["episodes_total"] == 4
+
+
+async def test_a_total_no_larger_than_the_specials_held_is_left_alone(authed_client, db):
+    """The guard. If Plex's own total is not bigger than the specials we hold it
+    plainly did not include them, and subtracting anyway would report a series
+    as more finished than it is."""
+    user = await _user(db)
+    (show,) = await _add(db, _show("Odd Data", leaf_count=2))
+    (episode,) = await _add(db, _episode(show, 1))
+    await _add(db, _special(show, 1), _special(show, 2), _special(show, 3))
+    await _log(db, user, episode, _utc_at(5, 12))
+
+    row = (await _block(authed_client, "shows"))["in_progress"][0]
+    assert row["episodes_total"] == 2
+
+
+async def test_the_item_page_and_the_stats_page_agree_about_completion(authed_client, db):
+    """The reason there is one definition rather than three. `episode_progress`
+    feeds the item page and Continue Watching; `_show_completion` feeds the
+    stats block. A series finished on one screen must not be 92% on the other."""
+    from app.serializers import episode_progress
+
+    user = await _user(db)
+    # Plex counts the special in `leaf_count`: twelve episodes and one special.
+    (show,) = await _add(db, _show("Fawlty Towers", leaf_count=13))
+    episodes = await _add(db, *[_episode(show, number) for number in range(1, 13)])
+    await _add(db, _special(show, 1))
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(5, 12))
+        db.add(UserMediaState(user_id=user.id, media_item_id=episode.id, view_count=1))
+    await db.commit()
+
+    watched, total = await episode_progress(db, user.id, show.id)
+    assert (watched, total) == (12, 12)
+    assert (await _block(authed_client, "shows"))["shows_completed"] == 1
+
+
+# --- the watchlist date ----------------------------------------------------
+
+
+async def test_conversion_prefers_plexs_own_watchlist_date(authed_client, db):
+    """`WatchlistEntry.added_at` is when *Tally* first saw the entry, which on a
+    first sync is the same instant for a list built over years. Plex's
+    `watchlistedAt` is the real answer wherever Discover sends one."""
+    user = await _user(db)
+    (film,) = await _add(db, _movie("Arrival"))
+    # Tally saw it yesterday; Plex says it was watchlisted 40 days ago.
+    await _watchlist(db, user, film, _utc_at(1, 12), plex_added_at=_utc_at(40, 12))
+    await _log(db, user, film, _utc_at(20, 12))
+
+    stats = await _block(authed_client, "watchlist", days=90, tz="UTC")
+    assert stats["added"] == 1
+    assert stats["plex_dated"] == 1
+    # Played 20 days after Plex's date. Priced from Tally's it would be a play
+    # *before* the add and no conversion at all.
+    assert stats["converted"] == 1
+    assert stats["median_days_to_watch"] == 20.0
+
+    # And the window bounds the same date it prices against.
+    assert (await _block(authed_client, "watchlist", days=7, tz="UTC"))["added"] == 0
+
+
+async def test_an_entry_plex_never_dated_is_reported_as_tallys_own(authed_client, db):
+    """Not faked, and not hidden: the row keeps Tally's date and says so, so the
+    page can label it rather than passing it off as Plex's."""
+    user = await _user(db)
+    (film,) = await _add(db, _movie("Paprika"))
+    await _watchlist(db, user, film, _utc_at(10, 12))
+
+    stats = await _block(authed_client, "watchlist", days=30, tz="UTC")
+    assert stats["added"] == 1
+    assert stats["plex_dated"] == 0
+    assert stats["waiting"][0]["added_on_plex"] is False
+
+
+async def test_watchlisted_at_is_read_and_added_at_is_not():
+    """The one field that names the thing, and the one that does not.
+
+    `addedAt` is on every Plex Metadata row and on a Discover row it is the
+    *catalogue's* date — reading it would hand every entry a confident, wrong
+    "added" date that nothing downstream could question.
+    """
+    from app.services.plex_tv import watchlisted_at
+
+    moment = datetime(2024, 3, 1, 12, 0, tzinfo=UTC)
+    epoch = int(moment.timestamp())
+
+    assert watchlisted_at({"UserState": {"watchlistedAt": epoch}}) == moment
+    # Some responses inline it rather than nesting it.
+    assert watchlisted_at({"watchlistedAt": str(epoch)}) == moment
+    # The catalogue date is ignored, however tempting.
+    assert watchlisted_at({"addedAt": epoch}) is None
+    assert watchlisted_at({}) is None
+    assert watchlisted_at({"UserState": {"watchlistedAt": "not a date"}}) is None

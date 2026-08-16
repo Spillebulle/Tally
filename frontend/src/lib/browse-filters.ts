@@ -6,6 +6,7 @@ import type {
   ServerOption,
   WatchStatus,
 } from './types'
+import { certificateLabel } from './certificates'
 import { localDateKey, parseLocalDateLabel, STATUS_LABELS } from './utils'
 
 /**
@@ -150,9 +151,19 @@ export interface MultiValue {
   all: boolean
 }
 
-/** The values a multi filter is narrowing on, for a page title or a subtitle. */
-export const namesOf = (value: MultiValue): string =>
-  value.include.join(', ')
+/**
+ * The values a multi filter is narrowing on, for a page title or a subtitle.
+ *
+ * `format` is how the value is *written*, never what it is: a certificate is
+ * stored as `pg_13` and printed as `PG-13`, and a page headed "Rated pg_13" is
+ * showing the reader the database's spelling of their own filter. Optional, so
+ * a facet whose values are already words — a genre, a studio — passes nothing
+ * and reads exactly as it did.
+ */
+export const namesOf = (
+  value: MultiValue,
+  format?: (raw: string) => string,
+): string => value.include.map((name) => (format ? format(name) : name)).join(', ')
 
 /** How far a free-text search reaches. `title` unless the user widens it. */
 export type SearchScope = 'title' | 'all'
@@ -323,12 +334,16 @@ export type FilterControl =
   | { kind: 'select'; lists?: keyof FilterLists }
   | {
       /**
-       * A chip per value, cycling off → include → exclude → off.
+       * A searchable dropdown with a three-state checkbox per value, cycling
+       * off → include → exclude → off.
        *
        * A `<select multiple>` is unusable — it needs a modifier key nobody
        * discovers, it drops the whole selection on a stray click, and it cannot
-       * say "not this" at all. Chips are the vocabulary this app already has,
-       * and they hold three states legibly.
+       * say "not this" at all. A flat row of chips, which this was, reads
+       * beautifully for six genres and not at all for sixty: the row scrolls
+       * sideways, and a value you cannot see is a value you cannot pick. The
+       * dropdown holds the same three states and adds the one thing a long list
+       * needs, which is a way to type the name you are after.
        */
       kind: 'multi'
       /**
@@ -340,6 +355,14 @@ export type FilterControl =
       minOptions?: number
       /** Offer the any/all toggle. Set by `multiFilter` from the same flag. */
       andable?: boolean
+      /**
+       * How one option is drawn, where plain text is not enough.
+       *
+       * `badge` boxes the label the way a certificate is printed. Still only a
+       * *look* — the table says which one, the renderer owns what it means to
+       * draw, and neither touches the value that reaches the URL.
+       */
+      style?: 'badge'
     }
   | { kind: 'segmented'; caption: string }
   | { kind: 'toggle'; on: string }
@@ -899,11 +922,24 @@ export function filterTable(page: FilterPage): FilterTable {
       options: (lists) => lists.genres.map((name) => ({ value: name, label: name })),
     }),
 
+    /**
+     * The certificate, as the board wrote it rather than as the agent stored
+     * it.
+     *
+     * The value stays the raw string — `pg_13`, `gb/12A`, `TV-MA` — because
+     * that is what `?content_rating=` matches, what every existing bookmark
+     * carries and what a `facetLink` on an item page points at. Only the
+     * *label* is presentable, which is why this is a `label` on the option and
+     * not a transform anywhere near `read`, `write` or `toQuery`.
+     */
     content_rating: multiFilter('content_rating', 'content_rating', 'Certificate', {
       group: 'title',
-      control: { kind: 'multi' },
+      control: { kind: 'multi', style: 'badge' },
       options: (lists) =>
-        lists.contentRatings.map((name) => ({ value: name, label: name })),
+        lists.contentRatings.map((name) => ({
+          value: name,
+          label: certificateLabel(name),
+        })),
     }),
 
     // Reached by clicking the value on an item page: a library holds a dozen

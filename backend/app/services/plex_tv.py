@@ -98,6 +98,47 @@ class PlexUnreachableError(PlexTVError):
     """
 
 
+def watchlisted_at(meta: dict[str, Any]) -> datetime | None:
+    """When *this account* watchlisted the title, if Discover said.
+
+    Read carefully, because getting it wrong is invisible — every date on the
+    watchlist conversion block would still look plausible, just wrong.
+
+    **What Plex actually exposes.** `watchlistedAt` is Plex's own name for the
+    moment, and it is documented in exactly one place: as a *sort key* on
+    `/library/sections/watchlist/all` (`sort=watchlistedAt:desc`, labelled
+    "Added At"). As a **field** it appears on the per-account `UserState` block,
+    which `includeUserState=1` asks for. Some responses inline it on the
+    Metadata row instead, so both shapes are read.
+
+    **What is deliberately not read: `addedAt`.** Every Plex Metadata row has
+    one and it is tempting, but on a Discover row it is the *catalogue's* date —
+    when the title entered Plex's global metadata, which has nothing to do with
+    this account. Taking it would hand the stats page a confident, wrong "added"
+    date for every entry, and nothing downstream could tell. `PlexMapping.added_at`
+    reads `addedAt` from a *media server* payload, where it does mean something
+    (when the file landed on that server); the two are not interchangeable.
+
+    Returns None when Discover said nothing, and the caller then falls back to
+    when Tally first saw the entry — labelled as such, rather than passed off as
+    Plex's answer.
+    """
+    for source in (meta.get("UserState"), meta):
+        if not isinstance(source, dict):
+            continue
+        raw = source.get("watchlistedAt")
+        if raw in (None, "", 0):
+            continue
+        try:
+            # Epoch seconds, like every other Plex timestamp. A string is
+            # accepted because Plex's XML-shaped JSON hands numbers back as
+            # strings often enough to be worth not caring.
+            return datetime.fromtimestamp(int(raw), tz=UTC)
+        except (TypeError, ValueError, OSError, OverflowError):
+            log.debug("Unreadable watchlistedAt on a watchlist entry: %r", raw)
+    return None
+
+
 @dataclass(slots=True)
 class WatchlistFetch:
     """A watchlist read, and whether every page of it arrived.
@@ -309,6 +350,13 @@ class PlexTVClient:
         Returns the items *and* whether the fetch actually completed. A caller
         that mirrors removals has to know the difference: a half-fetched list
         looks exactly like "the user deleted everything after page one".
+
+        `includeUserState=1` and the `watchlistedAt` sort are both here for
+        **when the user watchlisted something** — see `watchlisted_at` for what
+        the payload does and does not promise about that. The sort is asked for
+        even though nothing reads the order, because it is the one thing Plex
+        documents about that moment, and a list that arrives newest-first is the
+        order somebody would expect if the timestamps ever go missing again.
         """
         items: list[dict[str, Any]] = []
         complete = True
@@ -329,6 +377,14 @@ class PlexTVClient:
                         # library scan produces — so every watchlist entry became
                         # a second row for a film already in the library.
                         "includeGuids": 1,
+                        # The per-account block, which is where `watchlistedAt`
+                        # lives when Discover sends it at all. Without this the
+                        # payload is pure catalogue metadata and carries no
+                        # trace of *this* account's relationship to the title.
+                        "includeUserState": 1,
+                        # Plex's own name for "Added At" on a watchlist, and the
+                        # only place the concept is documented — as a sort key.
+                        "sort": "watchlistedAt:desc",
                     },
                 )
                 if resp.status_code == 401:
