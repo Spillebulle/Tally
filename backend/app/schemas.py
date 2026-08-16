@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import MediaType, WatchSource, WatchStatus
+from .models import ApiKeyScope, MediaType, WatchSource, WatchStatus
 
 
 class ORMModel(BaseModel):
@@ -254,6 +254,10 @@ class WatchlistEntryOut(ORMModel):
 
 class ApiKeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
+    # Anything unrecognised is a 422 rather than a quietly narrowed key: the
+    # caller must know what they asked for. Omitting it keeps the historical
+    # behaviour, so existing clients are unaffected.
+    scope: ApiKeyScope = ApiKeyScope.FULL
 
 
 class ApiKeyOut(ORMModel):
@@ -261,6 +265,9 @@ class ApiKeyOut(ORMModel):
     name: str
     # The visible half only. The rest exists nowhere but the owner's copy.
     prefix: str
+    # A row written before scopes existed reads back as "full", which is what it
+    # was issued with.
+    scope: ApiKeyScope = ApiKeyScope.FULL
     created_at: datetime
     last_used_at: datetime | None = None
     revoked_at: datetime | None = None

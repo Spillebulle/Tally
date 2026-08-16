@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, useTheme, useToast, type Theme } from '@/lib/app-context'
-import type { ApiKeyCreated, Library, Server } from '@/lib/types'
+import type { ApiKeyCreated, ApiKeyScope, Library, Server } from '@/lib/types'
 import { cn, copyText, formatDateTime, relativeTime } from '@/lib/utils'
 import { EmptyState, PageHeader, Segmented, Spinner, Toggle } from '@/components/ui'
 import { SyncProgress, syncLabel } from '@/components/Layout'
@@ -389,7 +389,7 @@ export function Settings() {
       {/* --- API keys --------------------------------------------------- */}
       <Section
         title="API keys"
-        description="For scripts and integrations. A key acts as this account, so treat it like a password."
+        description="For scripts and integrations. A key acts as this account within the access you give it, so treat it like a password."
       >
         <ApiKeys />
       </Section>
@@ -436,10 +436,32 @@ export function Settings() {
   )
 }
 
+/** Fixed when the key is issued — changing it is revoke and re-issue. */
+const SCOPE_OPTIONS: Array<{ value: ApiKeyScope; label: string }> = [
+  { value: 'full', label: 'Full' },
+  { value: 'read_only', label: 'Read-only' },
+  { value: 'stats', label: 'Stats only' },
+]
+
+const SCOPE_LABEL: Record<ApiKeyScope, string> = {
+  full: 'Full access',
+  read_only: 'Read-only',
+  stats: 'Stats only',
+}
+
+const SCOPE_HELP: Record<ApiKeyScope, string> = {
+  full: 'Everything this account can do — including changing data, triggering syncs and, if you are an administrator, admin endpoints. Give it only to something you would trust with your password.',
+  read_only:
+    'Reads anything you can see, writes nothing. Every other method is refused, so nothing using this key can change or delete data.',
+  stats:
+    'Only the statistics, metrics, health and version endpoints. This is the one for a Grafana datasource: anyone who can edit a dashboard there can send requests with the key it holds.',
+}
+
 function ApiKeys() {
   const queryClient = useQueryClient()
   const { notify } = useToast()
   const [name, setName] = useState('')
+  const [scope, setScope] = useState<ApiKeyScope>('full')
   // The plaintext exists only in this response. Once it leaves the screen it is
   // gone for good, so it is held here until the user dismisses it deliberately.
   const [issued, setIssued] = useState<ApiKeyCreated | null>(null)
@@ -447,7 +469,8 @@ function ApiKeys() {
   const keys = useQuery({ queryKey: ['api-keys'], queryFn: api.apiKeys.list })
 
   const create = useMutation({
-    mutationFn: (value: string) => api.apiKeys.create(value),
+    mutationFn: (value: { name: string; scope: ApiKeyScope }) =>
+      api.apiKeys.create(value.name, value.scope),
     onSuccess: (key) => {
       setIssued(key)
       setName('')
@@ -472,25 +495,40 @@ function ApiKeys() {
       <form
         onSubmit={(event) => {
           event.preventDefault()
-          if (name.trim()) create.mutate(name.trim())
+          if (name.trim()) create.mutate({ name: name.trim(), scope })
         }}
-        className="flex gap-2"
       >
-        <input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="What is this key for? e.g. Home Assistant"
-          aria-label="New API key name"
-          className="input"
-        />
-        <button
-          type="submit"
-          disabled={create.isPending || !name.trim()}
-          className="btn-primary shrink-0"
-        >
-          {create.isPending ? <Spinner /> : <PlusIcon />}
-          Create
-        </button>
+        <div className="flex gap-2">
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="What is this key for? e.g. Home Assistant"
+            aria-label="New API key name"
+            className="input"
+          />
+          <button
+            type="submit"
+            disabled={create.isPending || !name.trim()}
+            className="btn-primary shrink-0"
+          >
+            {create.isPending ? <Spinner /> : <PlusIcon />}
+            Create
+          </button>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <span className="text-sm font-medium text-ink">Access</span>
+          <Segmented
+            label="API key access"
+            value={scope}
+            onChange={setScope}
+            options={SCOPE_OPTIONS}
+          />
+        </div>
+        <p className="mt-2 text-xs text-muted">{SCOPE_HELP[scope]}</p>
+        <p className="mt-1 text-xs text-muted">
+          Fixed when the key is issued — to change it, revoke this key and make
+          another.
+        </p>
       </form>
 
       {issued && (
@@ -562,6 +600,18 @@ function ApiKeys() {
                   )}
                 </p>
                 <p className="font-mono text-xs text-muted">{key.prefix}…</p>
+                <p className="mt-1">
+                  <span
+                    className={cn(
+                      'rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+                      key.scope === 'full'
+                        ? 'bg-raised text-muted'
+                        : 'bg-accent-soft text-accent',
+                    )}
+                  >
+                    {SCOPE_LABEL[key.scope]}
+                  </span>
+                </p>
                 <p className="mt-0.5 text-xs text-muted">
                   Created {formatDateTime(key.created_at)} ·{' '}
                   {key.last_used_at
@@ -589,8 +639,10 @@ function ApiKeys() {
 
       <p className="mt-3 text-xs text-muted">
         Send it as <code className="font-mono">X-API-Key</code> or{' '}
-        <code className="font-mono">Authorization: Bearer</code>. Every endpoint
-        under <code className="font-mono">/api</code> accepts it, and{' '}
+        <code className="font-mono">Authorization: Bearer</code> — in a header,
+        never in the URL, which ends up in logs. Endpoints under{' '}
+        <code className="font-mono">/api</code> accept it as far as its access
+        allows, and{' '}
         <a href="/api/docs" className="text-accent hover:underline">
           the API docs
         </a>{' '}

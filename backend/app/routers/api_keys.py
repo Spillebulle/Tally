@@ -1,10 +1,19 @@
 """API key management.
 
-A key acts as its owning user, with the same access that user's session has —
-including admin endpoints if they are an admin. There are no per-key scopes:
-this is a self-hosted tracker with a handful of accounts, and a scope model
-nobody configures is complexity pretending to be security. Revoke and re-issue
-is the intended way to change what a key can do.
+A key acts as its owning user, limited by its scope. `full` is the historical
+behaviour — the same access that user's session has, admin endpoints included
+if they are an admin — and stays the default so nothing breaks on upgrade.
+`read_only` and `stats` exist because a key's usual destination is somewhere
+like Grafana or Home Assistant, where anybody who can edit a dashboard can
+proxy arbitrary requests through the stored credential; a dashboard that only
+reads numbers has no business being able to delete a user.
+
+The scope is fixed at creation. Changing what a key can do is still revoke and
+re-issue: a mutable scope would mean a key's power depends on when you look,
+which is exactly what makes a leaked credential hard to reason about.
+
+Enforcement is **not** here. It lives in `deps._enforce_key_scope`, the one
+place a key is resolved, so a route added later cannot forget it.
 
 The plaintext is returned exactly once, from the create call. Only its hash is
 stored, so it cannot be recovered or re-displayed — losing it means issuing a
@@ -60,6 +69,7 @@ async def create_key(
         name=payload.name.strip() or "API key",
         prefix=prefix,
         key_hash=key_hash,
+        scope=payload.scope.value,
     )
     db.add(key)
     await db.commit()

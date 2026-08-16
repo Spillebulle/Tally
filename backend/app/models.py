@@ -105,6 +105,23 @@ class CreditKind(str, enum.Enum):
     DIRECTOR = "director"
 
 
+class ApiKeyScope(str, enum.Enum):
+    """How much of the API a key may reach.
+
+    Stored as its *value* in a plain ``String`` column rather than through
+    ``sqlalchemy.Enum``, which would persist the member *name* ("FULL") and
+    disagree with the light migration's ``DEFAULT 'full'`` on every upgraded
+    database.
+
+    ``FULL`` is the historical behaviour and stays the default, so nothing that
+    already holds a key loses access on upgrade.
+    """
+
+    FULL = "full"
+    READ_ONLY = "read_only"
+    STATS = "stats"
+
+
 class SyncStatus(str, enum.Enum):
     RUNNING = "running"
     SUCCESS = "success"
@@ -456,6 +473,18 @@ class WatchEvent(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "dedupe_key", name="uq_watch_event_dedupe"),
         Index("ix_watch_events_user_time", "user_id", "watched_at"),
+        # "every play of this item, by this user, in order" — what rewatch
+        # ranking asks for, and what `history.delete_event` and the webhook
+        # adoption lookup in `sync_service` already scan for without a covering
+        # index. Mirrored in `db._run_light_migrations`: `create_all` only makes
+        # indexes for a table it is creating, so an existing database would
+        # never get this one.
+        Index(
+            "ix_watch_events_user_item_time",
+            "user_id",
+            "media_item_id",
+            "watched_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -626,7 +655,7 @@ class PlexPin(Base):
 
 
 class ApiKey(Base):
-    """A long-lived credential that acts as its owning user.
+    """A long-lived credential that acts as its owning user, within its scope.
 
     Only the hash is stored, so a leaked database does not hand over working
     keys, and the plaintext is shown exactly once at creation. Revocation is a
@@ -641,6 +670,12 @@ class ApiKey(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(128))
+    # One of `ApiKeyScope`, stored as its value. Enforced in `deps` on the way
+    # in, never by the routers. Existing rows read back as "full", which is the
+    # behaviour they were issued with.
+    scope: Mapped[str] = mapped_column(
+        String(16), default=ApiKeyScope.FULL.value, server_default=ApiKeyScope.FULL.value
+    )
     # The visible half, stored plainly so a key can be looked up without
     # scanning every row — and so the UI can tell two keys apart.
     prefix: Mapped[str] = mapped_column(String(32), index=True)
