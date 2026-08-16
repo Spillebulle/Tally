@@ -569,6 +569,27 @@ Three rules keep it honest, and each was a bug first:
   before it, or the first render would throw the page away a moment ahead of
   its own results.
 
+**A saved view is that URL, stored.** `SavedView` holds a name and the raw
+query string, per user and per page, and nothing on the server parses it — the
+whole feature is `savedQuery` (canonicalise the current query) and `applyView`
+(hand a stored one back through the same `normalise`). That is why a view saved
+before a filter was renamed degrades to the page defaults instead of erroring:
+the `read` that guards a hand-edited URL is the only thing that ever interprets
+one. A parser on the server would be a second validator that can disagree with
+the first, which is the one failure this shape rules out.
+
+Two consequences worth keeping:
+
+* **Applying a view pushes; changing a filter replaces.** Same rule, opposite
+  side: a saved view discards the entire current query in one deliberate act
+  rather than narrowing it, so without a history entry the view the user was
+  looking at is gone — the exact loss that moved `page` into the URL. Paging
+  pushes for that reason and this is the same move, larger.
+* **`page` is the filter *surface*, not the route.** All five Browse modes
+  share one shelf of views because they share every filter and every sort; the
+  watchlist and History have their own. `FilterPage.id` is required so a browse
+  page added later cannot silently inherit another's.
+
 `media_filters.py` must **not** get `from __future__ import annotations` —
 FastAPI resolves `MediaFilters.__init__`'s annotations at import time to build
 the query parameters, and stringised annotations leave it with unresolvable

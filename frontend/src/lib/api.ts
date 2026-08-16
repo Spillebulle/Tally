@@ -12,6 +12,8 @@ import type {
   Paginated,
   PlexAuthPoll,
   PlexAuthStart,
+  SavedView,
+  SavedViewPage,
   Seasonality,
   Server,
   Stats,
@@ -301,6 +303,23 @@ export const api = {
     remove: (mediaItemId: number) => del<void>(`/api/watchlist/${mediaItemId}`),
     searchDiscover: (q: string) =>
       get<MediaCard[]>('/api/watchlist/search', { q }),
+  },
+
+  /**
+   * Saved browse views — a name and the raw query string, per page.
+   *
+   * `create` is an upsert on the name: saving twice under one name re-points it
+   * rather than duplicating, so there is no "already exists" branch for the UI
+   * to handle. Nothing here parses the query; the URL is the only place a
+   * filter value is ever interpreted.
+   */
+  views: {
+    list: (page: SavedViewPage) => get<SavedView[]>('/api/views', { page }),
+    save: (page: SavedViewPage, name: string, query: string) =>
+      post<SavedView>('/api/views', { page, name, query }),
+    update: (id: number, body: { name?: string; query?: string }) =>
+      patch<SavedView>(`/api/views/${id}`, body),
+    remove: (id: number) => del<void>(`/api/views/${id}`),
   },
 
   apiKeys: {
