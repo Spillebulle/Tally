@@ -1239,6 +1239,50 @@ async def test_an_episodes_play_is_counted_under_its_shows_genre(authed_client, 
     assert stats["total_episodes_watched"] == 1
     assert stats["total_shows_watched"] == 1
 
+    # And the reading half, which is a different rule from the filtering half:
+    # narrowing *by* a genre goes through `facet_source`'s EXISTS, but asking
+    # *which* genre a play was goes through `facet_value`. This assertion was
+    # missing, so the two disagreed for a while and only the filter worked.
+    assert stats["top_genres"] == [{"label": "Crime", "value": 1.0}]
+
+
+async def test_episode_plays_reach_the_unfiltered_genre_chart(authed_client, db):
+    """The bug this file did not catch: `top_genres` read `MediaItem.genres`
+    straight off the played row, so a binged series contributed nothing at all
+    and the chart was a list of films — while the page copy said a binged
+    series weighs more than a single film.
+
+    It survived because `genres` is `default=list`: an episode holds `[]`, not
+    NULL, so the `coalesce` in `facet_value` never reached the show. Emptiness,
+    not nullness, is the question for a list column."""
+    user = await _user(db)
+    (show,) = await _add(
+        db,
+        MediaItem(
+            guid_key=f"test:{uuid4()}",
+            media_type=MediaType.SHOW,
+            title="The Sopranos",
+            genres=["Crime"],
+        ),
+    )
+    (film,) = await _add(
+        db,
+        MediaItem(
+            guid_key=f"test:{uuid4()}",
+            media_type=MediaType.MOVIE,
+            title="A Film",
+            genres=["Drama"],
+        ),
+    )
+    first, second = await _add(db, _episode(show, 1), _episode(show, 2))
+    await _log(db, user, first, _utc_at(1, 12))
+    await _log(db, user, second, _utc_at(1, 13))
+    await _log(db, user, film, _utc_at(1, 14))
+
+    stats = await _stats(authed_client, days=7, tz="UTC")
+    counts = {row["label"]: row["value"] for row in stats["top_genres"]}
+    assert counts == {"Crime": 2.0, "Drama": 1.0}
+
 
 async def test_a_state_filter_narrows_the_page_without_fanning_the_counts_out(
     authed_client, db

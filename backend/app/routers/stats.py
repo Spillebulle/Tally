@@ -570,7 +570,11 @@ async def _aggregate(
                     MediaItem.id,
                     MediaItem.media_type,
                     MediaItem.runtime_minutes,
-                    MediaItem.genres,
+                    # Not `MediaItem.genres`: an episode carries none of its
+                    # own, so reading the column raw filed every television
+                    # play under no genre and "most-watched genres" quietly
+                    # became a list of films. `facet_value` is the one rule.
+                    facet_value("genres"),
                     MediaItem.is_anime,
                     MediaItem.show_id,
                 ),
