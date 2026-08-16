@@ -542,6 +542,59 @@ class RewatchStats(BaseModel):
     ranked_over: Literal["all_time"] = "all_time"
 
 
+class WatchSession(BaseModel):
+    """One sitting: plays with no gap longer than the threshold between them.
+
+    `started_at` and `ended_at` are both **scrobble** instants, so `started_at`
+    is when the *first* play of the sitting finished, not when it began — Plex
+    records no start time anywhere. A one-play sitting therefore has
+    `started_at == ended_at` and a `minutes` that came from the runtime rather
+    than from the clock. Do not draw these as a timeline; they are a count and
+    a length, not a span.
+
+    `day` is the local day the sitting started on, in the zone
+    `StatsRange.timezone` names.
+    """
+
+    started_at: datetime
+    ended_at: datetime
+    day: date
+    plays: int
+    minutes: int
+    # The title of the first play, and — when every play in the sitting came
+    # from one series — that series. Both are given so the UI can label a binge
+    # by its show and a mixed evening by whatever started it.
+    title: str
+    show_title: str | None = None
+
+
+class SessionStats(BaseModel):
+    """Sittings, worked out by splitting the window's plays on long gaps.
+
+    A judgement call with no right answer, so the threshold it used is part of
+    the payload: `gap_minutes`. Everything here is scoped to the window and to
+    the browse filters, which means a filtered page describes the sittings *of
+    that filter* — narrowing to one genre splits an evening that mixed two.
+
+    `by_size` is the plays-per-sitting histogram, labelled "1" … "5", "6+".
+    """
+
+    gap_minutes: int
+    sessions: int
+    plays: int
+    # Plays and minutes per sitting. Zero when there were no sittings, rather
+    # than null, because a chart axis of "0 episodes a sitting" reads correctly
+    # and a null does not.
+    average_plays: float
+    average_minutes: float
+    # The sitting with the most minutes, and the one with the most plays. They
+    # are usually different: an evening of two films is long, an evening of six
+    # episodes is a binge.
+    longest: WatchSession | None = None
+    biggest_binge: WatchSession | None = None
+    by_size: list[StatCount]
+
+
 class StatsOut(StatsTotals):
     range: StatsRange
     previous: StatsComparison | None = None
@@ -560,6 +613,11 @@ class StatsOut(StatsTotals):
     by_hour: list[TimeBucket]
     punch_card: PunchCard
     rewatch: RewatchStats
+    # Sittings over the same window. One extra query rather than its own
+    # endpoint: it reads the same rows the totals above already came from, and
+    # a page that has the plays but not the shape of the evening is missing
+    # half of what the plays mean.
+    sessions: SessionStats
 
 
 class YearProfile(BaseModel):
@@ -591,6 +649,319 @@ class SeasonalityOut(BaseModel):
     last_play: datetime | None = None
     months: list[TimeBucket]
     years: list[YearProfile]
+
+
+# --- stats: shows, watchlist, coverage, ratings, rankings -----------------
+#
+# Five blocks that used to be one temptation: bolting them onto `GET
+# /api/stats` would have made a page that already runs four aggregations run
+# eleven, on every filter chip. Each of these is a section of the page that can
+# be fetched when it is drawn, and three of them answer a question no window
+# applies to — `/api/stats/seasonality` set that precedent first.
+
+
+class ShowProgress(BaseModel):
+    """How far through one show this user is, and where they stopped.
+
+    `episodes_total` is **Plex's own `leaf_count` and nothing else**, which is
+    why it is nullable and why `percent_complete` is nullable with it. The
+    tempting fallback — count the episode rows Tally holds — is worse than no
+    answer: a show reached only through the history import has exactly the
+    episodes that were played as rows, so that count would report every such
+    show as 100% complete. A show with no known episode count is reported as
+    unknown, is never counted as completed, and is never called abandoned on a
+    percentage it does not have.
+
+    `total_is_stale` says `leaf_count` is smaller than the number of distinct
+    episodes actually watched, which happens when a library has not been
+    rescanned since the season aired, and when specials Tally holds are not in
+    Plex's count. A total smaller than what has demonstrably been watched is
+    not a total: `percent_complete` is null there too, rather than 130% or a
+    clamped 100% that would file the show under "completed" and hide the fact
+    that the number is wrong. `episodes_total` still reports what Plex said, so
+    the UI can show the flag next to it.
+
+    `last_season` / `last_episode` / `last_episode_title` are the most recently
+    watched episode — the drop-off point — not the newest episode that exists.
+    """
+
+    media_item_id: int
+    title: str
+    year: int | None = None
+    poster_url: str
+    status: WatchStatus | None = None
+    episodes_watched: int
+    episodes_total: int | None = None
+    percent_complete: float | None = None
+    total_is_stale: bool = False
+    last_watched_at: datetime
+    last_season: int | None = None
+    last_episode: int | None = None
+    last_episode_title: str | None = None
+    abandoned: bool = False
+
+
+class ShowCompletionOut(BaseModel):
+    """Show completion and drop-off, over the user's **whole** history.
+
+    Deliberately not windowed, and its own endpoint partly for that reason.
+    "You are 40% through The Wire" is a fact about a viewer and a series, not
+    about a fortnight: scoping the numerator to the window would report a show
+    finished last year as 4% complete because two episodes were rewatched this
+    month, and scoping the *subject* to the window would hide every abandoned
+    show, which is the half of this block that matters. `RewatchStats.
+    most_rewatched` and `SeasonalityOut` opt out of the window for the same
+    kind of reason, and say so the same way.
+
+    The browse filters do apply, so "how far through my anime am I" is one
+    request.
+
+    `abandoned_under_percent` and `abandoned_after_days` are the thresholds
+    that produced `abandoned`, echoed because they are a judgement rather than
+    a fact and the UI has to be able to state them.
+    """
+
+    scope: Literal["all_time"] = "all_time"
+    abandoned_under_percent: float
+    abandoned_after_days: int
+    shows_started: int
+    shows_completed: int
+    shows_in_progress: int
+    shows_abandoned: int
+    # Shows whose episode count Plex never told us, or told us wrongly. They
+    # are still listed under `in_progress` — they are shows you are part-way
+    # through — but they are counted apart as well, because nothing about their
+    # completion is known and a percentage chart that included them would be
+    # inventing it.
+    shows_unknown_total: int
+    in_progress: list[ShowProgress]
+    abandoned: list[ShowProgress]
+
+
+class WatchlistWaiting(BaseModel):
+    """A watchlist entry still waiting to be played. Oldest first."""
+
+    media_item_id: int
+    title: str
+    year: int | None = None
+    media_type: MediaType
+    poster_url: str
+    added_at: datetime
+    days_waiting: int
+
+
+class WatchlistConversionOut(BaseModel):
+    """Does watchlisting something mean you watch it?
+
+    The window bounds `WatchlistEntry.added_at` here — which entries are being
+    asked about — rather than `WatchEvent.watched_at`. That is the only bound
+    that makes the question answerable: an entry added outside the window has
+    no conversion to report inside it.
+
+    **A play before the add is not a conversion.** `converted` counts entries
+    with a play at or after `added_at`; something you had already seen and
+    watchlisted to rewatch is not the watchlist doing its job. `churned`, on
+    the other hand, uses "never played at all, ever" — an entry removed after
+    a play that predated it was not abandoned, it was tidied up.
+
+    A watchlisted *show* converts on any episode play, not only on a play
+    against the show row, which is the only form a show's history ever takes.
+    """
+
+    range: StatsRange
+    tail_days: int
+    added: int
+    converted: int
+    # converted / added, a fraction rather than a percentage. 0.0 when nothing
+    # was added in the window.
+    conversion_rate: float
+    # Days from add to first play, over the converted entries only. Median
+    # rather than mean: one title watchlisted in 2019 and played last week
+    # drags an average past anything useful.
+    median_days_to_watch: float | None = None
+    still_waiting: int
+    waiting_past_tail: int
+    # Removed from the watchlist without ever having been played.
+    churned: int
+    removed: int
+    waiting: list[WatchlistWaiting]
+
+
+class CoverageSlice(BaseModel):
+    label: str
+    owned: int
+    watched: int
+    # watched / owned as a fraction. Never null: a slice only exists because it
+    # owns something.
+    percent: float
+
+
+class CoverageOut(BaseModel):
+    """How much of the shelf has actually been watched.
+
+    "Owned" is a correlated EXISTS on `PlexMapping`, never a join — an item
+    held on two servers is one title, and a join would count it twice. Only
+    movies and shows are counted; an episode is not a title on the shelf.
+
+    **This is the one stats block where `personal` keeps its shared default.**
+    Everywhere else on `/api/stats` home videos count, because a play is a play
+    and the hours are real. This is a library inventory instead — the same
+    question `/api/stats/summary` answers — and a phone recording is not a
+    title you have failed to get round to. So `personal` stays a live
+    parameter here, `exclude` by default and `all` if you ask, rather than the
+    inert one it is on the watch blocks. `includes_personal` reports which it
+    was.
+
+    All-time, and unwindowed for the same reason as `ShowCompletionOut`: "have
+    I seen this" is not a question about a fortnight.
+
+    Decades come from `MediaItem.year` directly. Genres resolve through the
+    parent show when the item carries none, the same rule
+    `media_filters.facet_source` applies — but no episode reaches this block
+    anyway, so in practice they are the title's own.
+    """
+
+    scope: Literal["all_time"] = "all_time"
+    includes_personal: bool
+    owned: int
+    watched: int
+    unwatched: int
+    percent: float
+    by_type: list[CoverageSlice]
+    by_genre: list[CoverageSlice]
+    by_decade: list[CoverageSlice]
+
+
+class RatingSlice(BaseModel):
+    label: str
+    count: int
+    average: float
+    # The crowd's average over the same slice, absent when none of the titles
+    # in it carry a `community_rating`.
+    community_average: float | None = None
+
+
+class ContrarianItem(BaseModel):
+    """A title you and the crowd disagree about. `difference` is yours minus theirs."""
+
+    media_item_id: int
+    title: str
+    year: int | None = None
+    media_type: MediaType
+    poster_url: str
+    rating: float
+    community_rating: float
+    difference: float
+
+
+class RatingDepthOut(BaseModel):
+    """Your ratings against `MediaItem.community_rating`, and how they break down.
+
+    The subject set is what was *watched* in the window — items and the shows
+    their episodes belong to — exactly as `StatsOut.average_rating` computes
+    it, and for the same reason: `rating_updated_at` is stamped when a rating
+    is first pulled from Plex, so scoping by when the rating was made would
+    file a decade of ratings under the week of a fresh install.
+
+    Only titles carrying **both** a rating and a `community_rating` can be
+    compared, so `rated_with_community` is the denominator of every agreement
+    number here and is reported next to `rated` rather than left to be
+    inferred.
+
+    `you_rate_higher` and `you_rate_lower` are named after what they contain
+    rather than "underrated"/"overrated", which reverse depending on who is
+    speaking.
+    """
+
+    range: StatsRange
+    rated: int
+    rated_with_community: int
+    average_rating: float | None = None
+    average_community: float | None = None
+    # Mean signed difference (yours - theirs): positive means you are the
+    # kinder of the two. The absolute one says how far apart you are at all,
+    # which a signed mean near zero can hide completely.
+    average_difference: float | None = None
+    average_absolute_difference: float | None = None
+    # Share of comparable titles within one point either way, 0-1.
+    agreement_within_one: float | None = None
+    kinder_than_crowd: int
+    harsher_than_crowd: int
+    you_rate_higher: list[ContrarianItem]
+    you_rate_lower: list[ContrarianItem]
+    by_genre: list[RatingSlice]
+    by_decade: list[RatingSlice]
+    by_runtime: list[RatingSlice]
+    # Rated titles with no runtime recorded, so they are in no runtime bucket.
+    runtime_unknown: int
+
+
+class RankedTitle(BaseModel):
+    """One row of a title ranking.
+
+    For a show, `media_item_id` is the show and `episodes` is how many distinct
+    episodes were played in the window — `episodes_total` is Plex's
+    `leaf_count`, nullable for the reasons `ShowProgress` documents.
+    """
+
+    media_item_id: int
+    title: str
+    year: int | None = None
+    media_type: MediaType
+    poster_url: str
+    plays: int
+    minutes: int
+    episodes: int | None = None
+    episodes_total: int | None = None
+
+
+class RankedFacet(BaseModel):
+    """One row of a facet ranking — a studio, a network, a decade, a source."""
+
+    label: str
+    plays: int
+    minutes: int
+    # Distinct titles behind the row, so "300 plays" is legible as one show
+    # rather than as thirty films.
+    titles: int
+
+
+class RankingsOut(BaseModel):
+    """The leaderboards: what you watched most of, and where it came from.
+
+    Its own endpoint because it is nine lists. It walks the window's plays once
+    in Python and derives all nine from that pass, so the whole thing is two
+    queries — the plays, and one batched lookup of the show rows the groupings
+    point at.
+
+    **Facets resolve through the parent show.** An episode carries no studio,
+    network or content rating of its own — enrichment skips episodes by design
+    — so each is read from the item or, failing that, from its series, which is
+    the rule `media_filters.facet_source` applies to the filters. `decades` is
+    the deliberate exception and uses the item's own year: an episode has one,
+    and reading it through the series would file a 2019 episode under 1989.
+
+    `by_source` splits `WatchEvent.source` — how the play reached Tally, not
+    what was played. A Plex Pass instance sees webhook and history rows for
+    plays the sync has reconciled into one, so this is a diagnostic as much as
+    a statistic.
+    """
+
+    range: StatsRange
+    limit: int
+    # By distinct episodes watched in the window.
+    top_shows: list[RankedTitle]
+    # Films by plays in the window — a film played twice is a rewatch, and this
+    # is where they surface.
+    top_films: list[RankedTitle]
+    # Films and shows by minutes, episodes rolled up into their series. Where
+    # the hours actually went.
+    top_by_runtime: list[RankedTitle]
+    studios: list[RankedFacet]
+    networks: list[RankedFacet]
+    decades: list[RankedFacet]
+    content_ratings: list[RankedFacet]
+    by_source: list[RankedFacet]
 
 
 PlexAuthPoll.model_rebuild()
