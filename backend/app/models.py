@@ -306,6 +306,14 @@ class MediaItem(Base):
     mal_id: Mapped[int | None] = mapped_column(Integer, default=None, index=True)
     anilist_id: Mapped[int | None] = mapped_column(Integer, default=None)
 
+    # A home video. Plex types one as a movie and the history import has only
+    # its filename to go on, so without this it is indistinguishable from a
+    # film nobody can identify: enrichment retries it weekly forever and the
+    # browse grids list it among the films. Set from the title's shape by
+    # `services/release_names.looks_like_capture_filename`, and re-evaluated on
+    # every import, so a file Plex later matches properly stops being one.
+    is_personal_media: Mapped[bool] = mapped_column(Boolean, default=False)
+
     is_anime: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # Which signal decided it: "library", "mal", "tmdb_keyword", "genre", "manual"…
     anime_source: Mapped[str | None] = mapped_column(String(64), default=None)

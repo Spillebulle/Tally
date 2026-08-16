@@ -112,6 +112,54 @@ async def test_browse_filters_separate_anime(authed_client, db):
     assert search["total"] == 1
 
 
+async def test_a_home_video_is_kept_out_of_the_grid_but_not_out_of_reach(
+    authed_client, db
+):
+    """The complaint this answers was "no media, no TMDB match, not on server".
+
+    It is a phone recording that was played once through Plex, and the browse
+    grids are lists of titles, which it is not. Kept out by a parameter rather
+    than a hard-coded clause, though: a misread has to be recoverable without a
+    database change, and the row itself is real history and is never deleted.
+    """
+    db.add_all(
+        [
+            MediaItem(
+                guid_key="tmdb:movie:1",
+                media_type=MediaType.MOVIE,
+                title="Arrival",
+                year=2016,
+            ),
+            MediaItem(
+                guid_key="title:movie:2020-03-31-19-42-27",
+                media_type=MediaType.MOVIE,
+                title="2020-03-31 19.42.27",
+                year=2020,
+                is_personal_media=True,
+            ),
+        ]
+    )
+    await db.commit()
+
+    default = (await authed_client.get("/api/media")).json()
+    assert [item["title"] for item in default["items"]] == ["Arrival"]
+
+    shown = (await authed_client.get("/api/media", params={"personal": "all"})).json()
+    assert shown["total"] == 2
+    home_video = next(
+        item for item in shown["items"] if item["title"] == "2020-03-31 19.42.27"
+    )
+    # Flagged on the payload, so the tile can say what it is rather than looking
+    # like a film whose artwork failed to load.
+    assert home_video["is_personal_media"] is True
+
+    only = (await authed_client.get("/api/media", params={"personal": "only"})).json()
+    assert [item["title"] for item in only["items"]] == ["2020-03-31 19.42.27"]
+
+    detail = (await authed_client.get(f"/api/media/{home_video['id']}")).json()
+    assert detail["is_personal_media"] is True
+
+
 async def test_marking_watched_updates_history_and_stats(authed_client, db):
     item = MediaItem(
         guid_key="tmdb:movie:1",

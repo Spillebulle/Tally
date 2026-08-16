@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import type { AnimeFilter, MediaCard } from '@/lib/types'
+import type { AnimeFilter, MediaCard, PersonalFilter } from '@/lib/types'
 import { compactNumber } from '@/lib/utils'
 import { BrowseFilters, useBrowseFilters } from '@/components/BrowseFilters'
 import { PosterGrid } from '@/components/Poster'
@@ -56,6 +56,16 @@ export function Browse({ mode }: BrowseProps) {
     return 'exclude'
   }, [mode])
 
+  /**
+   * A home video is not a film, a show or an anime, so the three grids that
+   * name a category leave it out — the same call the backend makes about
+   * seasons and episodes. Search and the all-titles grid promise everything and
+   * have to keep the promise: it is where a misread one is found, and the only
+   * thing stopping a wrong guess from hiding a film for good.
+   */
+  const personalFilter: PersonalFilter =
+    mode === 'search' || mode === 'browse' ? 'all' : 'exclude'
+
   const mediaType = useMemo(() => {
     if (mode === 'movies') return 'movie'
     if (mode === 'shows') return 'show'
@@ -67,6 +77,7 @@ export function Browse({ mode }: BrowseProps) {
     ...filters.query,
     media_type: mediaType,
     anime: animeFilter,
+    personal: personalFilter,
     offset: page * PAGE_SIZE,
     limit: PAGE_SIZE,
   }
