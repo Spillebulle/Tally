@@ -56,6 +56,13 @@ def _titles_match(wanted: str, candidate_titles: list[str | None]) -> bool:
 
     Deliberately forgiving: MAL titles are romanised and frequently carry a
     subtitle Plex does not, so one being a prefix of the other counts.
+
+    That is the opposite of the rule TMDB and TVDB get (`services/titles.py`),
+    and the difference is what the answer is used for. A MAL hit contributes a
+    score to the anime classifier and a synopsis; the id it carries feeds no
+    dedup pass. A TMDB or TVDB hit becomes the row's identity, and a prefix
+    match is precisely how "Anti-Social" became "Anti-Social Limited" there. If
+    `mal_id` ever starts merging rows, this has to become equality too.
     """
     key = _match_key(wanted)
     if not key:
