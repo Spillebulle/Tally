@@ -21,6 +21,15 @@ Home videos (`MediaItem.is_personal_media`) *are* counted in the watch numbers.
 The browse grids hide them by default, but a play is a play and the hours are
 real; only the library inventory on `/summary` leaves them out, because that
 counter is about the shelf rather than about the viewing.
+
+**A rewatch is a rewatch against the whole history, never against the window.**
+The first-vs-rewatch split ranks each item's plays with a window function over
+*every* play the user has recorded, then filters that ranking down to the
+window. Ranking inside the window instead would call March's viewing of
+something first seen in 2019 a first watch — plausible, wrong, and invisible.
+`ix_watch_events_user_item_time` is `(user_id, media_item_id, watched_at)`,
+exactly the partition and order that ranking asks for, so SQLite reads the rows
+in order rather than sorting them.
 """
 from __future__ import annotations
 
@@ -30,10 +39,16 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import and_, func, select, union
+from sqlalchemy.orm import aliased
 
 from ..deps import CurrentUser, DbSession
 from ..models import MediaItem, MediaType, User, UserMediaState, WatchEvent, utcnow
 from ..schemas import (
+    PunchCard,
+    RewatchedItem,
+    RewatchSplit,
+    RewatchStats,
+    SeasonalityOut,
     StatCount,
     StatsComparison,
     StatsGranularity,
@@ -41,7 +56,10 @@ from ..schemas import (
     StatsPreset,
     StatsRange,
     StatsTotals,
+    TimeBucket,
+    YearProfile,
 )
+from ..serializers import poster_for
 from ..timezones import resolve as resolve_timezone
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -53,6 +71,38 @@ DEFAULT_MOVIE_MINUTES = 110
 # What `GET /api/stats` covers when the caller names no window at all. Kept at
 # the value the `days` parameter used to default to.
 DEFAULT_DAYS = 365
+
+# Monday first, matching `date.weekday()`, which is what the buckets are keyed
+# on. Sunday-first is a display choice and belongs to the frontend, which gets
+# the index alongside the name precisely so it can reorder without guessing.
+WEEKDAYS = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+# How many rows the most-rewatched ranking returns. It is a list to read, not a
+# dataset, and it is computed over all of history — which is exactly why it has
+# to be capped in SQL rather than trimmed after the fact.
+REWATCH_RANKING_LIMIT = 12
 
 
 def _streaks(days: set[date], today: date) -> tuple[int, int]:
@@ -199,6 +249,35 @@ def _preceding(window: StatsRange, tz: tzinfo) -> StatsRange:
     )
 
 
+def _a_year_earlier(moment: datetime, tz: tzinfo) -> datetime:
+    """The same local wall-clock time, one calendar year back.
+
+    Shifting by 365 days is the wrong shape for this: a leap year makes it slide
+    by a day, and a window that starts at local midnight would stop doing so
+    whenever a summer-time change falls between the two. Moving the local
+    calendar year and re-resolving through the zone keeps "1 March, midnight"
+    meaning midnight on both sides.
+    """
+    local = moment.astimezone(tz)
+    try:
+        shifted = local.replace(year=local.year - 1)
+    except ValueError:
+        # 29 February has no counterpart in a common year; the 28th is the last
+        # day of the same month, which is the least surprising neighbour.
+        shifted = local.replace(year=local.year - 1, day=28)
+    return shifted.astimezone(UTC)
+
+
+def _same_window_last_year(window: StatsRange, tz: tzinfo) -> StatsRange:
+    return _range(
+        _a_year_earlier(window.since, tz),
+        _a_year_earlier(window.until, tz),
+        tz,
+        window.timezone,
+        window.granularity,
+    )
+
+
 # --- aggregation ----------------------------------------------------------
 
 
@@ -213,6 +292,16 @@ class _Aggregate:
     genres: Counter[str] = field(default_factory=Counter)
     by_day: Counter[date] = field(default_factory=Counter)
     ratings: list[float] = field(default_factory=list)
+    # Time shape, all keyed off the *local* clock: weekday 0-6 Monday first,
+    # hour 0-23, and the (weekday, hour) pair for the punch card. Counting
+    # minutes as well as plays matters — a Sunday of films and a Tuesday of
+    # sitcom episodes are the same number of plays and nothing like the same
+    # evening.
+    by_weekday: Counter[int] = field(default_factory=Counter)
+    weekday_minutes: Counter[int] = field(default_factory=Counter)
+    by_hour: Counter[int] = field(default_factory=Counter)
+    hour_minutes: Counter[int] = field(default_factory=Counter)
+    by_weekday_hour: Counter[tuple[int, int]] = field(default_factory=Counter)
 
 
 def _minutes(duration_ms: int | None, runtime: int | None, media_type: MediaType) -> int:
@@ -268,9 +357,19 @@ async def _aggregate(
 
     agg = _Aggregate(events=len(rows))
     for watched_at, duration_ms, item_id, media_type, runtime, genres, is_anime, show_id in rows:
-        day = watched_at.astimezone(tz).date()
-        agg.by_day[day] += 1
-        agg.runtime += _minutes(duration_ms, runtime, media_type)
+        # One conversion, reused by every bucket below. `astimezone` is the only
+        # thing that knows about summer time; a fixed offset here would be
+        # wrong for half of every year, and SQL cannot do it at all.
+        local = watched_at.astimezone(tz)
+        minutes = _minutes(duration_ms, runtime, media_type)
+        agg.by_day[local.date()] += 1
+        agg.runtime += minutes
+
+        agg.by_weekday[local.weekday()] += 1
+        agg.weekday_minutes[local.weekday()] += minutes
+        agg.by_hour[local.hour] += 1
+        agg.hour_minutes[local.hour] += minutes
+        agg.by_weekday_hour[(local.weekday(), local.hour)] += 1
 
         if media_type == MediaType.MOVIE:
             agg.movies += 1
@@ -355,6 +454,22 @@ def _pct_change(current: StatsTotals, previous: StatsTotals) -> dict[str, float]
     return changes
 
 
+async def _comparison(
+    db: DbSession,
+    user: User,
+    earlier: StatsRange,
+    anime_only: bool,
+    tz: tzinfo,
+    current: StatsTotals,
+) -> StatsComparison:
+    earlier_totals = _totals(await _aggregate(db, user, earlier, anime_only, tz))
+    return StatsComparison(
+        range=earlier,
+        totals=earlier_totals,
+        pct_change=_pct_change(current, earlier_totals),
+    )
+
+
 # --- series ---------------------------------------------------------------
 
 
@@ -388,7 +503,194 @@ def _series(
     return [StatCount(label=label, value=value) for label, value in buckets.items()]
 
 
+def _bucket_labels(window: StatsRange, granularity: StatsGranularity) -> list[str]:
+    """Every bucket label in the window, in order, gaps included."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    cursor = window.start_day
+    while cursor <= window.end_day:
+        label = _bucket(cursor, granularity)
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+        cursor += timedelta(days=1)
+    return labels
+
+
+# --- time shape -----------------------------------------------------------
+
+
+def _profile(
+    plays: Counter[int],
+    minutes: Counter[int],
+    names: tuple[str, ...],
+    offset: int = 0,
+) -> list[TimeBucket]:
+    """A fixed-length profile: every slot present, empty ones at zero.
+
+    Absent slots are information — "never on a Monday" is a finding — and a
+    chart that omits them draws seven bars one week and five the next.
+    """
+    return [
+        TimeBucket(
+            index=index + offset,
+            label=name,
+            plays=plays.get(index + offset, 0),
+            minutes=minutes.get(index + offset, 0),
+        )
+        for index, name in enumerate(names)
+    ]
+
+
+def _punch_card(grid: Counter[tuple[int, int]]) -> PunchCard:
+    matrix = [[grid.get((weekday, hour), 0) for hour in range(24)] for weekday in range(7)]
+    return PunchCard(
+        weekdays=list(WEEKDAYS),
+        hours=list(range(24)),
+        plays=matrix,
+        max_plays=max((cell for row in matrix for cell in row), default=0),
+    )
+
+
+# --- first watch vs rewatch -----------------------------------------------
+
+
+def _ranked_events(user: User, anime_only: bool):
+    """Every play this user has recorded, numbered per item, oldest first.
+
+    The ranking is deliberately unfiltered by time: a play is a rewatch because
+    of what came before it in the user's history, not because of what happens
+    to be inside the window on screen. The caller filters the *result* by
+    window; ranking a pre-filtered set is the mistake this exists to avoid.
+
+    `anime_only` is safe to apply here because it selects whole items, and the
+    ranking partitions by item — dropping an item cannot renumber another one.
+
+    Ties break on `id`, so a re-run cannot swap which of two plays stamped with
+    the same instant counts as the first.
+    """
+    ranked = select(
+        WatchEvent.watched_at.label("watched_at"),
+        func.row_number()
+        .over(
+            partition_by=WatchEvent.media_item_id,
+            order_by=(WatchEvent.watched_at, WatchEvent.id),
+        )
+        .label("rank"),
+    )
+    if anime_only:
+        ranked = ranked.join(MediaItem, MediaItem.id == WatchEvent.media_item_id).where(
+            MediaItem.is_anime.is_(True)
+        )
+    return ranked.where(WatchEvent.user_id == user.id).subquery()
+
+
+async def _rewatch(
+    db: DbSession,
+    user: User,
+    window: StatsRange,
+    anime_only: bool,
+    tz: tzinfo,
+) -> RewatchStats:
+    ranked = _ranked_events(user, anime_only)
+    rows = (
+        await db.execute(
+            select(ranked.c.watched_at, ranked.c.rank).where(
+                ranked.c.watched_at >= window.since,
+                ranked.c.watched_at < window.until,
+            )
+        )
+    ).all()
+
+    firsts: Counter[str] = Counter()
+    repeats: Counter[str] = Counter()
+    for watched_at, rank in rows:
+        label = _bucket(watched_at.astimezone(tz).date(), window.granularity)
+        (firsts if rank == 1 else repeats)[label] += 1
+
+    first_watches = sum(firsts.values())
+    rewatches = sum(repeats.values())
+    plays = first_watches + rewatches
+    return RewatchStats(
+        plays=plays,
+        first_watches=first_watches,
+        rewatches=rewatches,
+        rewatch_ratio=round(rewatches / plays, 4) if plays else 0.0,
+        by_bucket=[
+            RewatchSplit(label=label, first=firsts.get(label, 0), rewatch=repeats.get(label, 0))
+            for label in _bucket_labels(window, window.granularity)
+        ],
+        most_rewatched=await _most_rewatched(db, user, anime_only),
+    )
+
+
+async def _most_rewatched(db: DbSession, user: User, anime_only: bool) -> list[RewatchedItem]:
+    """What this user comes back to, over their whole history.
+
+    All-time on purpose, and not a `_ranked_events` consumer: "how often have I
+    watched this" is a plain count per item, and grouping is cheaper than
+    numbering every row only to throw the numbers away.
+    """
+    show = aliased(MediaItem)
+    plays = func.count(WatchEvent.id)
+    conditions = [WatchEvent.user_id == user.id]
+    if anime_only:
+        conditions.append(MediaItem.is_anime.is_(True))
+
+    rows = (
+        await db.execute(
+            select(
+                MediaItem,
+                show.title,
+                plays,
+                func.min(WatchEvent.watched_at),
+                func.max(WatchEvent.watched_at),
+            )
+            .select_from(WatchEvent)
+            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+            .outerjoin(show, show.id == MediaItem.show_id)
+            .where(and_(*conditions))
+            .group_by(MediaItem.id)
+            .having(plays > 1)
+            # Most-played first; the newest of a tie first, because a thing
+            # watched five times last year is a better answer than a thing
+            # watched five times in 2019.
+            .order_by(plays.desc(), func.max(WatchEvent.watched_at).desc())
+            .limit(REWATCH_RANKING_LIMIT)
+        )
+    ).all()
+
+    return [
+        RewatchedItem(
+            media_item_id=item.id,
+            title=item.title,
+            show_title=show_title,
+            year=item.year,
+            media_type=item.media_type,
+            # Never `item.poster_url` directly: Plex artwork is a bare path that
+            # only the image proxy can turn into something a browser may fetch.
+            poster_url=poster_for(item),
+            plays=count,
+            first_watched=first,
+            last_watched=last,
+        )
+        for item, show_title, count, first, last in rows
+    ]
+
+
 # --- endpoints ------------------------------------------------------------
+
+
+def _zone_for(user: User, tz: str | None) -> tuple[tzinfo, str]:
+    """The zone in force, and the name to report it under.
+
+    `?tz=` beats the stored preference, and an unloadable name falls back to
+    UTC rather than 500ing — so the response has to say which zone it actually
+    used, or a silent fallback looks like correct data in the wrong hours.
+    """
+    tz_name = tz or (user.preferences or {}).get("timezone")
+    zone = resolve_timezone(tz_name)
+    return zone, "UTC" if zone is UTC else str(tz_name)
 
 
 @router.get("", response_model=StatsOut)
@@ -404,26 +706,22 @@ async def get_stats(
     anime_only: bool = False,
     tz: str | None = None,
 ) -> StatsOut:
-    tz_name = tz or (user.preferences or {}).get("timezone")
-    zone = resolve_timezone(tz_name)
-    # Report the zone actually in force. An unloadable name falls back to UTC
-    # rather than 500ing, and saying so is the only way anyone would notice.
-    resolved_name = "UTC" if zone is UTC else str(tz_name)
-
+    zone, resolved_name = _zone_for(user, tz)
     window = await _resolve_range(
         db, user, zone, resolved_name, preset, since, until, days, granularity
     )
     agg = await _aggregate(db, user, window, anime_only, zone)
     totals = _totals(agg)
 
-    previous = None
+    previous = previous_year = None
     if compare:
-        earlier = _preceding(window, zone)
-        earlier_totals = _totals(await _aggregate(db, user, earlier, anime_only, zone))
-        previous = StatsComparison(
-            range=earlier,
-            totals=earlier_totals,
-            pct_change=_pct_change(totals, earlier_totals),
+        # Two extra aggregations, which is why they are behind the flag: the
+        # window before this one, and the same window a year ago. "Down on last
+        # month" and "down on last December" are different questions and a
+        # seasonal library answers them differently.
+        previous = await _comparison(db, user, _preceding(window, zone), anime_only, zone, totals)
+        previous_year = await _comparison(
+            db, user, _same_window_last_year(window, zone), anime_only, zone, totals
         )
 
     distribution: Counter[str] = Counter()
@@ -440,6 +738,13 @@ async def get_stats(
         **totals.model_dump(),
         range=window,
         previous=previous,
+        previous_year=previous_year,
+        by_weekday=_profile(agg.by_weekday, agg.weekday_minutes, WEEKDAYS),
+        by_hour=_profile(
+            agg.by_hour, agg.hour_minutes, tuple(f"{hour:02d}" for hour in range(24))
+        ),
+        punch_card=_punch_card(agg.by_weekday_hour),
+        rewatch=await _rewatch(db, user, window, anime_only, zone),
         current_streak_days=current_streak,
         longest_streak_days=longest_streak,
         top_genres=[
@@ -456,6 +761,86 @@ async def get_stats(
             StatCount(label=str(score), value=distribution.get(str(score), 0))
             for score in range(1, 11)
         ],
+    )
+
+
+@router.get("/seasonality", response_model=SeasonalityOut)
+async def seasonality(
+    db: DbSession,
+    user: CurrentUser,
+    anime_only: bool = False,
+    tz: str | None = None,
+) -> SeasonalityOut:
+    """The month-of-year profile — "do I watch more in winter?" — over all history.
+
+    Separate from `GET /api/stats` because it is the one aggregation with no
+    window to bound it: it reads every play the user has ever recorded. That is
+    a few thousand rows on a real instance and cheap enough to ask for, but not
+    cheap enough to attach to a page that reloads whenever a filter chip moves.
+
+    Only two columns come back per row — the instant and the length — because
+    nothing here needs to know *what* was watched. The months are bucketed from
+    `watched_at.astimezone(tz)` like everything else; a January play at 00:30
+    in Auckland is still December in UTC.
+    """
+    zone, resolved_name = _zone_for(user, tz)
+
+    conditions = [WatchEvent.user_id == user.id]
+    if anime_only:
+        conditions.append(MediaItem.is_anime.is_(True))
+
+    rows = (
+        await db.execute(
+            select(
+                WatchEvent.watched_at,
+                WatchEvent.duration_ms,
+                MediaItem.media_type,
+                MediaItem.runtime_minutes,
+            )
+            .join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+            .where(and_(*conditions))
+            .order_by(WatchEvent.watched_at)
+        )
+    ).all()
+
+    month_plays: Counter[int] = Counter()
+    month_minutes: Counter[int] = Counter()
+    year_plays: Counter[int] = Counter()
+    year_minutes: Counter[int] = Counter()
+    year_months: Counter[tuple[int, int]] = Counter()
+    total_minutes = 0
+
+    for watched_at, duration_ms, media_type, runtime in rows:
+        local = watched_at.astimezone(zone)
+        minutes = _minutes(duration_ms, runtime, media_type)
+        total_minutes += minutes
+        month_plays[local.month] += 1
+        month_minutes[local.month] += minutes
+        year_plays[local.year] += 1
+        year_minutes[local.year] += minutes
+        year_months[(local.year, local.month)] += 1
+
+    # Every year between the first play and the last, so a fallow year draws as
+    # an empty column rather than vanishing and making the axis lie.
+    span = range(min(year_plays), max(year_plays) + 1) if year_plays else range(0)
+    years = [
+        YearProfile(
+            year=year,
+            plays=year_plays[year],
+            minutes=year_minutes[year],
+            months=[year_months.get((year, month), 0) for month in range(1, 13)],
+        )
+        for year in span
+    ]
+
+    return SeasonalityOut(
+        timezone=resolved_name,
+        plays=len(rows),
+        minutes=total_minutes,
+        first_play=rows[0][0] if rows else None,
+        last_play=rows[-1][0] if rows else None,
+        months=_profile(month_plays, month_minutes, MONTHS, offset=1),
+        years=years,
     )
 
 
