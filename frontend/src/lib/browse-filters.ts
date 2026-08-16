@@ -1,5 +1,11 @@
 import { useSearchParams } from 'react-router-dom'
-import type { LibraryOption, PersonalFilter, ServerOption, WatchStatus } from './types'
+import type {
+  LibraryOption,
+  PersonalFilter,
+  SavedViewPage,
+  ServerOption,
+  WatchStatus,
+} from './types'
 import { localDateKey, parseLocalDateLabel, STATUS_LABELS } from './utils'
 
 /**
@@ -44,6 +50,17 @@ import { localDateKey, parseLocalDateLabel, STATUS_LABELS } from './utils'
  * backwards compatible by construction: a single occurrence parses exactly as
  * the single value it always did, so every bookmark and every facet link keeps
  * working.
+ *
+ * ## Saved views come free
+ *
+ * Because the whole query lives in the URL, "save this view" is storing the
+ * query string and "recall it" is setting it back — `savedQuery` and
+ * `applyView` below, both of which go through the same `normalise` every other
+ * write does. There is no serialisation format, and a view saved before a
+ * filter was renamed loses that parameter and falls back to the page default
+ * rather than erroring, because the `read` that guards a hand-edited URL is the
+ * only thing that ever interprets one. The server stores the string and does
+ * not parse it; a second validator there could disagree with this one.
  *
  * The rendering half lives in `components/BrowseFilters.tsx`; the page stepper,
  * which History uses without any of this, lives in `components/Pagination.tsx`.
@@ -435,6 +452,16 @@ export type FilterTable = { [K in FilterKey]: FilterDef<FilterValues[K]> }
 
 /** What a page brings to the table: its sorts, its defaults, its omissions. */
 export interface FilterPage {
+  /**
+   * Which browse surface this is, for the saved views.
+   *
+   * The *filter surface*, not the route: all five Browse modes share one set of
+   * filters and one set of sorts, so they share one shelf of views, while the
+   * watchlist and History each have their own. Required rather than optional,
+   * so a browse page added later cannot silently inherit another page's views —
+   * a view naming `watchlist_added` would be a stale sort on the grid.
+   */
+  id: SavedViewPage
   /** The sorts this page offers — the dropdown's options and the whitelist. */
   sorts: readonly SortOption[]
   defaultSort: string
@@ -1326,6 +1353,8 @@ export interface BrowseFilterState {
   values: FilterValues
   /** The filters this page actually has, in bar order. Omissions are gone. */
   defs: AnyFilterDef[]
+  /** Which browse surface this is — the shelf a saved view is filed under. */
+  pageId: SavedViewPage
   /** The sorts this page offers — the dropdown's options and the whitelist. */
   sorts: readonly SortOption[]
   /** True when something is narrowing the results, so "Clear" is worth showing. */
@@ -1337,6 +1366,25 @@ export interface BrowseFilterState {
   /** Sets a parameter this table does not own — a page's own `kind`, say. */
   update: (key: string, value: string | null) => void
   clear: () => void
+  /**
+   * The current query, canonicalised — what "save this view" stores.
+   *
+   * Canonicalised rather than `params.toString()` raw, because a query can
+   * arrive from somewhere that spells out a default (a stats drill-down, an old
+   * bookmark) and two spellings of the same view must compare equal, or the
+   * list cannot say which view is applied. `page` is dropped: a view is a set
+   * of filters, not a position in the results.
+   */
+  savedQuery: string
+  /**
+   * Recall a saved view: replace the whole query with this one.
+   *
+   * It goes through the same normalisation every other write does, so a view
+   * saved before a filter was renamed simply loses that parameter and falls
+   * back to the page default — there is no second validator to disagree with
+   * the first. It **pushes** rather than replaces; see the note on `commit`.
+   */
+  applyView: (query: string) => void
   /** The filter half of the request, ready to merge into a page's own query. */
   query: FilterQuery
 }
@@ -1370,7 +1418,7 @@ export function useBrowseFilters(page: FilterPage): BrowseFilterState {
   ) as FilterValues
 
   /**
-   * Writes a patch and normalises the whole query around it.
+   * Re-canonicalises a whole query string.
    *
    * A default never survives into the URL: picking the sort the page already
    * opens on says nothing, and a link that spells out every default reads as
@@ -1379,6 +1427,24 @@ export function useBrowseFilters(page: FilterPage): BrowseFilterState {
    * the one that changed. The page number goes too — narrowing the results
    * renumbers them, so "page 4" of the old filter is not a place that still
    * exists.
+   *
+   * The one place a parameter's meaning is decided, and therefore the one place
+   * a stale value is dropped. A recalled saved view goes through it too, which
+   * is why recalling one needs no validation of its own.
+   */
+  const normalise = (next: URLSearchParams): URLSearchParams => {
+    const after: FilterCtx = { params: next }
+    for (const def of defs) applyWrite(next, def, def.read(after), after)
+    // An omitted filter's parameters are not this page's to keep.
+    for (const def of all) {
+      if (omitted.has(def.key)) for (const param of def.params) next.delete(param)
+    }
+    next.delete('page')
+    return next
+  }
+
+  /**
+   * Writes a patch and normalises the whole query around it.
    *
    * `replace`, so refining a view does not cost a back step each time.
    */
@@ -1389,19 +1455,13 @@ export function useBrowseFilters(page: FilterPage): BrowseFilterState {
       if (Array.isArray(value)) for (const entry of value) next.append(key, entry)
       else if (value !== null && value !== '') next.set(key, value)
     }
-    const after: FilterCtx = { params: next }
-    for (const def of defs) applyWrite(next, def, def.read(after), after)
-    // An omitted filter's parameters are not this page's to keep.
-    for (const def of all) {
-      if (omitted.has(def.key)) for (const param of def.params) next.delete(param)
-    }
-    next.delete('page')
-    setParams(next, { replace: true })
+    setParams(normalise(next), { replace: true })
   }
 
   return {
     values,
     defs,
+    pageId: page.id,
     sorts: page.sorts,
     active: defs.some(
       (def) => def.role === 'filter' && isSet(def, values[def.key], ctx),
@@ -1419,6 +1479,24 @@ export function useBrowseFilters(page: FilterPage): BrowseFilterState {
       }
       setParams(kept, { replace: true })
     },
+
+    savedQuery: normalise(new URLSearchParams(params)).toString(),
+
+    /**
+     * Applying a saved view **pushes**, where changing a filter replaces.
+     *
+     * The rule those two obey is the same one: a history entry is worth one
+     * back step, so refining a view in place must not cost one per chip or per
+     * keystroke, and moving somewhere else must. A saved view is the second
+     * kind. It discards the entire current query in one deliberate act rather
+     * than narrowing it, so without a history entry the view the user was
+     * looking at is gone with no way back — the exact loss `page` was moved
+     * into the URL to prevent. Paging pushes for that reason and this is the
+     * same shape of move, only larger.
+     */
+    applyView: (query: string) =>
+      setParams(normalise(new URLSearchParams(query)), { replace: false }),
+
     query: Object.assign(
       {},
       ...defs.map((def) => def.toQuery(values[def.key])),

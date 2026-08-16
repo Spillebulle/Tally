@@ -19,6 +19,7 @@ from .routers import (
     images,
     library,
     metrics,
+    saved_views,
     series,
     stats,
     sync,
@@ -97,6 +98,7 @@ for router in (
     webhooks.router,
     images.router,
     api_keys.router,
+    saved_views.router,
 ):
     app.include_router(router)
 
