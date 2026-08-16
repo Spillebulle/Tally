@@ -149,6 +149,43 @@
   .scroll-x {
     @apply overflow-x-auto overscroll-x-contain;
   }
+
+  /* Breaks an element out of the centred, padded content column so it spans
+     the whole region the column sits in — from the sidebar's right edge to the
+     window's right edge, and the full width once the sidebar is a drawer.
+     `100cqw` is that region's width, because Layout marks the wrapper around
+     <main> as the query container; `100%` is the column's own content width,
+     so half the difference is exactly the inset to hand back on each side.
+     Deliberately not `100vw`: that counts the scrollbar, and the page would
+     then scroll sideways by its width. */
+  .full-bleed {
+    margin-inline: calc((100% - 100cqw) / 2);
+  }
+
+  /* The detail hero's fade from artwork into the page background.
+     Many stops rather than three even ones: a linear ramp bands visibly where
+     its slope changes, which is what made the banner look like it stopped at
+     an edge. The bottom seventh is solid, so the title never lands on bare
+     artwork however bright or dark that artwork is, and the rest eases out
+     over the whole height. Built from `--canvas`, so it is correct in both
+     themes, and every stop names the colour — fading to `transparent` would
+     pass through grey. */
+  .hero-scrim {
+    background-image: linear-gradient(
+      to top,
+      rgb(var(--canvas)) 0%,
+      rgb(var(--canvas)) 15%,
+      rgb(var(--canvas) / 0.97) 26%,
+      rgb(var(--canvas) / 0.91) 36%,
+      rgb(var(--canvas) / 0.81) 46%,
+      rgb(var(--canvas) / 0.67) 56%,
+      rgb(var(--canvas) / 0.51) 66%,
+      rgb(var(--canvas) / 0.35) 76%,
+      rgb(var(--canvas) / 0.2) 85%,
+      rgb(var(--canvas) / 0.09) 93%,
+      rgb(var(--canvas) / 0) 100%
+    );
+  }
 }
 
 @layer utilities {
