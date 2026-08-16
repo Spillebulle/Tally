@@ -858,14 +858,31 @@ the built-in `GITHUB_TOKEN`.
   for additive columns. A single-file SQLite database the user owns does not
   justify the dependency. If a destructive migration ever becomes necessary,
   revisit — but additive columns go in that list.
-  Three steps are not additive: `_scrub_token_bearing_artwork()`, which clears
+  Four steps are not additive: `_scrub_token_bearing_artwork()`, which clears
   the old token-carrying `poster_url` values so the proxy can take over;
   `_recover_release_name_titles()`, which replaces a filename Plex stored as a
   title and clears `metadata_updated_at` so the backfill re-asks under the real
-  name instead of waiting out its weekly window; and `merge_duplicates.py`,
-  which collapses items recorded twice. All three are idempotent, all three log
-  what they did, and none may assume it runs exactly once. Anything else that
-  has to *change* data needs the same treatment — a named function and a reason.
+  name instead of waiting out its weekly window; `_resweep_incomplete_metadata()`,
+  which re-queues rows enriched before Tally stored language, country, studio or
+  network; and `merge_duplicates.py`, which collapses items recorded twice. All
+  four are idempotent, all four log what they did, and none may assume it runs
+  exactly once. Anything else that has to *change* data needs the same treatment
+  — a named function and a reason.
+
+  **A resweep has to be reachable and it has to terminate**, and the third one
+  is where both nearly went wrong. It backdates `metadata_updated_at` to a
+  sentinel rather than nulling it, because `_needs_enrichment` reads NULL as
+  "enrich now regardless of artwork" — nulling a library would make the *next
+  library scan* re-enrich the whole catalogue inline, which is the burst the
+  bounded backfill exists to avoid. And `backfill_missing_metadata` selected
+  rows with *no* external id, while the resweep targets rows that *have* one:
+  disjoint sets, so without a second arm gated on the sentinel it would have
+  queued rows nothing ever revisits. Its predicate also asks for `studio` **and**
+  `network` both missing, never "either": TMDB returns no network for a film, so
+  "missing a network" is permanently true of every movie and the pass would
+  re-queue the entire film library on every boot, forever. Any future resweep
+  needs the same two questions asked out loud — *what picks these rows up*, and
+  *what makes a row stop coming back*.
 
   Each exists because the import-path fix cannot reach what the import already
   produced: the history sync reads incrementally and never revisits a 2019 play,

@@ -73,7 +73,7 @@ export function ErrorState({
     error instanceof Error && error.message ? error.message : 'Something went wrong.'
   return (
     <div className="card flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
-      <span className="grid h-12 w-12 place-items-center rounded-2xl bg-bad/10 text-xl text-bad">
+      <span className="grid h-12 w-12 place-items-center rounded-2xl bg-danger/10 text-xl text-danger">
         <WarningIcon />
       </span>
       <h3 className="text-base font-semibold text-ink">{title}</h3>

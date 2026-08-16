@@ -72,7 +72,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
 from ..deps import CurrentUser, DbSession
-from ..media_filters import MediaFilters, facet_parent, on_plex_condition
+from ..media_filters import MediaFilters, facet_value, on_plex_condition
 from ..models import (
     MediaItem,
     MediaType,
@@ -498,34 +498,6 @@ def _scope_items(
         stmt = stmt.where(and_(*items))
     return stmt
 
-
-def _facet(column: str):
-    """Read a facet off the item, falling back to its show. A value, not a test.
-
-    `media_filters.facet_source` is the same rule in predicate form — "does
-    this item, or its series, have studio X" — and this is the reading half:
-    "which studio was this play". Genre, studio, network and content rating are
-    only ever populated for MOVIE and SHOW rows, because enrichment skips
-    episodes by design, so a ranking that read them straight off the played row
-    would file every episode under "no studio" and quietly leave television out
-    of the leaderboard entirely.
-
-    It is a correlated scalar subquery on `MediaItem.show_id`, deliberately the
-    same shape and the same correlation as `facet_source`'s EXISTS: no join to
-    remember, and no chance of a row coming back twice. **The two are one rule
-    and must move together** — if `facet_source` ever resolves through
-    something other than `show_id`, this has to follow, or a filtered ranking
-    would narrow on one definition and group on another.
-
-    `year` is not here on purpose. An episode has its own air date, and reading
-    it through the series would file a 2019 episode under 1989.
-    """
-    return func.coalesce(
-        getattr(MediaItem, column),
-        select(getattr(facet_parent, column))
-        .where(facet_parent.id == MediaItem.show_id)
-        .scalar_subquery(),
-    )
 
 
 # --- aggregation ----------------------------------------------------------
@@ -1262,7 +1234,7 @@ def _first_play_after(user: User, alias_name: str, *, after_add: bool):
     A watchlisted *show* is never played directly — its history is episode
     plays against episode rows — so this matches the entry's own item **or**
     anything whose `show_id` points at it. That is the same "a series answers
-    for its episodes" relationship `_facet` and `media_filters.facet_source`
+    for its episodes" relationship `media_filters.facet_value` and `facet_source`
     read in the other direction.
 
     `after_add` is the difference between two questions the block asks
@@ -1526,7 +1498,7 @@ async def _rating_depth(
 
     The parent show is joined for its genres only, and only as a fallback:
     enrichment skips episodes, so a rated episode carries none of its own. That
-    is `_facet`'s rule again, written as a join here because the subject set is
+    is `facet_value`'s rule again, written as a join here because the subject set is
     already one row per item and `show_id` cannot match twice.
     """
     conditions = [
@@ -1659,9 +1631,9 @@ async def _rankings(
                     MediaItem.runtime_minutes,
                     MediaItem.show_id,
                     MediaItem.year,
-                    _facet("studio"),
-                    _facet("network"),
-                    _facet("content_rating"),
+                    facet_value("studio"),
+                    facet_value("network"),
+                    facet_value("content_rating"),
                 ).select_from(WatchEvent),
                 filters,
                 user,

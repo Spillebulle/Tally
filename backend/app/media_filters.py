@@ -199,6 +199,33 @@ def facet_source(build: Callable[[Any], Any]):
     return or_(build(MediaItem), from_parent.exists())
 
 
+def facet_value(column: str):
+    """The same rule as `facet_source`, in value form rather than predicate form.
+
+    `facet_source` answers "does this item, or its series, have studio X"; this
+    answers "which studio was this play". The stats aggregates need the second
+    to group by, and a ranking that read the column straight off the played row
+    would file every episode under "no studio" and quietly leave television out
+    of the leaderboard.
+
+    These two live side by side because **they are one rule**: if the parent is
+    ever resolved through something other than `show_id`, both have to follow.
+    Split across modules they drifted once already — a filtered ranking would
+    narrow on one definition and group on the other, and nothing would fail
+    loudly.
+
+    `year` is deliberately not resolved this way, here or in `facet_source`: an
+    episode has its own air date, and reading it through the series would file
+    a 2019 episode under 1989.
+    """
+    return func.coalesce(
+        getattr(MediaItem, column),
+        select(getattr(facet_parent, column))
+        .where(facet_parent.id == MediaItem.show_id)
+        .scalar_subquery(),
+    )
+
+
 def facet_absent(build: Callable[[Any], Any]):
     """The mirror of `facet_source`: neither the item nor its show matches.
 
