@@ -22,6 +22,7 @@ from sqlalchemy.sql import Select
 from .models import MediaItem, MediaType, PlexMapping, UserMediaState, WatchStatus
 
 AnimeFilter = Literal["all", "only", "exclude"]
+PersonalFilter = Literal["all", "only", "exclude"]
 SortOrder = Literal["asc", "desc"]
 
 # Sorts every browse page understands. The watchlist adds one of its own.
@@ -39,6 +40,13 @@ class MediaFilters:
         q: str | None = None,
         media_type: MediaType | None = None,
         anime: AnimeFilter = "all",
+        # Home videos are off by default. A phone recording played once through
+        # Plex is not a title in the sense these pages mean, and it is the same
+        # judgement `default_types` already makes about seasons and episodes:
+        # kept out of the flat list, not deleted, and one parameter away.
+        # `exclude` rather than a hidden hard-coded clause precisely so a
+        # misclassified film is recoverable without a database change.
+        personal: PersonalFilter = "exclude",
         watch_status: WatchStatus | None = None,
         genre: str | None = None,
         year: int | None = None,
@@ -53,6 +61,7 @@ class MediaFilters:
         self.q = q
         self.media_type = media_type
         self.anime = anime
+        self.personal = personal
         self.watch_status = watch_status
         self.genre = genre
         self.year = year
@@ -94,6 +103,11 @@ class MediaFilters:
             conditions.append(MediaItem.is_anime.is_(True))
         elif self.anime == "exclude":
             conditions.append(MediaItem.is_anime.is_(False))
+
+        if self.personal == "only":
+            conditions.append(MediaItem.is_personal_media.is_(True))
+        elif self.personal == "exclude":
+            conditions.append(MediaItem.is_personal_media.is_(False))
 
         if self.q:
             pattern = f"%{self.q.strip()}%"

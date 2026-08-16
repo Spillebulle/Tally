@@ -19,7 +19,7 @@ from .guids import ExternalIds, build_guid_key, extract_ids
 from .metadata import MetadataService, get_metadata_service
 from .metadata.anime import library_looks_like_anime
 from .plex_server import PlexServerClient
-from .release_names import parse_release_name
+from .release_names import looks_like_capture_filename, parse_release_name
 
 log = logging.getLogger(__name__)
 
@@ -215,6 +215,15 @@ class MediaRepository:
         # external id, and `merge_duplicates` collapses the rows on that.
         if not item.year and item.first_aired:
             item.year = item.first_aired.year
+        # Some of these filenames are not a title in any recoverable sense —
+        # `2020-03-31 19.42.27` is a phone recording that was played once
+        # through Plex. Plex calls it a movie, so nothing downstream can tell
+        # it from a film until this does. Assigned rather than only ever set,
+        # so a file Plex later matches properly is a film again on the next
+        # pass; the answer only matters for movies, and a show titled by its
+        # filename is a different problem.
+        if media_type == MediaType.MOVIE:
+            item.is_personal_media = looks_like_capture_filename(title)
         item.child_count = _int_or_none(meta.get("childCount")) or item.child_count
         item.leaf_count = _int_or_none(meta.get("leafCount")) or item.leaf_count
 
@@ -252,6 +261,9 @@ class MediaRepository:
 
         # --- external enrichment -----------------------------------------
         should_enrich = self.enrich if enrich is None else enrich
+        if item.is_personal_media:
+            # Nothing to look up: TMDB has no entry for someone's camera roll.
+            should_enrich = False
         if should_enrich and media_type in (MediaType.MOVIE, MediaType.SHOW):
             plex_thumb, _ = artwork_paths(meta)
             if self._needs_enrichment(item, created, plex_thumb=plex_thumb):
@@ -306,7 +318,18 @@ class MediaRepository:
         string being replaced is not a title, it is the thing standing between
         this row and ever having one. `guid_key` is untouched, so identity does
         not move; only what the user reads, and what the providers are asked.
+
+        Some titles are past recovering, and those leave without a provider
+        call. This is also the only place a row already stored gets marked as
+        personal media — the import will never run over it again, and marking
+        it here costs one pass through the backfill, after which the query
+        stops selecting it at all. No startup repair for it, for that reason.
         """
+        if item.media_type == MediaType.MOVIE and looks_like_capture_filename(
+            item.title or ""
+        ):
+            item.is_personal_media = True
+            return False
         if (release := parse_release_name(item.title or "")) is not None:
             item.title = release.title
             item.year = item.year or release.year

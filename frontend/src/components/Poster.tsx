@@ -128,6 +128,18 @@ export function Poster({
                 Anime
               </span>
             )}
+            {/* Says what a blank tile is. These only reach a grid through
+                search, and without this one looks like a film whose artwork
+                failed to load — which is how it got reported as a bug. */}
+            {card.is_personal_media && (
+              <span
+                className="inline-flex items-center rounded-md bg-black/70 px-1.5 py-0.5
+                           text-[10px] font-semibold uppercase tracking-wide text-white
+                           backdrop-blur-sm"
+              >
+                Home video
+              </span>
+            )}
           </div>
 
           {isComplete && (
