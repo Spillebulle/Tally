@@ -20,6 +20,7 @@ import type {
   WatchEvent,
   ApiKey,
   ApiKeyCreated,
+  ApiKeyScope,
   PaginatedWatchlist,
   WatchlistEntry,
   WatchStatus,
@@ -206,7 +207,8 @@ export const api = {
 
   apiKeys: {
     list: () => get<ApiKey[]>('/api/keys'),
-    create: (name: string) => post<ApiKeyCreated>('/api/keys', { name }),
+    create: (name: string, scope: ApiKeyScope = 'full') =>
+      post<ApiKeyCreated>('/api/keys', { name, scope }),
     revoke: (id: number) => del<void>(`/api/keys/${id}`),
   },
 

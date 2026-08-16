@@ -177,6 +177,9 @@ async def _run_light_migrations() -> None:
         ("sync_runs", "progress_total", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "cancel_requested", "BOOLEAN NOT NULL DEFAULT 0"),
         ("plex_pins", "link_user_id", "INTEGER"),
+        # Keys issued before scopes existed acted as their owner with no limit,
+        # so 'full' is the only default that does not silently revoke them.
+        ("api_keys", "scope", "VARCHAR(16) NOT NULL DEFAULT 'full'"),
     ]
     async with engine.begin() as conn:
         for table, column, ddl in additions:
@@ -193,6 +196,14 @@ async def _run_light_migrations() -> None:
     indexes = [
         ("ix_media_items_created_at", "media_items", "created_at"),
         ("ix_plex_mappings_added_at", "plex_mappings", "added_at"),
+        # Every play of one item by one user, in time order. Matches the
+        # composite Index on the WatchEvent model, so a fresh database and an
+        # upgraded one end up with the same shape.
+        (
+            "ix_watch_events_user_item_time",
+            "watch_events",
+            "user_id, media_item_id, watched_at",
+        ),
     ]
     async with engine.begin() as conn:
         for name, table, column in indexes:

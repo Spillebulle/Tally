@@ -152,11 +152,15 @@ export interface WatchlistEntry {
   item: MediaCard | null
 }
 
+/** How much of the API a key may reach. Fixed when the key is issued. */
+export type ApiKeyScope = 'full' | 'read_only' | 'stats'
+
 export interface ApiKey {
   id: number
   name: string
   /** The visible half. The rest only ever existed in your copy. */
   prefix: string
+  scope: ApiKeyScope
   created_at: string
   last_used_at: string | null
   revoked_at: string | null

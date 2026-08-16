@@ -18,3 +18,9 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 cryptography==44.0.0
 python-multipart==0.0.20
+# `zoneinfo` resolves names against the *system* tz database, which a slim
+# image may not carry — and the stats router falls back to UTC when a zone
+# will not load, so a missing database is not an error anyone would see: it is
+# silently the wrong day boundaries for every user outside UTC. Shipping the
+# data with the app removes the question.
+tzdata==2026.3
