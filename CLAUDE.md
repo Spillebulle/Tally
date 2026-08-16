@@ -201,15 +201,22 @@ removes the right film and leaves a wrong one behind. That is the whole
 mechanism of the "Anti-Social" match.
 
 **The rule has a cost, and it partly reverses release-name recovery.** A
-recovered filename that misspells the film by one character is now refused:
-item 52633 is the standing example, `Mars.Needs.Mom` against *Mars Needs Moms*,
-and it went from tmdb 50321 with a poster to no id and a blank tile. (Four of
-the five recovered rows still heal; that one does not.) Accepted anyway, the
-same looseness admits "Alien" against "Aliens" and "The Jungle Book 2" against
-"The Jungle Book 3" — the identical silent error, on films the library really
-holds. A missing poster is visible; a wrong id is not. Refusals log at **INFO**
-for exactly this reason: `docker logs tally | grep -i refus` is the only thing
-that explains a blank tile.
+recovered filename that misspells the film by one character is now refused —
+`Mars.Needs.Mom` against *Mars Needs Moms* is the standing example, and such a
+row gets no id and a blank tile where the looser rule would have found tmdb
+50321. Accepted anyway, the same looseness admits "Alien" against "Aliens" and
+"The Jungle Book 2" against "The Jungle Book 3" — the identical silent error,
+on films the library really holds. A missing poster is visible; a wrong id is
+not. Refusals log at **INFO** for exactly this reason: `docker logs tally |
+grep -i refus` is the only thing that explains a blank tile.
+
+The cost lands on **future** imports, not on rows already enriched. Item 52633
+on the live instance kept tmdb 50321 and its artwork, because the id was
+attached before this rule shipped and `backfill_missing_metadata` only ever
+selects rows with *no* id — nothing re-searches a row to take an id away. It
+stays a visible duplicate of the properly matched row next to it, since the
+titles still disagree by a letter, which is the trade working rather than
+failing.
 
 Such a row then stays in `backfill_missing_metadata` forever, *because* no id
 was attached — one search a week, indefinitely. That unbounded retry is the
