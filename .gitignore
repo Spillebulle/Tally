@@ -25,6 +25,11 @@ data/
 *.db-wal
 *.db-shm
 
+# --- Agent scratch ----------------------------------------------------------
+# Claude Code puts per-agent git worktrees here. They are checkouts of this same
+# repo, so committing them would nest the repository inside itself.
+.claude/worktrees/
+
 # --- Local configuration ----------------------------------------------------
 .env
 .env.*

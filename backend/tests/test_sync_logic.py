@@ -1420,6 +1420,59 @@ async def test_a_filename_title_is_recovered_without_moving_the_key(db):
     assert again is not None and again.id == item.id
 
 
+async def test_a_home_video_is_recognised_on_import_and_never_enriched(db):
+    """A phone recording played once through Plex is not a film.
+
+    It arrives typed `movie`, carrying nothing but the name the camera gave the
+    file, so without this it is indistinguishable from a film no provider can
+    identify — and that is a row Tally retries forever.
+    """
+    from app.services.media_repo import MediaRepository
+
+    server = PlexServer(
+        machine_identifier="abc123",
+        name="Home",
+        base_url="http://plex:32400",
+        access_token_encrypted=encrypt_secret("token") or "",
+    )
+    db.add(server)
+    await db.flush()
+
+    asked: list[str] = []
+
+    class Recording(MediaRepository):
+        async def _apply_enrichment(self, item, **kwargs):
+            asked.append(item.title)
+
+    repo = Recording(db, enrich=True)
+    payload = {
+        "ratingKey": "7",
+        "guid": "plex://movie/5d776b9ad5b0e6001fcc0f21",
+        "type": "movie",
+        "title": "2020-03-31 19.42.27",
+        "originallyAvailableAt": "2020-03-31",
+    }
+    home_video = await repo.upsert_from_plex(payload, server=server)
+    film = await repo.upsert_from_plex(
+        {"ratingKey": "8", "type": "movie", "title": "Arrival", "year": 2016},
+        server=server,
+    )
+    await db.commit()
+
+    assert home_video is not None and home_video.is_personal_media is True
+    assert film is not None and film.is_personal_media is False
+    # No provider was asked about the camera roll; the film was.
+    assert asked == ["Arrival"]
+
+    # And it is not a permanent verdict. The same row, retitled by a Plex match,
+    # is a film again — otherwise a misread would hide one for good.
+    matched = await repo.upsert_from_plex(
+        {**payload, "title": "A Family Christmas"}, server=server
+    )
+    assert matched is not None and matched.id == home_video.id
+    assert matched.is_personal_media is False
+
+
 async def test_a_thin_history_row_lands_on_the_row_it_names(db, monkeypatch):
     """Regression: a play of a film still in the library became a second row.
 
@@ -1564,6 +1617,76 @@ async def test_the_backfill_revisits_rows_that_nothing_else_looks_at(db, monkeyp
     asked.clear()
     assert await service.backfill_missing_metadata(SyncStats()) == 0
     assert asked == []
+
+
+async def test_the_backfill_gives_up_on_a_home_video_instead_of_retrying_forever(
+    db, monkeypatch
+):
+    """A row nothing can identify would otherwise be asked about every week.
+
+    The queue is bounded on purpose, so a title with no possible answer does not
+    just waste a provider call — it takes a slot from a row that has one. The
+    import path cannot reach these: the history sync reads incrementally and
+    will never run over a 2020 play again. This pass is the way in, and it costs
+    one turn through the queue, after which the row is not selected at all.
+    """
+    from app.services.sync_service import SyncService as Service
+
+    home_video = MediaItem(
+        guid_key="title:movie:2020-03-31-19-42-27",
+        media_type=MediaType.MOVIE,
+        title="2020-03-31 19.42.27",
+        first_aired=date(2020, 3, 31),
+    )
+    film = MediaItem(
+        guid_key="title:movie:the-last-boy",
+        media_type=MediaType.MOVIE,
+        title="The Last Boy",
+        first_aired=date(2019, 6, 7),
+    )
+    db.add_all([home_video, film])
+    await db.commit()
+
+    from app.services.media_repo import MediaRepository
+
+    # Two counters, because the two costs are separate: `considered` is the slot
+    # in the bounded batch, `asked` is the provider call.
+    considered: list[str] = []
+    asked: list[str] = []
+    real_enrich = MediaRepository.enrich_existing
+
+    async def spy_enrich(self, item):
+        considered.append(item.title)
+        return await real_enrich(self, item)
+
+    async def fake_apply(self, item, *, ids, library, genres):
+        asked.append(item.title)
+        item.metadata_updated_at = utcnow()
+
+    monkeypatch.setattr(MediaRepository, "enrich_existing", spy_enrich)
+    monkeypatch.setattr(MediaRepository, "_apply_enrichment", fake_apply)
+
+    service = Service(db)
+    await service.backfill_missing_metadata(SyncStats())
+    # Recognised on the way past, and not at the cost of a provider call.
+    assert considered == ["2020-03-31 19.42.27", "The Last Boy"]
+    assert asked == ["The Last Boy"]
+    await db.refresh(home_video)
+    assert home_video.is_personal_media is True
+    assert film.is_personal_media is False
+
+    # The film is only spared a second attempt because it was just tried; make
+    # it eligible again and it comes back. The home video is not in the queue at
+    # all any more, which is the point — the batch is bounded, so a row with no
+    # possible answer does not just waste a call, it takes a turn from a row
+    # that has one.
+    film.metadata_updated_at = None
+    await db.commit()
+    considered.clear()
+    asked.clear()
+    await service.backfill_missing_metadata(SyncStats())
+    assert considered == ["The Last Boy"]
+    assert asked == ["The Last Boy"]
 
 
 async def test_the_backfill_finishes_the_heal_without_waiting_for_a_restart(

@@ -55,6 +55,7 @@ def to_card(
         year=item.year,
         poster_url=poster_for(item),
         is_anime=item.is_anime,
+        is_personal_media=item.is_personal_media,
         season_number=item.season_number,
         episode_number=item.episode_number,
         show_id=item.show_id,

@@ -12,12 +12,33 @@ from typing import Any
 import httpx
 
 from ...config import get_settings
+from ..titles import title_agrees
 from .base import MetadataResult, ProviderClient
 
 log = logging.getLogger(__name__)
 settings = get_settings()
 
 API = "https://api4.thetvdb.com/v4"
+
+
+def _names_of(result: dict[str, Any]) -> list[str]:
+    """Every name a TVDB search hit might be known by.
+
+    `aliases` and `translations` matter because Plex is often using a regional
+    title — an anime library holds "Kamisama Hajimemashita" for what TVDB calls
+    "Kamisama Kiss". Both fields' shapes vary across TVDB responses, so
+    everything here is filtered down to plain strings rather than trusted.
+    """
+    names = [result.get("name")]
+    for field in ("aliases", "translations", "name_translated"):
+        value = result.get(field)
+        if isinstance(value, dict):
+            names.extend(value.values())
+        elif isinstance(value, list):
+            names.extend(value)
+        else:
+            names.append(value)
+    return [name for name in names if isinstance(name, str) and name]
 
 
 class TVDBClient(ProviderClient):
@@ -76,11 +97,34 @@ class TVDBClient(ProviderClient):
     async def search(
         self, title: str, *, year: int | None = None, is_show: bool = True
     ) -> dict[str, Any] | None:
+        """The best hit that actually names the title asked for, or nothing.
+
+        Same rule and same reason as `tmdb.search`: TVDB's search is fuzzy and
+        always answers, `results[0]` was taken on faith, and what comes back is
+        written onto the row as its identity. `merge_duplicates` groups on
+        `tvdb_id` as well as tmdb and imdb, so a wrong one here is just as able
+        to invent a pair or block a real one.
+
+        Aliases count as names — TVDB carries the alternative titles a series is
+        released under per region, and Plex may well be using one of them.
+        """
         params: dict[str, Any] = {"query": title, "type": "series" if is_show else "movie"}
         if year:
             params["year"] = year
-        results = await self._call("/search", params)
-        return results[0] if results else None
+        results = await self._call("/search", params) or []
+        for result in results:
+            if title_agrees(title, _names_of(result)):
+                return result
+        if results:
+            # INFO for the same reason as the TMDB refusal: it is the only
+            # record that a blank tile is a decision rather than a failure.
+            log.info(
+                "TVDB search for %r found nothing by that name (best was %r); "
+                "refusing rather than attaching a wrong id",
+                title,
+                results[0].get("name"),
+            )
+        return None
 
     def _to_result(self, data: dict[str, Any], *, is_show: bool) -> MetadataResult:
         remote = {r.get("sourceName", "").lower(): r.get("id") for r in data.get("remoteIds") or []}

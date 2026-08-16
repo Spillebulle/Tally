@@ -54,8 +54,22 @@ export function Artwork({
           key={src}
           src={src}
           alt=""
+          // Lazy, because a wall of these is hundreds of posters and each Plex
+          // one costs the proxy a fetch. That part works: the requests go out.
           loading="lazy"
-          decoding="async"
+          // But NOT `decoding="async"`, which is what "some posters stay blank
+          // until I hover one" turned out to be. It tells the browser it may
+          // show a frame without waiting for the image to be decoded, and pick
+          // it up afterwards. Paging swaps a whole screen of tiles in and the
+          // page then falls idle, so "afterwards" never arrives: the poster is
+          // loaded — `complete`, real `naturalWidth` — and simply never drawn.
+          // Measured on the live library it hit the lowest rows of the window
+          // on 7 of 20 page changes. Anything that forces a redraw reveals them
+          // at once, which is why hovering a tile or rolling the wheel one pixel
+          // looked like it was going and fetching the image. Leaving the decode
+          // to the browser's own default costs nothing here — neither way does
+          // a page change produce a single long task — so it must not come back
+          // as an optimisation.
           className={cn('absolute inset-0 h-full w-full object-cover', imgClassName)}
           onError={(event) => {
             event.currentTarget.style.display = 'none'
@@ -126,6 +140,18 @@ export function Poster({
               >
                 <SparkIcon className="text-[11px]" />
                 Anime
+              </span>
+            )}
+            {/* Says what a blank tile is. These only reach a grid through
+                search, and without this one looks like a film whose artwork
+                failed to load — which is how it got reported as a bug. */}
+            {card.is_personal_media && (
+              <span
+                className="inline-flex items-center rounded-md bg-black/70 px-1.5 py-0.5
+                           text-[10px] font-semibold uppercase tracking-wide text-white
+                           backdrop-blur-sm"
+              >
+                Home video
               </span>
             )}
           </div>

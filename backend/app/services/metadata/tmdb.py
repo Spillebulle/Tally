@@ -5,13 +5,45 @@ import logging
 from typing import Any
 
 from ...config import get_settings
-from .base import MetadataResult, ProviderClient
+from ..titles import title_agrees
+from .base import CreditPerson, CreditsResult, MetadataResult, ProviderClient
 
 log = logging.getLogger(__name__)
 settings = get_settings()
 
 API = "https://api.themoviedb.org/3"
 IMG = "https://image.tmdb.org/t/p"
+
+# A cast strip is something to skim, not a full billing block: TMDB will happily
+# list two hundred people on a blockbuster, most of them one-line extras.
+MAX_CAST = 30
+# Films have one or two directors; a series' crew rolls up everyone who ever
+# directed an episode, which is not a useful facet past the first few.
+MAX_DIRECTORS = 3
+
+
+def _int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _character(entry: dict[str, Any]) -> str | None:
+    """The part someone played, from either credits shape.
+
+    A film's cast row carries `character`; a series' aggregate row carries a
+    `roles` list instead, one per part across the run.
+    """
+    if character := entry.get("character"):
+        return str(character)[:255]
+    names = [
+        str(role["character"])
+        for role in entry.get("roles") or []
+        if isinstance(role, dict) and role.get("character")
+    ]
+    joined = " / ".join(dict.fromkeys(names))
+    return joined[:255] or None
 
 
 class TMDBClient(ProviderClient):
@@ -67,19 +99,77 @@ class TMDBClient(ProviderClient):
     async def search(
         self, title: str, *, year: int | None = None, is_show: bool = False
     ) -> dict[str, Any] | None:
+        """The best hit that actually *names* what was asked for, or nothing.
+
+        This used to be `results[0]`, and TMDB's search always returns
+        something: ask it for a title it does not have and it hands back the
+        most popular thing that shares a word. For an item that arrived with an
+        external id that hardly mattered — `resolve` never gets here. For an
+        item that arrived with nothing but a title, the answer *becomes* the
+        row's identity, and a wrong one is permanent: `backfill_missing_metadata`
+        only revisits rows with no id at all, so attaching the wrong one takes
+        the row out of the only pass that would ever look again.
+
+        See `test_metadata_providers.py` for the case this was written for.
+        """
         kind = "tv" if is_show else "movie"
         params: dict[str, Any] = {"query": title, "include_adult": "false"}
+        year_field = "first_air_date_year" if is_show else "year"
         if year:
-            params["first_air_date_year" if is_show else "year"] = year
+            params[year_field] = year
 
         data = await self._call(f"/search/{kind}", params)
-        results = (data or {}).get("results") or []
-        if not results and year:
+        match = self._agreeing_result(title, data, is_show=is_show)
+        if match is None and year:
             # Plex years and TMDB release years disagree often enough (festival
             # vs wide release) that a yearless retry is worth one extra call.
-            data = await self._call(f"/search/{kind}", {"query": title})
-            results = (data or {}).get("results") or []
-        return results[0] if results else None
+            #
+            # The retry now fires when the year-filtered page held nothing that
+            # *names* the title, not merely when it was empty — which is a
+            # different and much more common failure. A history snapshot's year
+            # can come from a release-name tag rather than from the film, and a
+            # `year=` TMDB does not agree with does not empty the page: it
+            # filters the right film out and leaves a wrong one behind. That is
+            # exactly how a 2019 play of "Anti-Social" (2015) was searched for
+            # as year 2014 and matched to "Anti-Social Limited", an unrelated
+            # Canadian documentary that happens to start with the same words.
+            data = await self._call(
+                f"/search/{kind}", {"query": title, "include_adult": "false"}
+            )
+            match = self._agreeing_result(title, data, is_show=is_show)
+        return match
+
+    def _agreeing_result(
+        self, wanted: str, data: Any, *, is_show: bool
+    ) -> dict[str, Any] | None:
+        """First result whose own name matches the title we searched for.
+
+        Scanning past a disagreeing hit rather than stopping at it is the point:
+        TMDB orders by popularity, so the film actually asked for is often
+        sitting behind a better-known one that merely shares a word.
+
+        The comparison is exact once normalised (`services/titles.py`), against
+        both the localised and the original name. A prefix deliberately does not
+        count — every wrong id this instance has stored was a prefix match.
+        """
+        results = (data or {}).get("results") or []
+        name = "name" if is_show else "title"
+        original = "original_name" if is_show else "original_title"
+        for result in results:
+            if title_agrees(wanted, (result.get(name), result.get(original))):
+                return result
+        if results:
+            # INFO, not debug: this is the only trace that a row was left
+            # without an id and without artwork *on purpose*. `LOG_LEVEL`
+            # defaults to INFO, so at debug nobody would ever see it and a
+            # blank tile would have no explanation anywhere.
+            log.info(
+                "TMDB search for %r found nothing by that name (best was %r); "
+                "refusing rather than attaching a wrong id",
+                wanted,
+                results[0].get(name),
+            )
+        return None
 
     async def details(self, tmdb_id: int, *, is_show: bool) -> MetadataResult | None:
         kind = "tv" if is_show else "movie"
@@ -133,6 +223,101 @@ class TMDBClient(ProviderClient):
             source="tmdb",
         )
 
+    # -- credits ----------------------------------------------------------
+
+    async def credits(self, tmdb_id: int, *, is_show: bool) -> CreditsResult | None:
+        """Cast and directors for one title, or None if TMDB would not say.
+
+        A series has no single cast list, so `aggregate_credits` is the right
+        endpoint there: it rolls every season's up and carries the episode
+        counts that separate a regular from a one-episode guest. Its rows are
+        shaped differently from a film's — `roles`/`jobs` lists rather than a
+        single `character`/`job` — which is what `_character` and `_directors`
+        below are reconciling.
+        """
+        path = (
+            f"/tv/{tmdb_id}/aggregate_credits"
+            if is_show
+            else f"/movie/{tmdb_id}/credits"
+        )
+        data = await self._call(path)
+        if not data:
+            return None
+        return CreditsResult(
+            cast=self._cast(data.get("cast") or []),
+            directors=self._directors(data.get("crew") or []),
+        )
+
+    def _cast(self, raw: list[dict[str, Any]]) -> list[CreditPerson]:
+        # Keyed by person, not by row: TMDB lists someone twice when they play
+        # two parts, and `media_credits` holds one row per (item, person, kind).
+        # Folding the characters together keeps both, and keeps the constraint.
+        by_person: dict[int, CreditPerson] = {}
+        for position, entry in enumerate(raw):
+            person_id = _int(entry.get("id"))
+            name = entry.get("name") or entry.get("original_name")
+            if person_id is None or not name:
+                continue
+            character = _character(entry)
+            existing = by_person.get(person_id)
+            if existing is None:
+                # `or position` would be wrong here: TMDB bills the lead as
+                # order 0, which is falsy, and the top-billed actor would be
+                # sorted to wherever they happened to sit in the payload.
+                order = _int(entry.get("order"))
+                by_person[person_id] = CreditPerson(
+                    provider_id=person_id,
+                    name=str(name),
+                    profile_url=self.image(entry.get("profile_path"), "w185"),
+                    character=character,
+                    ordering=position if order is None else order,
+                )
+            elif character and character not in (existing.character or ""):
+                existing.character = (
+                    f"{existing.character} / {character}"
+                    if existing.character
+                    else character
+                )
+        ordered = sorted(by_person.values(), key=lambda person: person.ordering)
+        return ordered[:MAX_CAST]
+
+    def _directors(self, raw: list[dict[str, Any]]) -> list[CreditPerson]:
+        by_person: dict[int, CreditPerson] = {}
+        for entry in raw:
+            person_id = _int(entry.get("id"))
+            name = entry.get("name") or entry.get("original_name")
+            if person_id is None or not name or person_id in by_person:
+                continue
+
+            jobs = entry.get("jobs")
+            if jobs is None:
+                # A film: one crew row per job.
+                if entry.get("job") != "Director":
+                    continue
+                weight = 0
+            else:
+                # A series: every job that person did, with an episode count
+                # each. Rank by how much of the run they actually directed.
+                directed = [job for job in jobs if job.get("job") == "Director"]
+                if not directed:
+                    continue
+                weight = -sum(_int(job.get("episode_count")) or 0 for job in directed)
+
+            by_person[person_id] = CreditPerson(
+                provider_id=person_id,
+                name=str(name),
+                profile_url=self.image(entry.get("profile_path"), "w185"),
+                ordering=weight,
+            )
+
+        ordered = sorted(by_person.values(), key=lambda person: person.ordering)[
+            :MAX_DIRECTORS
+        ]
+        # The episode counts were only ever a ranking device; store the rank.
+        for position, person in enumerate(ordered):
+            person.ordering = position
+        return ordered
+
     async def resolve(
         self,
         *,
@@ -143,7 +328,15 @@ class TMDBClient(ProviderClient):
         imdb_id: str | None = None,
         tvdb_id: int | None = None,
     ) -> MetadataResult | None:
-        """Best-effort lookup: known id first, then cross-reference, then search."""
+        """Best-effort lookup: known id first, then cross-reference, then search.
+
+        Only the last of those three is title-checked, and only it needs to be.
+        A known id and an id cross-reference are exact — the caller already knew
+        which record it wanted, usually because Plex's agent said so — and Plex
+        titles legitimately differ from TMDB's ("Marvel's Daredevil"), so
+        checking there would throw away good matches for nothing. A search is
+        the one path that *guesses*, so it is the one that has to be sure.
+        """
         if not self.enabled:
             return None
 

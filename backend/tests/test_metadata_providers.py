@@ -10,6 +10,9 @@ import respx
 
 from app.services.metadata.base import ProviderClient
 from app.services.metadata.mal import _titles_match
+from app.services.metadata.tmdb import TMDBClient
+from app.services.metadata.tvdb import TVDBClient
+from app.services.titles import title_agrees
 
 # No module-level asyncio mark: `asyncio_mode = auto` already handles the async
 # tests, and marking the synchronous ones only produces warnings.
@@ -146,3 +149,228 @@ def test_a_mal_search_hit_with_a_real_title_is_accepted():
     assert _titles_match("Attack on Titan Season 2", ["Attack on Titan"])
     assert _titles_match("Fullmetal Alchemist", ["Fullmetal Alchemist: Brotherhood"])
     assert _titles_match("Your Name.", ["Kimi no Na wa.", "Your Name"])
+
+
+# --- the id-bearing providers, which get equality instead ------------------
+#
+# Every wrong tmdb id found on a live instance was a *prefix* match from a
+# title search: a short title asked for, a longer better-known film handed
+# back. The forgiveness that is right for MAL is exactly the bug here.
+
+
+def test_a_longer_title_that_merely_starts_the_same_is_not_agreement():
+    """The four real wrong matches this instance has stored, as a list.
+
+    Each is `results[0]` from a TMDB search for the short name, and each was
+    written onto a row that had no other identity — so the row then dropped out
+    of `backfill_missing_metadata`, which only looks at rows with no id at all,
+    and nothing ever reconsidered it.
+    """
+    assert not title_agrees("Anti-Social", ["Anti-Social Limited"])
+    assert not title_agrees("Men", ["Men in Black"])
+    assert not title_agrees("Society", ["Dead Poets Society"])
+    assert not title_agrees("Thelma", ["Thelma & Louise"])
+
+
+def test_the_same_title_spelled_differently_is_agreement():
+    assert title_agrees("WALL·E", ["WALL-E"])
+    assert title_agrees("Amelie", [None, "Amélie"])
+    assert title_agrees("Spider-Man: Into the Spider-Verse", ["Spider Man Into the Spider Verse"])
+
+
+def test_a_near_miss_is_refused_and_that_is_the_chosen_trade():
+    """The cost of exact equality, written down so it is not a surprise.
+
+    Release-name recovery produces five rows on the live instance. Four still
+    heal — their filenames spell the film correctly — and one does not: item
+    52633's file is named `Mars.Needs.Mom`, singular, while the film is *Mars
+    Needs Moms*. Before the search gate that row was given tmdb 50321 and a
+    poster (though never a merge, since the real row is not there). It now gets
+    neither, and keeps a blank tile until somebody looks.
+
+    That is deliberate. A single character is not a signal: it separates a typo
+    from a sequel with nothing to tell them apart. Any rule loose enough to
+    accept "Mars Needs Mom" against "Mars Needs Moms" also accepts "Alien"
+    against "Aliens", and "The Jungle Book 2" against "The Jungle Book 3" —
+    which is the same silent wrong-id error this gate exists to stop, on films
+    the library actually holds. A missing poster is visible and recoverable; a
+    wrong id is neither.
+
+    Such a row also stays in `backfill_missing_metadata` forever, precisely
+    because no id was attached — it retries weekly, indefinitely, and that
+    unbounded retry is the intended shape. It costs one search a week and it is
+    the only way the row can ever heal if TMDB gains the alternative title.
+    """
+    assert not title_agrees("Mars Needs Mom", ["Mars Needs Moms"])
+
+    for recovered in (
+        "The Jungle Book 2",
+        "The Simpsons Movie",
+        "Unfriended",
+        "Sleeping Beauty",
+    ):
+        assert title_agrees(recovered, [recovered]), recovered
+
+    # The near-misses that must stay refused for the same reason, on titles
+    # that are genuinely different films rather than typos.
+    assert not title_agrees("Alien", ["Aliens"])
+    assert not title_agrees("The Jungle Book 2", ["The Jungle Book 3"])
+
+
+def test_a_row_with_no_title_agrees_with_nothing():
+    """No title is no evidence, and no evidence must not read as a match."""
+    assert not title_agrees("", ["Anything"])
+    assert not title_agrees(None, ["Anything"])
+    assert not title_agrees("Anything", [None, ""])
+
+
+def _tmdb() -> TMDBClient:
+    client = TMDBClient()
+    client.api_key = "test-key"
+    return client
+
+
+@respx.mock
+async def test_tmdb_drops_a_year_that_filtered_the_right_film_out():
+    """The live case: a 2019 play of "Anti-Social" (2015) matched to a
+    documentary called "Anti-Social Limited".
+
+    Plex snapshotted the play under the filename, so the year Tally had came
+    from a release tag — 2014 — not from the film. TMDB's `year=` is a hard
+    filter, so it removed the film actually wanted and left one that merely
+    starts with the same two words, and `results[0]` took it. The retry without
+    the year already existed but only fired on an *empty* page, which this
+    never was.
+    """
+    limited = {"id": 981278, "title": "Anti-Social Limited", "original_title": "Anti-Social Limited"}
+    real = {"id": 330206, "title": "Anti-Social", "original_title": "Anti-Social"}
+
+    def _search(request):
+        if request.url.params.get("year"):
+            return httpx.Response(200, json={"results": [limited]})
+        # Deliberately the more popular wrong hit first: the search has to look
+        # past a disagreeing result, not stop at it.
+        return httpx.Response(200, json={"results": [limited, real]})
+
+    respx.get("https://api.themoviedb.org/3/search/movie").mock(side_effect=_search)
+    wrong = respx.get("https://api.themoviedb.org/3/movie/981278").mock(
+        return_value=httpx.Response(200, json={"id": 981278, "title": "Anti-Social Limited"})
+    )
+    respx.get("https://api.themoviedb.org/3/movie/330206").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 330206,
+                "title": "Anti-Social",
+                "release_date": "2015-05-01",
+                "runtime": 99,
+            },
+        )
+    )
+
+    result = await _tmdb().resolve(title="Anti-Social", year=2014, is_show=False)
+
+    assert result is not None
+    assert result.tmdb_id == 330206, "the wrong film's id was attached"
+    assert wrong.call_count == 0, "the mismatched hit was fetched anyway"
+
+
+@respx.mock
+async def test_tmdb_returns_nothing_rather_than_a_wrong_id():
+    """No id beats a wrong one. A row with none stays in the backfill queue and
+    keeps its blank tile, which is visible; a row with the wrong one leaves the
+    queue forever and also poisons its `merge_duplicates` group.
+    """
+    respx.get("https://api.themoviedb.org/3/search/movie").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": 607, "title": "Men in Black", "original_title": "Men in Black"}]},
+        )
+    )
+    details = respx.get("https://api.themoviedb.org/3/movie/607").mock(
+        return_value=httpx.Response(200, json={"id": 607, "title": "Men in Black"})
+    )
+
+    assert await _tmdb().resolve(title="Men", year=2022, is_show=False) is None
+    assert details.call_count == 0
+
+
+@respx.mock
+async def test_tmdb_does_not_title_check_a_lookup_by_id():
+    """Plex's own title is often not TMDB's — "Marvel's Daredevil" — and when
+    the caller already has the id there is nothing being guessed at. Checking
+    here would throw away good matches for no safety.
+    """
+    search = respx.get("https://api.themoviedb.org/3/search/tv").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    respx.get("https://api.themoviedb.org/3/tv/61889").mock(
+        return_value=httpx.Response(
+            200, json={"id": 61889, "name": "Daredevil", "first_air_date": "2015-04-10"}
+        )
+    )
+
+    result = await _tmdb().resolve(
+        title="Marvel's Daredevil", year=2015, is_show=True, tmdb_id=61889
+    )
+
+    assert result is not None and result.tmdb_id == 61889
+    assert search.call_count == 0
+
+
+@respx.mock
+async def test_tvdb_refuses_a_search_hit_that_names_another_show():
+    """`merge_duplicates` groups on `tvdb_id` too, so a wrong one here is just
+    as able to invent a pair or block a real one.
+    """
+    respx.post("https://api4.thetvdb.com/v4/login").mock(
+        return_value=httpx.Response(200, json={"data": {"token": "t"}})
+    )
+    respx.get("https://api4.thetvdb.com/v4/search").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"name": "Thelma & Louise", "tvdb_id": "1541"}]}
+        )
+    )
+    extended = respx.get("https://api4.thetvdb.com/v4/movies/1541/extended").mock(
+        return_value=httpx.Response(200, json={"data": {"id": 1541, "name": "Thelma & Louise"}})
+    )
+
+    client = TVDBClient()
+    client.api_key = "test-key"
+    assert await client.resolve(title="Thelma", year=2017, is_show=False) is None
+    assert extended.call_count == 0
+
+
+@respx.mock
+async def test_tvdb_accepts_a_hit_that_matches_an_alias():
+    """TVDB carries the regional names a series is released under, and Plex may
+    well be using one of them.
+    """
+    respx.post("https://api4.thetvdb.com/v4/login").mock(
+        return_value=httpx.Response(200, json={"data": {"token": "t"}})
+    )
+    respx.get("https://api4.thetvdb.com/v4/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "name": "Kamisama Kiss",
+                        "aliases": ["Kamisama Hajimemashita"],
+                        "tvdb_id": "265334",
+                    }
+                ]
+            },
+        )
+    )
+    respx.get("https://api4.thetvdb.com/v4/series/265334/extended").mock(
+        return_value=httpx.Response(
+            200, json={"data": {"id": 265334, "name": "Kamisama Kiss", "year": "2012"}}
+        )
+    )
+
+    client = TVDBClient()
+    client.api_key = "test-key"
+    result = await client.resolve(title="Kamisama Hajimemashita", year=2012, is_show=True)
+
+    assert result is not None and result.tvdb_id == 265334
