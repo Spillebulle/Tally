@@ -1,7 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useState, type InputHTMLAttributes } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import type { WatchStatus } from '@/lib/types'
+import type { PersonalFilter, WatchStatus } from '@/lib/types'
 import { cn, STATUS_LABELS } from '@/lib/utils'
+import { SearchIcon } from './Icons'
+import { Segmented } from './ui'
 
 /**
  * The browse query — where it lives, and the controls that write it.
@@ -17,15 +19,43 @@ import { cn, STATUS_LABELS } from '@/lib/utils'
  * so this lives in one place — the backend shares its query building for the
  * same reason. A page supplies its own sort list, because "added" means
  * something different once you are looking at a watchlist.
+ *
+ * ## One table, everything derived from it
+ *
+ * Each filter is defined exactly once, in `filterTable()`. Everything else —
+ * the values read out of the URL, the request payload, whether "Clear filters"
+ * appears, what `clear()` removes, the chips, and the controls themselves —
+ * is *derived* from that table rather than restated beside it.
+ *
+ * This is not tidiness. "Is any filter active" used to be a hand-written chain
+ * of ORs, and it decided two things at once: whether the user is offered a way
+ * to clear the filters, and whether an empty grid says "nothing matched those
+ * filters" or "nothing here yet, run a sync". Forgetting to add a new filter to
+ * that chain therefore produced a narrowed grid, no way to widen it, and a
+ * message insisting the library was empty — a silent, compounding bug that got
+ * likelier with every filter added. Derived state cannot fall out of step.
+ *
+ * Adding a filter means appending one entry to the table. If it needs a kind of
+ * control that does not exist yet, add a `control.kind` and one branch in
+ * `BrowseFilters`; nothing else in this file, and nothing in the pages.
  */
 
 export type SortOption = { value: string; label: string }
 
-/** Sorts every browse page offers. */
+/**
+ * Sorts every browse page offers.
+ *
+ * "Added" is `MediaItem.created_at` — when *Tally* first recorded the title —
+ * which is not the same date as the dashboard's "Recently added to Plex"
+ * shelf, and that shelf orders by `max(PlexMapping.added_at)`, the date the
+ * file appeared on the server. Both are useful; labelling either one plain
+ * "recently added" makes them look like the same thing disagreeing.
+ */
 export const SORTS: readonly SortOption[] = [
   { value: 'title', label: 'Title' },
   { value: 'year', label: 'Year' },
-  { value: 'added', label: 'Recently added' },
+  { value: 'release', label: 'Release date' },
+  { value: 'added', label: 'Added to Tally' },
   { value: 'watched', label: 'Recently watched' },
   { value: 'rating', label: 'Your rating' },
 ]
@@ -35,15 +65,15 @@ export const WATCHLIST_SORTS: readonly SortOption[] = [
   { value: 'watchlist_added', label: 'Recently watchlisted' },
   { value: 'title', label: 'Title' },
   { value: 'year', label: 'Year' },
-  { value: 'added', label: 'Added to library' },
+  { value: 'release', label: 'Release date' },
+  { value: 'added', label: 'Added to Tally' },
   { value: 'watched', label: 'Recently watched' },
   { value: 'rating', label: 'Your rating' },
 ]
 
-export const STATUS_FILTERS: Array<{
-  value: WatchStatus | 'all' | 'unwatched'
-  label: string
-}> = [
+export type StatusValue = WatchStatus | 'all' | 'unwatched'
+
+export const STATUS_FILTERS: Array<{ value: StatusValue; label: string }> = [
   { value: 'all', label: 'All' },
   { value: 'watching', label: STATUS_LABELS.watching },
   { value: 'completed', label: STATUS_LABELS.completed },
@@ -53,44 +83,202 @@ export const STATUS_FILTERS: Array<{
   { value: 'dropped', label: STATUS_LABELS.dropped },
 ]
 
+/** Your own rating, as a pair of inclusive bounds. */
+export type RatingValue = { min?: number; max?: number }
+
 /**
  * Rating shortcuts, on Plex's 0–10 scale.
  *
  * `min` alone is "this and above"; `min === max` pins an exact score, which is
  * what clicking a bar on the stats page sends.
  */
-const RATING_FILTERS: Array<{ label: string; min?: number; max?: number }> = [
-  { label: 'Any' },
-  { label: '10 only', min: 10, max: 10 },
-  { label: '9+', min: 9 },
-  { label: '8+', min: 8 },
-  { label: '7+', min: 7 },
-  { label: '5+', min: 5 },
+const RATING_CHOICES: Array<FilterChoice<RatingValue>> = [
+  { value: {}, label: 'Any rating' },
+  { value: { min: 10, max: 10 }, label: 'Rated 10 only' },
+  { value: { min: 9 }, label: 'Rated 9+' },
+  { value: { min: 8 }, label: 'Rated 8+' },
+  { value: { min: 7 }, label: 'Rated 7+' },
+  { value: { min: 5 }, label: 'Rated 5+' },
 ]
 
-/**
- * The shortcut list, plus an entry describing the active filter when it is not
- * one of them.
- *
- * Clicking a bar on the stats page can pin any exact score, and a select that
- * showed "Any rating" while the grid was filtered to 7s would be lying about
- * the state of the page.
- */
-export function ratingOptions(min?: number, max?: number) {
-  const known = RATING_FILTERS.some(
-    (option) => option.min === min && option.max === max,
-  )
-  if (known || (min == null && max == null)) return RATING_FILTERS
+/** Presence on a Plex server. Tri-state, so "not on Plex" is reachable. */
+export type PlexPresence = 'all' | 'true' | 'false'
 
-  const label =
-    min != null && min === max
-      ? `${min} only`
-      : min != null && max != null
-        ? `${min}–${max}`
-        : min != null
-          ? `${min}+`
-          : `up to ${max}`
-  return [...RATING_FILTERS, { label, min, max }]
+/** The subset of a media query these controls own. */
+export interface FilterQuery {
+  q?: string
+  genre?: string
+  content_rating?: string
+  studio?: string
+  director?: string
+  watch_status?: WatchStatus
+  unwatched?: true
+  min_rating?: number
+  max_rating?: number
+  year?: number
+  favorites?: true
+  on_plex?: boolean
+  personal?: PersonalFilter
+  sort: string
+  order: 'asc' | 'desc'
+}
+
+/** Every filter, and the type of the value it holds. */
+export interface FilterValues {
+  q: string
+  status: StatusValue
+  genre: string
+  content_rating: string
+  studio: string
+  director: string
+  rating: RatingValue
+  year: number | null
+  favorites: boolean
+  on_plex: PlexPresence
+  personal: PersonalFilter
+  sort: string
+  order: 'asc' | 'desc'
+}
+
+export type FilterKey = keyof FilterValues
+
+/** One choice a select or segmented control offers. */
+export interface FilterChoice<V> {
+  value: V
+  label: string
+}
+
+/** Whatever the page fetched for the selects that offer real library values. */
+export interface FilterLists {
+  genres: string[]
+  contentRatings: string[]
+}
+
+/** The rest of the query, for the two filters whose default depends on it. */
+export interface FilterCtx {
+  params: URLSearchParams
+}
+
+/**
+ * How a filter renders.
+ *
+ * `none` is not "no control" in the sense of unreachable — those filters are
+ * arrived at by clicking a facet on an item page and appear as a removable
+ * chip. A library holds a dozen certificates but hundreds of studios and
+ * thousands of directors, and a select is not a way to find one name in a
+ * thousand.
+ */
+export type FilterControl =
+  | { kind: 'search'; placeholder: string }
+  | { kind: 'chips' }
+  | { kind: 'select'; lists?: keyof FilterLists }
+  | { kind: 'segmented'; caption: string }
+  | { kind: 'toggle'; on: string }
+  | { kind: 'number'; placeholder: string; min?: number; max?: number }
+  | { kind: 'none' }
+
+/**
+ * One filter, defined once.
+ *
+ * `read` and `write` are inverses over the query string, and `write` is what
+ * makes "a default never survives into the URL" automatic: it answers `null`
+ * for a value equal to this page's own default, and `null` means *remove this
+ * parameter*. Everything derived from the table — `active`, the request, the
+ * chips — asks `write` rather than keeping its own opinion.
+ */
+export interface FilterDef<V> {
+  key: FilterKey
+  /** The query parameters this filter owns. Rating owns two. */
+  params: readonly string[]
+  /** Names it on a chip and in the control's accessible label. */
+  label: string
+  /**
+   * What this filter is for, which decides two behaviours nothing else can
+   * infer:
+   *
+   * - `filter` narrows the grid, so it counts towards "Clear filters" and
+   *   towards the empty state saying "nothing matched those filters".
+   * - `view` changes the ordering, not the set. Clear resets it, but a sort is
+   *   not something a user needs rescuing from.
+   * - `search` is navigation rather than a filter: Clear keeps it, so it can
+   *   never be the reason Clear is offered.
+   */
+  role: 'filter' | 'view' | 'search'
+  /** Untrusted input: anything unrecognised falls back to the page default. */
+  read: (ctx: FilterCtx) => V
+  /** The URL form. A parameter mapped to `null` is removed. */
+  write: (value: V, ctx: FilterCtx) => Record<string, string | null>
+  /** The filter's contribution to the request. */
+  toQuery: (value: V) => Partial<FilterQuery>
+  control: FilterControl
+  /** The choices a select or segmented control offers. */
+  choices?: (lists: FilterLists) => Array<FilterChoice<V>>
+  /**
+   * Names a value that is not among `choices`.
+   *
+   * Clicking a bar on the stats page can pin any exact score, and a genre
+   * filter can be in force before the genre list has finished loading. A
+   * control offering one option while the grid is filtered by another is a
+   * control that lies, so the odd value out is appended to the list rather
+   * than leaving the control showing "Any".
+   */
+  describe?: (value: V) => string
+  /** Chip text, for a filter with no control of its own. */
+  chip?: (value: V) => string | null
+}
+
+/**
+ * The table with its value types erased.
+ *
+ * Each definition below is checked against its own value type where it is
+ * written; iterating a heterogeneous collection of them is what needs the
+ * escape hatch, and it is confined to this alias.
+ */
+type AnyFilterDef = FilterDef<any>
+
+export type FilterTable = { [K in FilterKey]: FilterDef<FilterValues[K]> }
+
+/** What a page brings to the table: its sorts, and any default of its own. */
+export interface FilterPage {
+  /** The sorts this page offers — the dropdown's options and the whitelist. */
+  sorts: readonly SortOption[]
+  defaultSort: string
+  /**
+   * Overrides the general direction rule, and applies only while the page is
+   * still on its own default sort — the watchlist opens oldest first because it
+   * is a queue, but switching it to Year should mean the same newest-first that
+   * Year means everywhere else.
+   */
+  defaultOrder?: 'asc' | 'desc'
+  /**
+   * Starting values that differ from the shared ones.
+   *
+   * Search and the all-titles grid promise everything, so they start with home
+   * videos shown; the grids that name a category leave them out. A page default
+   * is still a default — it never appears in the URL.
+   */
+  defaults?: Partial<FilterValues>
+}
+
+/** A plain string parameter: present or not. */
+function textFilter(
+  key: FilterKey,
+  label: string,
+  control: FilterControl,
+  extra: Partial<FilterDef<string>> = {},
+): FilterDef<string> {
+  return {
+    key,
+    params: [key],
+    label,
+    role: 'filter',
+    read: ({ params }) => params.get(key) ?? '',
+    write: (value) => ({ [key]: value.trim() || null }),
+    toQuery: (value) => (value ? ({ [key]: value } as Partial<FilterQuery>) : {}),
+    control,
+    describe: (value) => value,
+    ...extra,
+  }
 }
 
 /**
@@ -101,11 +289,285 @@ export function ratingOptions(min?: number, max?: number) {
  * grid should be. Anything unreadable or out of range means "no bound", which
  * is the one answer that always shows the user something.
  */
-const numberParam = (raw: string | null): number | undefined => {
+const ratingBound = (raw: string | null): number | undefined => {
   if (raw === null || raw === '') return undefined
   const value = Number(raw)
   if (!Number.isFinite(value) || value < 0 || value > 10) return undefined
   return value
+}
+
+/** The sort in force, checked against what this page actually offers. */
+const readSort = (params: URLSearchParams, page: FilterPage): string => {
+  const raw = params.get('sort')
+  return page.sorts.some((option) => option.value === raw)
+    ? (raw as string)
+    : page.defaultSort
+}
+
+/** Titles read A–Z; everything else is a recency or a score, top end first. */
+const directionFor = (sort: string, page: FilterPage): 'asc' | 'desc' =>
+  sort === page.defaultSort && page.defaultOrder
+    ? page.defaultOrder
+    : sort === 'title'
+      ? 'asc'
+      : 'desc'
+
+/**
+ * Every filter the browse pages share, built for one page's defaults.
+ *
+ * Order matters twice: it is the order the controls appear in, and `sort` must
+ * come before `order`, whose own default is a function of the current sort.
+ */
+export function filterTable(page: FilterPage): FilterTable {
+  const fallback = <K extends FilterKey>(key: K, shared: FilterValues[K]) =>
+    (page.defaults?.[key] ?? shared) as FilterValues[K]
+
+  const personalDefault = fallback('personal', 'exclude')
+
+  return {
+    q: {
+      key: 'q',
+      params: ['q'],
+      label: 'Search',
+      // Navigation, not a filter: clearing the filters must not also throw
+      // away what the user searched for.
+      role: 'search',
+      read: ({ params }) => params.get('q') ?? '',
+      write: (value) => ({ q: value.trim() || null }),
+      toQuery: (value) => (value ? { q: value } : {}),
+      control: { kind: 'search', placeholder: 'Search these titles…' },
+    },
+
+    status: {
+      key: 'status',
+      params: ['status'],
+      label: 'Status',
+      role: 'filter',
+      read: ({ params }) => {
+        const raw = params.get('status')
+        return STATUS_FILTERS.some((option) => option.value === raw)
+          ? (raw as StatusValue)
+          : 'all'
+      },
+      write: (value) => ({ status: value === 'all' ? null : value }),
+      toQuery: (value) =>
+        value === 'all'
+          ? {}
+          : value === 'unwatched'
+            ? { unwatched: true }
+            : { watch_status: value },
+      control: { kind: 'chips' },
+      choices: () => STATUS_FILTERS,
+    },
+
+    genre: textFilter(
+      'genre',
+      'Genre',
+      { kind: 'select', lists: 'genres' },
+      {
+        choices: (lists) => [
+          { value: '', label: 'All genres' },
+          ...lists.genres.map((name) => ({ value: name, label: name })),
+        ],
+      },
+    ),
+
+    content_rating: textFilter(
+      'content_rating',
+      'Rated',
+      { kind: 'select', lists: 'contentRatings' },
+      {
+        choices: (lists) => [
+          { value: '', label: 'Any certificate' },
+          ...lists.contentRatings.map((name) => ({ value: name, label: name })),
+        ],
+      },
+    ),
+
+    // Reached by clicking the value on an item page. Named in a chip so
+    // whatever is narrowing the grid is still visible and still undoable.
+    studio: textFilter('studio', 'Studio', { kind: 'none' }, {
+      chip: (value) => value || null,
+    }),
+    director: textFilter('director', 'Director', { kind: 'none' }, {
+      chip: (value) => value || null,
+    }),
+
+    rating: {
+      key: 'rating',
+      params: ['min_rating', 'max_rating'],
+      label: 'Your rating',
+      role: 'filter',
+      read: ({ params }) => ({
+        min: ratingBound(params.get('min_rating')),
+        max: ratingBound(params.get('max_rating')),
+      }),
+      write: ({ min, max }) => ({
+        min_rating: min == null ? null : String(min),
+        max_rating: max == null ? null : String(max),
+      }),
+      toQuery: ({ min, max }) => ({ min_rating: min, max_rating: max }),
+      control: { kind: 'select' },
+      choices: () => RATING_CHOICES,
+      describe: ({ min, max }) =>
+        min != null && min === max
+          ? `Rated ${min} only`
+          : min != null && max != null
+            ? `Rated ${min}–${max}`
+            : min != null
+              ? `Rated ${min}+`
+              : `Rated up to ${max}`,
+    },
+
+    year: {
+      key: 'year',
+      params: ['year'],
+      label: 'Year',
+      role: 'filter',
+      read: ({ params }) => {
+        const value = Number(params.get('year'))
+        // A URL is typed and truncated by hand. Anything that is not a real
+        // year is no filter at all, which is the answer that still shows
+        // something rather than a 422.
+        if (!Number.isInteger(value) || value < 1870 || value > 2999) return null
+        return value
+      },
+      write: (value) => ({ year: value == null ? null : String(value) }),
+      toQuery: (value) => (value == null ? {} : { year: value }),
+      control: { kind: 'number', placeholder: 'Year', min: 1870, max: 2999 },
+    },
+
+    favorites: {
+      key: 'favorites',
+      params: ['favorites'],
+      label: 'Favourites',
+      role: 'filter',
+      read: ({ params }) => params.get('favorites') === 'true',
+      write: (value) => ({ favorites: value ? 'true' : null }),
+      toQuery: (value) => (value ? { favorites: true } : {}),
+      control: { kind: 'toggle', on: '★ Favourites' },
+    },
+
+    on_plex: {
+      key: 'on_plex',
+      params: ['on_plex'],
+      label: 'Availability',
+      role: 'filter',
+      read: ({ params }) => {
+        const raw = params.get('on_plex')
+        return raw === 'true' || raw === 'false' ? raw : 'all'
+      },
+      write: (value) => ({ on_plex: value === 'all' ? null : value }),
+      toQuery: (value) => (value === 'all' ? {} : { on_plex: value === 'true' }),
+      control: { kind: 'segmented', caption: 'On Plex' },
+      choices: () => [
+        { value: 'all', label: 'Any' },
+        { value: 'true', label: 'Yes' },
+        { value: 'false', label: 'No' },
+      ],
+    },
+
+    personal: {
+      key: 'personal',
+      params: ['personal'],
+      label: 'Home videos',
+      role: 'filter',
+      read: ({ params }) => {
+        const raw = params.get('personal')
+        return raw === 'all' || raw === 'only' || raw === 'exclude'
+          ? raw
+          : personalDefault
+      },
+      write: (value) => ({ personal: value === personalDefault ? null : value }),
+      // Always sent, default included: the API's own default is `exclude`, and
+      // a page that shows everything has to say so rather than rely on it.
+      toQuery: (value) => ({ personal: value }),
+      control: { kind: 'segmented', caption: 'Home videos' },
+      choices: () => [
+        { value: 'exclude', label: 'Hidden' },
+        { value: 'all', label: 'Shown' },
+        { value: 'only', label: 'Only' },
+      ],
+    },
+
+    sort: {
+      key: 'sort',
+      params: ['sort'],
+      label: 'Sort by',
+      role: 'view',
+      read: ({ params }) => {
+        // `sort` is a Literal on the API, so a stale or mistyped value is a 422
+        // and an error card where the grid should be.
+        const raw = params.get('sort')
+        return page.sorts.some((option) => option.value === raw)
+          ? (raw as string)
+          : page.defaultSort
+      },
+      write: (value) => ({ sort: value === page.defaultSort ? null : value }),
+      toQuery: (value) => ({ sort: value }),
+      control: { kind: 'select' },
+      choices: () => page.sorts.map((option) => ({ ...option })),
+      describe: (value) => value,
+    },
+
+    order: {
+      key: 'order',
+      params: ['order'],
+      label: 'Direction',
+      role: 'view',
+      read: ({ params }) => {
+        const raw = params.get('order')
+        if (raw === 'asc' || raw === 'desc') return raw
+        return directionFor(readSort(params, page), page)
+      },
+      // The natural direction for the *current* sort is the default, so it is
+      // the one that never reaches the URL. Which is why this entry comes after
+      // `sort` — re-canonicalising reads the sort that was just written.
+      write: (value, { params }) => ({
+        order: value === directionFor(readSort(params, page), page) ? null : value,
+      }),
+      toQuery: (value) => ({ order: value }),
+      control: { kind: 'none' },
+    },
+  }
+}
+
+/** Writes one filter's value into a query string, removing what it defaults to. */
+function applyWrite(
+  next: URLSearchParams,
+  def: AnyFilterDef,
+  value: unknown,
+  ctx: FilterCtx,
+) {
+  for (const [param, written] of Object.entries(def.write(value, ctx))) {
+    if (written === null || written === '') next.delete(param)
+    else next.set(param, written)
+  }
+}
+
+/** Does this filter put anything in the URL — i.e. is it narrowing the grid? */
+const isSet = (def: AnyFilterDef, value: unknown, ctx: FilterCtx): boolean =>
+  Object.values(def.write(value, ctx)).some((written) => written !== null && written !== '')
+
+/** A stable identity for a value, so a select can match one without `===`. */
+const identity = (def: AnyFilterDef, value: unknown, ctx: FilterCtx): string =>
+  JSON.stringify(def.write(value, ctx))
+
+/**
+ * The choices a control offers, plus the active value when it is not one of
+ * them. See `FilterDef.describe` for why that matters.
+ */
+export function choicesFor(
+  def: AnyFilterDef,
+  value: unknown,
+  lists: FilterLists,
+  ctx: FilterCtx,
+): Array<FilterChoice<unknown>> {
+  const base = def.choices?.(lists) ?? []
+  if (!isSet(def, value, ctx)) return base
+  const here = identity(def, value, ctx)
+  if (base.some((choice) => identity(def, choice.value, ctx) === here)) return base
+  return [...base, { value, label: def.describe?.(value) ?? String(value) }]
 }
 
 /**
@@ -150,55 +612,19 @@ export function usePageParam(): PageState {
   }
 }
 
-/**
- * Facets a detail page links out on.
- *
- * Only `content_rating` gets a picker: a library holds a dozen certificates but
- * hundreds of studios and thousands of directors, and a select is not a way to
- * find one name in a thousand. The other two are arrived at by clicking one on
- * an item page, and appear here as a removable chip instead — so whatever is
- * narrowing the grid is still named in the bar, and can still be undone,
- * without a control nobody could use.
- */
-const FACETS = [
-  { key: 'content_rating', label: 'Rated', picker: true },
-  { key: 'studio', label: 'Studio', picker: false },
-  { key: 'director', label: 'Director', picker: false },
-] as const
-
-type FacetKey = (typeof FACETS)[number]['key']
-
-/** The subset of a media query these controls own. */
-export interface FilterQuery {
-  q?: string
-  genre?: string
-  content_rating?: string
-  studio?: string
-  director?: string
-  watch_status?: WatchStatus
-  unwatched?: true
-  min_rating?: number
-  max_rating?: number
-  sort: string
-  order: 'asc' | 'desc'
-}
-
 export interface BrowseFilterState extends PageState {
-  search: string
-  genre: string
-  /** The active facet values, keyed as they appear in the URL. */
-  facets: Record<FacetKey, string>
-  sort: string
-  order: 'asc' | 'desc'
+  /** Every filter's current value, keyed as the table defines it. */
+  values: FilterValues
+  /** The table this page is running. The controls render from it. */
+  table: FilterTable
   /** The sorts this page offers — the dropdown's options and the whitelist. */
   sorts: readonly SortOption[]
-  statusFilter: WatchStatus | 'all' | 'unwatched'
-  minRating?: number
-  maxRating?: number
   /** True when something is narrowing the results, so "Clear" is worth showing. */
   active: boolean
+  /** Sets one filter, by key. */
+  set: <K extends FilterKey>(key: K, value: FilterValues[K]) => void
+  /** Sets a parameter this table does not own — a page's own `kind`, say. */
   update: (key: string, value: string | null) => void
-  setRating: (min?: number, max?: number) => void
   clear: () => void
   /** The filter half of the request, ready to merge into a page's own query. */
   query: FilterQuery
@@ -206,134 +632,154 @@ export interface BrowseFilterState extends PageState {
 
 /**
  * Filter state, held in the URL so a filtered view can be linked and survives a
- * reload. The page passes the sorts it offers and which of them it opens on.
+ * reload. The page passes the sorts it offers, which of them it opens on, and
+ * any starting value of its own.
  *
  * Every value is checked against what the API will actually accept, because a
  * URL is not trustworthy input — it is typed, truncated, edited by hand and
- * kept in bookmarks long after the page that wrote it changed. `sort`,
- * `order` and `status` are all declared as literals on the backend, so one
- * stale or mistyped word is a 422, and a 422 is an error card where the grid
- * should be. Anything unrecognised falls back to this page's default.
- *
- * `defaultOrder` overrides the general direction rule below, and applies only
- * while the page is still on its own default sort — the watchlist opens oldest
- * first because it is a queue, but if you switch it to Year you want the same
- * newest-first that Year means everywhere else.
+ * kept in bookmarks long after the page that wrote it changed. `sort`, `order`,
+ * `status`, `personal` and the rating bounds are all constrained on the
+ * backend, so one stale or mistyped word is a 422, and a 422 is an error card
+ * where the grid should be. Anything unrecognised falls back to the page
+ * default — see each `read` in the table.
  */
-export function useBrowseFilters(
-  sorts: readonly SortOption[],
-  defaultSort: string,
-  defaultOrder?: 'asc' | 'desc',
-): BrowseFilterState {
+export function useBrowseFilters(page: FilterPage): BrowseFilterState {
   const [params, setParams] = useSearchParams()
-  const { page, setPage } = usePageParam()
+  const { page: pageNumber, setPage } = usePageParam()
 
-  const search = params.get('q') ?? ''
-  const genre = params.get('genre') ?? ''
-  const facets = Object.fromEntries(
-    FACETS.map((facet) => [facet.key, params.get(facet.key) ?? '']),
-  ) as Record<FacetKey, string>
-  // A URL is untrusted input and `sort` is a Literal on the API, so a stale or
-  // mistyped value is a 422 and an error card where the grid should be.
-  const requestedSort = params.get('sort')
-  const sort = sorts.some((option) => option.value === requestedSort)
-    ? (requestedSort as string)
-    : defaultSort
-  // Titles read A–Z; everything else is a recency or a score, where the
-  // interesting end is the top.
-  const orderFor = (forSort: string): 'asc' | 'desc' =>
-    forSort === defaultSort && defaultOrder
-      ? defaultOrder
-      : forSort === 'title'
-        ? 'asc'
-        : 'desc'
-  const requestedOrder = params.get('order')
-  const order =
-    requestedOrder === 'asc' || requestedOrder === 'desc'
-      ? requestedOrder
-      : orderFor(sort)
-  const requestedStatus = params.get('status')
-  const statusFilter = STATUS_FILTERS.some(
-    (filter) => filter.value === requestedStatus,
-  )
-    ? (requestedStatus as WatchStatus | 'all' | 'unwatched')
-    : 'all'
-  const minRating = numberParam(params.get('min_rating'))
-  const maxRating = numberParam(params.get('max_rating'))
+  const table = filterTable(page)
+  const defs = Object.values(table) as AnyFilterDef[]
+  const ctx: FilterCtx = { params }
+
+  const values = Object.fromEntries(
+    defs.map((def) => [def.key, def.read(ctx)]),
+  ) as FilterValues
 
   /**
-   * Writes one parameter and normalises the rest of the query around it.
+   * Writes a patch and normalises the whole query around it.
    *
    * A default never survives into the URL: picking the sort the page already
    * opens on says nothing, and a link that spells out every default reads as
-   * noise rather than as a view someone chose. The page number goes too —
-   * narrowing the results renumbers them, so "page 4" of the old filter is not
-   * a place that still exists.
+   * noise rather than as a view someone chose. Every filter is re-canonicalised
+   * on every write, so this holds for a parameter nobody touched as well as for
+   * the one that changed. The page number goes too — narrowing the results
+   * renumbers them, so "page 4" of the old filter is not a place that still
+   * exists.
    *
    * `replace`, so refining a view does not cost a back step each time.
    */
-  const update = (key: string, value: string | null) => {
+  const commit = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params)
-    if (value) next.set(key, value)
-    else next.delete(key)
-    if (next.get('sort') === defaultSort) next.delete('sort')
-    if (next.get('order') === orderFor(next.get('sort') ?? defaultSort)) {
-      next.delete('order')
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null || value === '') next.delete(key)
+      else next.set(key, value)
     }
+    const after: FilterCtx = { params: next }
+    for (const def of defs) applyWrite(next, def, def.read(after), after)
     next.delete('page')
     setParams(next, { replace: true })
-  }
-
-  const setRating = (min?: number, max?: number) => {
-    const next = new URLSearchParams(params)
-    if (min == null) next.delete('min_rating')
-    else next.set('min_rating', String(min))
-    if (max == null) next.delete('max_rating')
-    else next.set('max_rating', String(max))
-    next.delete('page')
-    setParams(next, { replace: true })
-  }
-
-  const query: FilterQuery = {
-    q: search || undefined,
-    genre: genre || undefined,
-    content_rating: facets.content_rating || undefined,
-    studio: facets.studio || undefined,
-    director: facets.director || undefined,
-    watch_status:
-      statusFilter !== 'all' && statusFilter !== 'unwatched' ? statusFilter : undefined,
-    unwatched: statusFilter === 'unwatched' || undefined,
-    min_rating: minRating,
-    max_rating: maxRating,
-    sort,
-    order,
   }
 
   return {
-    search,
-    genre,
-    facets,
-    sort,
-    order,
-    sorts,
-    statusFilter,
-    minRating,
-    maxRating,
-    page,
+    values,
+    table,
+    sorts: page.sorts,
+    page: pageNumber,
     setPage,
-    active:
-      Boolean(genre) ||
-      FACETS.some((facet) => facets[facet.key]) ||
-      statusFilter !== 'all' ||
-      minRating != null ||
-      maxRating != null,
-    update,
-    setRating,
-    // A search term is navigation, not a filter — clearing the filters should
-    // not also throw away what the user searched for.
-    clear: () => setParams(search ? { q: search } : {}, { replace: true }),
-    query,
+    active: defs.some((def) => def.role === 'filter' && isSet(def, values[def.key], ctx)),
+    set: (key, value) => commit(table[key].write(value, ctx)),
+    update: (key, value) => commit({ [key]: value }),
+    clear: () => {
+      const kept = new URLSearchParams()
+      for (const def of defs) {
+        if (def.role !== 'search') continue
+        applyWrite(kept, def, values[def.key], ctx)
+      }
+      setParams(kept, { replace: true })
+    },
+    query: Object.assign(
+      {},
+      ...defs.map((def) => def.toQuery(values[def.key])),
+    ) as FilterQuery,
   }
+}
+
+/**
+ * A text or number input that reaches the URL a beat after you stop typing.
+ *
+ * Filtering replaces rather than pushes, so keystrokes cost no history
+ * entries — but they would each cost a request, and a grid that reflows on
+ * every letter is hard to read. The local draft is what makes typing feel
+ * immediate; the URL is still the only place the value actually lives, so a
+ * change from anywhere else (Clear, a link, the back button) resets the draft.
+ */
+function DraftInput({
+  value,
+  onCommit,
+  className,
+  ...rest
+}: {
+  value: string
+  onCommit: (value: string) => void
+  className?: string
+} & Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'>) {
+  const [draft, setDraft] = useState(value)
+
+  useEffect(() => setDraft(value), [value])
+
+  useEffect(() => {
+    if (draft === value) return
+    const timer = setTimeout(() => onCommit(draft), 250)
+    return () => clearTimeout(timer)
+    // `onCommit` closes over the current query and is rebuilt every render, so
+    // it stays out of the dependency list — in it, the timer would restart on
+    // every render and never fire.
+  }, [draft, value])
+
+  return (
+    <input
+      {...rest}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      className={className}
+    />
+  )
+}
+
+/** A select over a filter's choices, rendered by index so any value type works. */
+function ChoiceSelect({
+  def,
+  value,
+  lists,
+  ctx,
+  onPick,
+  className,
+}: {
+  def: AnyFilterDef
+  value: unknown
+  lists: FilterLists
+  ctx: FilterCtx
+  onPick: (value: unknown) => void
+  className?: string
+}) {
+  const choices = choicesFor(def, value, lists, ctx)
+  const here = identity(def, value, ctx)
+  const selected = choices.findIndex((choice) => identity(def, choice.value, ctx) === here)
+
+  return (
+    <select
+      aria-label={def.label}
+      value={selected < 0 ? 0 : selected}
+      onChange={(event) => onPick(choices[Number(event.target.value)]?.value)}
+      className={className}
+    >
+      {choices.map((choice, index) => (
+        <option key={choice.label} value={index}>
+          {choice.label}
+        </option>
+      ))}
+    </select>
+  )
 }
 
 export function BrowseFilters({
@@ -349,31 +795,38 @@ export function BrowseFilters({
   /** Shows a quiet "Updating…" while a refetch is in flight. */
   busy?: boolean
 }) {
-  // The sort list comes through the state, not as a second prop: it is both
-  // this dropdown's options and the whitelist `useBrowseFilters` validates
-  // `?sort=` against, and two copies of it would be two chances to disagree.
-  const sorts = state.sorts
-  const ratingChoices = ratingOptions(state.minRating, state.maxRating)
-  // Chips only for the facets with no control of their own — a chip beside a
+  const [params] = useSearchParams()
+  const ctx: FilterCtx = { params }
+  const lists: FilterLists = { genres, contentRatings }
+  const defs = Object.values(state.table) as AnyFilterDef[]
+  const set = (def: AnyFilterDef, value: unknown) =>
+    state.set(def.key, value as never)
+
+  // Chips only for the filters with no control of their own — a chip beside a
   // select that already shows the same value is just saying it twice.
-  const activeFacets = FACETS.filter(
-    (facet) => !facet.picker && state.facets[facet.key],
+  const chips = defs.flatMap((def) => {
+    const text = def.chip?.(state.values[def.key])
+    return text ? [{ def, text }] : []
+  })
+  const statusDef = state.table.status
+  const inline = defs.filter(
+    (def) => def.control.kind !== 'none' && def.control.kind !== 'chips',
   )
 
   return (
     <div className="mb-6 space-y-3">
-      {activeFacets.length > 0 && (
+      {chips.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          {activeFacets.map((facet) => (
+          {chips.map(({ def, text }) => (
             <button
-              key={facet.key}
+              key={def.key}
               type="button"
-              onClick={() => state.update(facet.key, null)}
+              onClick={() => set(def, '')}
               className="chip chip-active"
-              aria-label={`Remove the ${facet.label.toLowerCase()} filter`}
+              aria-label={`Remove the ${def.label.toLowerCase()} filter`}
             >
-              <span className="font-normal opacity-70">{facet.label}</span>
-              {state.facets[facet.key]}
+              <span className="font-normal opacity-70">{def.label}</span>
+              {text}
               <span aria-hidden="true">×</span>
             </button>
           ))}
@@ -385,12 +838,10 @@ export function BrowseFilters({
           <button
             key={filter.value}
             type="button"
-            onClick={() =>
-              state.update('status', filter.value === 'all' ? null : filter.value)
-            }
+            onClick={() => set(statusDef, filter.value)}
             className={cn(
               'chip shrink-0',
-              state.statusFilter === filter.value && 'chip-active',
+              state.values.status === filter.value && 'chip-active',
             )}
           >
             {filter.label}
@@ -399,92 +850,129 @@ export function BrowseFilters({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <select
-          aria-label="Filter by genre"
-          value={state.genre}
-          onChange={(event) => state.update('genre', event.target.value || null)}
-          className="input h-9 w-auto min-w-[9rem] py-0 text-sm"
-        >
-          <option value="">All genres</option>
-          {/* The active genre, even before the list has loaded. Without it the
-              select renders with nothing selected while a genre filter is in
-              force — the control saying one thing and the grid another, which
-              is what the rating options below go out of their way to avoid. */}
-          {state.genre && !genres.includes(state.genre) && (
-            <option value={state.genre}>{state.genre}</option>
-          )}
-          {genres.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
+        {inline.map((def) => {
+          const value = state.values[def.key]
 
-        {/* Only rendered where a page has fetched the list — the same reason
-            the genre select above carries its active value: a control offering
-            one option and a grid filtered by another is a control that lies. */}
-        {(contentRatings.length > 0 || state.facets.content_rating) && (
-          <select
-            aria-label="Filter by content rating"
-            value={state.facets.content_rating}
-            onChange={(event) =>
-              state.update('content_rating', event.target.value || null)
-            }
-            className="input h-9 w-auto py-0 text-sm"
-          >
-            <option value="">Any certificate</option>
-            {state.facets.content_rating &&
-              !contentRatings.includes(state.facets.content_rating) && (
-                <option value={state.facets.content_rating}>
-                  {state.facets.content_rating}
-                </option>
-              )}
-            {contentRatings.map((rating) => (
-              <option key={rating} value={rating}>
-                {rating}
-              </option>
-            ))}
-          </select>
-        )}
+          switch (def.control.kind) {
+            case 'search':
+              return (
+                <div key={def.key} className="relative w-full sm:w-56">
+                  <SearchIcon
+                    className="pointer-events-none absolute left-3 top-1/2
+                               -translate-y-1/2 text-base text-muted"
+                  />
+                  <DraftInput
+                    type="search"
+                    value={value as string}
+                    onCommit={(next) => set(def, next)}
+                    placeholder={def.control.placeholder}
+                    aria-label={def.label}
+                    className="input h-9 py-0 pl-9 text-sm"
+                  />
+                </div>
+              )
 
-        <select
-          aria-label="Filter by your rating"
-          value={ratingChoices.findIndex(
-            (option) => option.min === state.minRating && option.max === state.maxRating,
-          )}
-          onChange={(event) => {
-            const choice = ratingChoices[Number(event.target.value)]
-            state.setRating(choice?.min, choice?.max)
-          }}
-          className="input h-9 w-auto py-0 text-sm"
-        >
-          {ratingChoices.map((option, index) => (
-            <option key={option.label} value={index}>
-              {option.label === 'Any' ? 'Any rating' : `Rated ${option.label}`}
-            </option>
-          ))}
-        </select>
+            case 'number':
+              return (
+                <DraftInput
+                  key={def.key}
+                  type="number"
+                  inputMode="numeric"
+                  min={def.control.min}
+                  max={def.control.max}
+                  value={value == null ? '' : String(value)}
+                  onCommit={(next) => {
+                    // Half a year is neither a filter nor a request to clear
+                    // one. Committing it would write nothing to the URL, the
+                    // draft would be reset from the URL, and "19…" would erase
+                    // itself under the user mid-number. Only an empty box
+                    // clears the filter.
+                    const parsed = Number(next)
+                    const control = def.control as Extract<
+                      FilterControl,
+                      { kind: 'number' }
+                    >
+                    if (next === '') set(def, null)
+                    else if (
+                      Number.isInteger(parsed) &&
+                      parsed >= (control.min ?? -Infinity) &&
+                      parsed <= (control.max ?? Infinity)
+                    ) {
+                      set(def, parsed)
+                    }
+                  }}
+                  placeholder={def.control.placeholder}
+                  aria-label={def.label}
+                  className="input h-9 w-24 py-0 text-sm"
+                />
+              )
 
-        <select
-          aria-label="Sort by"
-          value={state.sort}
-          onChange={(event) => state.update('sort', event.target.value)}
-          className="input h-9 w-auto py-0 text-sm"
-        >
-          {sorts.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+            case 'toggle':
+              return (
+                <button
+                  key={def.key}
+                  type="button"
+                  aria-pressed={Boolean(value)}
+                  onClick={() => set(def, !value)}
+                  className={cn('chip shrink-0', Boolean(value) && 'chip-active')}
+                >
+                  {def.control.on}
+                </button>
+              )
+
+            case 'segmented':
+              return (
+                <span key={def.key} className="inline-flex items-center gap-2">
+                  <span className="text-xs text-muted">{def.control.caption}</span>
+                  <Segmented
+                    label={def.label}
+                    value={String(value)}
+                    onChange={(next) => set(def, next)}
+                    options={(def.choices?.(lists) ?? []).map((choice) => ({
+                      value: String(choice.value),
+                      label: choice.label,
+                    }))}
+                  />
+                </span>
+              )
+
+            case 'select':
+              // A select whose choices come from the library is only worth
+              // showing once there are some — or when one is already in force,
+              // which is the case that must never render an empty control.
+              if (
+                def.control.lists &&
+                lists[def.control.lists].length === 0 &&
+                !isSet(def, value, ctx)
+              ) {
+                return null
+              }
+              return (
+                <ChoiceSelect
+                  key={def.key}
+                  def={def}
+                  value={value}
+                  lists={lists}
+                  ctx={ctx}
+                  onPick={(next) => set(def, next)}
+                  className="input h-9 w-auto min-w-[7rem] py-0 text-sm"
+                />
+              )
+
+            default:
+              return null
+          }
+        })}
 
         <button
           type="button"
-          onClick={() => state.update('order', state.order === 'asc' ? 'desc' : 'asc')}
+          onClick={() =>
+            state.set('order', state.values.order === 'asc' ? 'desc' : 'asc')
+          }
           className="btn-outline h-9 px-3 text-sm"
-          title={state.order === 'asc' ? 'Ascending' : 'Descending'}
+          title={state.values.order === 'asc' ? 'Ascending' : 'Descending'}
         >
-          {state.order === 'asc' ? '↑' : '↓'}
+          {state.values.order === 'asc' ? '↑' : '↓'}
         </button>
 
         {state.active && (
