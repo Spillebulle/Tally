@@ -541,9 +541,16 @@ export function Layout() {
           <UserMenu />
         </header>
 
-        <main className="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 sm:py-8">
-          <Outlet />
-        </main>
+        {/* A size query container, so a page can measure the region the
+            centred column sits in and break out of it — see `.full-bleed`,
+            which the item hero uses to reach the sidebar and the window edge.
+            Nothing else can supply that width: a percentage inside <main>
+            only ever knows the column. */}
+        <div className="[container-type:inline-size]">
+          <main className="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 sm:py-8">
+            <Outlet />
+          </main>
+        </div>
       </div>
 
       <Toasts />

@@ -155,7 +155,9 @@ export function ItemDetail() {
   if (isLoading) {
     return (
       <div className="space-y-6">
-        <div className="skeleton h-[280px] rounded-2xl" />
+        {/* Same geometry as the hero it stands in for, so the page does not
+            jump sideways or shorten when the item arrives. */}
+        <div className="skeleton full-bleed -mt-6 h-[260px] sm:-mt-8 sm:h-[400px] lg:h-[460px]" />
         <div className="skeleton h-6 w-1/3 rounded" />
         <div className="skeleton h-24 rounded-xl" />
       </div>
@@ -205,10 +207,12 @@ export function ItemDetail() {
         title={item.title}
         showTitle={false}
         imgClassName="object-top"
-        className="-mx-4 h-[220px] sm:-mx-6 sm:h-[320px]"
+        className="full-bleed h-[260px] sm:h-[400px] lg:h-[460px]"
       >
-        {/* Scrim so the title below stays readable over any artwork. */}
-        <div className="absolute inset-0 bg-gradient-to-t from-canvas via-canvas/70 to-canvas/20" />
+        {/* Scrim so the title below stays readable over any artwork, eased out
+            over the banner's whole height so the artwork does not stop at a
+            line. See `.hero-scrim`. */}
+        <div className="hero-scrim absolute inset-0" />
 
         <button
           type="button"
