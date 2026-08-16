@@ -18,6 +18,8 @@ from .routers import (
     history,
     images,
     library,
+    metrics,
+    series,
     stats,
     sync,
     users,
@@ -85,6 +87,12 @@ for router in (
     history.router,
     watchlist.router,
     stats.router,
+    # Declared after `stats.router` only for readability — `/api/stats/series`
+    # collides with nothing there, every path on that router being a literal.
+    series.router,
+    # `/metrics` sits at the root, where Prometheus expects it, and so must be
+    # registered before the SPA catch-all below claims every remaining path.
+    metrics.router,
     sync.router,
     webhooks.router,
     images.router,
