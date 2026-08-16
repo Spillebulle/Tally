@@ -1,11 +1,16 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { AnimeFilter, MediaCard, PersonalFilter } from '@/lib/types'
 import { compactNumber } from '@/lib/utils'
-import { BrowseFilters, useBrowseFilters } from '@/components/BrowseFilters'
+import {
+  BrowseFilters,
+  Pagination,
+  SORTS,
+  useBrowseFilters,
+} from '@/components/BrowseFilters'
 import { PosterGrid } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { FilmIcon, SearchIcon } from '@/components/Icons'
@@ -30,23 +35,19 @@ export function Browse({ mode }: BrowseProps) {
   const { notify } = useToast()
 
   const filters = useBrowseFilters(
+    SORTS,
     mode === 'search' || mode === 'browse' ? 'title' : 'added',
   )
-  const animeKind = (params.get('kind') ?? 'all') as 'all' | 'movie' | 'show'
+  // Checked, not cast: `?kind=` reaches the API as `media_type`, which is a
+  // literal there, so a mistyped one would answer 422 rather than "all".
+  const requestedKind = params.get('kind')
+  const animeKind =
+    requestedKind === 'movie' || requestedKind === 'show' ? requestedKind : 'all'
 
-  const [page, setPage] = useState(0)
-
-  // Any filter change invalidates the current offset. Done during render
-  // rather than in an effect: an effect runs *after* the render that already
-  // fired a query at the stale offset, so changing a filter while on page 3
-  // cost one wasted request every time. React re-renders immediately on a
-  // set-state during render, before anything is committed.
-  const filterKey = `${JSON.stringify(filters.query)}|${animeKind}|${mode}`
-  const [lastFilterKey, setLastFilterKey] = useState(filterKey)
-  if (lastFilterKey !== filterKey) {
-    setLastFilterKey(filterKey)
-    setPage(0)
-  }
+  // The offset lives in the URL with the filters, so a filter change and the
+  // reset to page one are one navigation rather than a render that fires a
+  // query at the stale offset first. `update()` drops `page` for us.
+  const page = filters.page
 
   const animeFilter: AnimeFilter = useMemo(() => {
     if (mode === 'anime') return 'only'
@@ -193,32 +194,12 @@ export function Browse({ mode }: BrowseProps) {
         />
       )}
 
-      {pageCount > 1 && (
-        <nav
-          className="mt-10 flex items-center justify-center gap-2"
-          aria-label="Pagination"
-        >
-          <button
-            type="button"
-            onClick={() => setPage((value) => Math.max(0, value - 1))}
-            disabled={page === 0}
-            className="btn-outline h-9 px-3 text-sm"
-          >
-            Previous
-          </button>
-          <span className="px-3 text-sm tabular-nums text-muted">
-            Page {page + 1} of {pageCount}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
-            disabled={page >= pageCount - 1}
-            className="btn-outline h-9 px-3 text-sm"
-          >
-            Next
-          </button>
-        </nav>
-      )}
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        onPage={filters.setPage}
+        ready={!isLoading}
+      />
     </div>
   )
 }

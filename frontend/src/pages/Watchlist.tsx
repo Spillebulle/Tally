@@ -6,6 +6,7 @@ import { useToast } from '@/lib/app-context'
 import type { MediaCard, PaginatedWatchlist } from '@/lib/types'
 import {
   BrowseFilters,
+  Pagination,
   useBrowseFilters,
   WATCHLIST_SORTS,
 } from '@/components/BrowseFilters'
@@ -34,18 +35,16 @@ export function Watchlist() {
   // "Recently watchlisted" is the one people mean on this page, so it leads.
   // Oldest first: a watchlist is a queue, and the thing you added first is the
   // one you have been meaning to watch longest.
-  const filters = useBrowseFilters('watchlist_added', 'asc')
-  const kind = (params.get('kind') ?? 'all') as Kind
-  const [page, setPage] = useState(0)
-
-  // Reset during render, not in an effect — see the note in Browse: an effect
-  // lets one request go out at the previous page's offset first.
-  const filterKey = `${JSON.stringify(filters.query)}|${kind}`
-  const [lastFilterKey, setLastFilterKey] = useState(filterKey)
-  if (lastFilterKey !== filterKey) {
-    setLastFilterKey(filterKey)
-    setPage(0)
-  }
+  const filters = useBrowseFilters(WATCHLIST_SORTS, 'watchlist_added', 'asc')
+  // Checked, not cast — an unknown kind would reach the API as a `media_type`
+  // it does not accept, and answer 422 instead of showing the watchlist.
+  const requestedKind = params.get('kind')
+  const kind: Kind = KINDS.some((option) => option.value === requestedKind)
+    ? (requestedKind as Kind)
+    : 'all'
+  // In the URL beside the filters — see the note in BrowseFilters. Changing a
+  // filter drops it, so nothing has to reset the offset here.
+  const page = filters.page
 
   const query: MediaQuery = {
     ...filters.query,
@@ -139,7 +138,6 @@ export function Watchlist() {
       <BrowseFilters
         state={filters}
         genres={genres.data ?? []}
-        sorts={WATCHLIST_SORTS}
         busy={isFetching && !isLoading}
       />
 
@@ -211,29 +209,12 @@ export function Watchlist() {
         </div>
       )}
 
-      {pageCount > 1 && (
-        <nav className="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">
-          <button
-            type="button"
-            onClick={() => setPage((value) => Math.max(0, value - 1))}
-            disabled={page === 0}
-            className="btn-outline h-9 px-3 text-sm"
-          >
-            Previous
-          </button>
-          <span className="px-3 text-sm tabular-nums text-muted">
-            Page {page + 1} of {pageCount}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
-            disabled={page >= pageCount - 1}
-            className="btn-outline h-9 px-3 text-sm"
-          >
-            Next
-          </button>
-        </nav>
-      )}
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        onPage={filters.setPage}
+        ready={!isLoading}
+      />
     </div>
   )
 }
