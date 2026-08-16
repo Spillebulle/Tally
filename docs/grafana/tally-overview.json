@@ -1,0 +1,391 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_TALLY",
+      "label": "Tally",
+      "description": "An Infinity datasource pointed at your Tally install, with a stats-scoped API key and an Allowed Hosts entry.",
+      "type": "datasource",
+      "pluginId": "yesoreyeram-infinity-datasource",
+      "pluginName": "Infinity"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "yesoreyeram-infinity-datasource",
+      "name": "Infinity",
+      "version": "2.0.0"
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "A starting point for graphing Tally through GET /api/stats/series. Take it apart. It is an example, not a supported artifact, and it is not kept in step with releases.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Plays per day, by media type",
+      "description": "group_by=media_type, so only the buckets that hold something are returned. Connect null values is on for exactly that reason.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "${DS_TALLY}"
+      },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "${DS_TALLY}"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/api/stats/series?metric=plays&interval=day&group_by=media_type&from=${__from:date:iso}&to=${__to:date:iso}&tz=${tz}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "ts", "text": "Time", "type": "timestamp" },
+            { "selector": "series", "text": "Series", "type": "string" },
+            { "selector": "value", "text": "Value", "type": "number" }
+          ],
+          "filters": []
+        }
+      ],
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": { "fields": ["Series"], "keepFields": false }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Plays in the window",
+      "description": "group_by=none, so every bucket is present including the empty ones — which is what makes a sum over the window honest.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "${DS_TALLY}"
+      },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "thresholds" } },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "/^Value$/", "values": false },
+        "graphMode": "area",
+        "textMode": "auto",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "${DS_TALLY}"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/api/stats/series?metric=plays&interval=day&from=${__from:date:iso}&to=${__to:date:iso}&tz=${tz}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "ts", "text": "Time", "type": "timestamp" },
+            { "selector": "series", "text": "Series", "type": "string" },
+            { "selector": "value", "text": "Value", "type": "number" }
+          ],
+          "filters": []
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "Hours watched per week",
+      "description": "metric=minutes at interval=week, divided into hours by a field override.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "${DS_TALLY}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 0, "fillOpacity": 80, "gradientMode": "none" },
+          "unit": "m",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "Time",
+        "legend": { "displayMode": "hidden", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "${DS_TALLY}"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/api/stats/series?metric=minutes&interval=week&from=${__from:date:iso}&to=${__to:date:iso}&tz=${tz}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "ts", "text": "Time", "type": "timestamp" },
+            { "selector": "series", "text": "Series", "type": "string" },
+            { "selector": "value", "text": "Value", "type": "number" }
+          ],
+          "filters": []
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Series": true } } }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Plays by genre",
+      "description": "A play is counted once per genre it carries, so these do not sum to the play total. An episode answers under its series' genres.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "${DS_TALLY}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 0, "fillOpacity": 80 },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "Series",
+        "orientation": "horizontal",
+        "legend": { "displayMode": "hidden", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "${DS_TALLY}"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/api/stats/series?metric=plays&interval=month&group_by=genre&from=${__from:date:iso}&to=${__to:date:iso}&tz=${tz}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "ts", "text": "Time", "type": "timestamp" },
+            { "selector": "series", "text": "Series", "type": "string" },
+            { "selector": "value", "text": "Value", "type": "number" }
+          ],
+          "filters": []
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "Series": { "aggregations": [], "operation": "groupby" },
+              "Value": { "aggregations": ["sum"], "operation": "aggregate" }
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": { "fields": {}, "sort": [{ "field": "Value (sum)", "desc": true }] }
+        },
+        { "id": "limit", "options": { "limitField": 12 } }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "piechart",
+      "title": "Minutes by device",
+      "description": "Plays with no device recorded answer as \"unknown\".",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "${DS_TALLY}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": { "unit": "m" },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "${DS_TALLY}"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/api/stats/series?metric=minutes&interval=month&group_by=device&from=${__from:date:iso}&to=${__to:date:iso}&tz=${tz}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "ts", "text": "Time", "type": "timestamp" },
+            { "selector": "series", "text": "Series", "type": "string" },
+            { "selector": "value", "text": "Value", "type": "number" }
+          ],
+          "filters": []
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "Series": { "aggregations": [], "operation": "groupby" },
+              "Value": { "aggregations": ["sum"], "operation": "aggregate" }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Average rating given, per month",
+      "description": "Timestamped by when the rating was recorded — for ratings pulled from Plex that is the day Tally first saw them, so the earliest month of a fresh install is a spike. Empty months are null, never 0.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "${DS_TALLY}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "always",
+            "spanNulls": false
+          },
+          "unit": "short",
+          "min": 0,
+          "max": 10
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "${DS_TALLY}"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/api/stats/series?metric=avg_rating&interval=month&from=${__from:date:iso}&to=${__to:date:iso}&tz=${tz}",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "ts", "text": "Time", "type": "timestamp" },
+            { "selector": "series", "text": "Series", "type": "string" },
+            { "selector": "value", "text": "Average rating", "type": "number" }
+          ],
+          "filters": []
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Series": true } } }
+      ]
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "tags": ["tally"],
+  "templating": {
+    "list": [
+      {
+        "name": "tz",
+        "label": "Timezone",
+        "description": "An IANA name. Tally buckets days in this zone; leave it empty to use the account's saved timezone.",
+        "type": "textbox",
+        "query": "",
+        "current": { "text": "", "value": "" },
+        "options": [],
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "time": { "from": "now-90d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Tally overview",
+  "uid": null,
+  "version": 1,
+  "weekStart": ""
+}

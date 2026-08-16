@@ -238,6 +238,8 @@ A few useful ones:
 | `GET /api/sync/status` | Progress of the running sync |
 | `GET /api/health` | Version and liveness — needs no credentials |
 
+For Grafana and Prometheus, see [Dashboards](#dashboards) below.
+
 Three endpoints take no credentials: `GET /api/health`, `GET /api/version`, and
 `POST /api/webhooks/plex`. The webhook has to be open because Plex cannot send
 credentials with it — it only ever matches events to accounts and servers that
@@ -247,6 +249,173 @@ are already linked, and never creates either.
 key to you again — losing it means issuing a new one. A key acts as the account
 that created it, with exactly that account's access, so treat it like a
 password. Revoking takes effect immediately.
+
+---
+
+## Dashboards
+
+Tally exposes two endpoints built for something other than its own UI:
+
+| | |
+|---|---|
+| `GET /api/stats/series` | One metric over time, as flat rows — for Grafana |
+| `GET /metrics` | Live gauges in the Prometheus text format |
+
+### Issue the key with the `stats` scope
+
+Under **Settings → API keys**, choose **Statistics** rather than Full access. A
+`stats` key is read-only *and* limited to `/api/stats*`, `/metrics`,
+`/api/health` and `/api/version` — it cannot list your library, your users or
+your other keys.
+
+That narrowing is the whole point: **anyone who can edit a Grafana panel can
+make any request the stored key can make.** A dashboard is not a viewer, it is a
+proxy. Give it the smallest scope that draws the graph.
+
+Send the key as a header — `X-API-Key` or `Authorization: Bearer` — and **never
+as a URL parameter**. Tally does not accept one there, deliberately: uvicorn's
+access log prints the query string at INFO, and `docker logs tally` is what
+people paste into bug reports.
+
+### `GET /api/stats/series`
+
+| Parameter | Values | |
+|---|---|---|
+| `metric` | `plays`, `minutes`, `distinct_titles`, `distinct_shows`, `ratings_given`, `avg_rating` | default `plays` |
+| `from`, `to` | ISO 8601 | Grafana writes these with `${__from:date:iso}` and `${__to:date:iso}` |
+| `preset` / `days` | `7d`, `30d`, `90d`, `ytd`, `12m`, `last_year`, `all` / a number | instead of `from`/`to` |
+| `interval` | `hour`, `day`, `week`, `month` | default `day` |
+| `group_by` | `none`, `media_type`, `genre`, `anime`, `source`, `device`, `user` | default `none` |
+| `tz` | an IANA name, e.g. `Europe/Oslo` | falls back to your saved timezone, then UTC |
+| `format` | `json`, `csv` | default `json` |
+| `user_id` | an account id | administrators only |
+
+Every filter the browse pages take also narrows a series — `?genre=Horror`,
+`?min_rating=8`, `?library_id=3`, `?anime=only`. See `/api/docs` for the set.
+
+The answer is a **bare JSON array** with three fixed columns, so one datasource
+query works for every metric:
+
+```json
+[
+  {"ts": "2026-08-14T00:00:00+02:00", "series": "movie", "value": 2},
+  {"ts": "2026-08-15T00:00:00+02:00", "series": "episode", "value": 6}
+]
+```
+
+* `ts` always carries its UTC offset. Buckets are local days, so a film started
+  at 23:30 belongs to that evening.
+* With `group_by=none`, `series` is the metric's own name — the shape never
+  varies.
+* **Empty buckets are filled only when `group_by=none`.** With a group-by, only
+  the buckets that hold something are emitted, because filling every series ×
+  bucket is a cross-product. In the panel, turn on **Connect null values**, or
+  use a bar chart.
+* `avg_rating` fills empty buckets with `null`, not `0` — nobody rated is not a
+  rating of zero.
+* The genre series count a play once per genre, so they do not sum to `plays`.
+* `distinct_*` counts are distinct *within a bucket*, so daily figures do not
+  sum to the monthly one.
+* `ratings_given` and `avg_rating` are timestamped by when the rating was
+  recorded, which for ratings pulled from Plex is the day Tally first saw them.
+  They cannot be grouped by `source` or `device` — those describe a play.
+* More than 5000 buckets is a `422`. Ask for a coarser `interval`.
+
+`format=csv` returns the same rows as RFC 4180 CSV with a header line.
+
+### Grafana, with the Infinity datasource
+
+Install **Infinity** (`yesoreyeram-infinity-datasource`), then provision it:
+
+```yaml
+# /etc/grafana/provisioning/datasources/tally.yaml
+apiVersion: 1
+datasources:
+  - name: Tally
+    type: yesoreyeram-infinity-datasource
+    uid: tally
+    jsonData:
+      auth_method: apiKey
+      apiKeyKey: X-API-Key
+      apiKeyType: header
+      # Infinity refuses any URL not listed here. See the warning below.
+      allowedHosts:
+        - https://tally.example.com
+    secureJsonData:
+      apiKeyValue: tally_your_key_here
+```
+
+> **If you configure authentication without an Allowed Hosts entry, Infinity
+> silently refuses to run the query.** No error, no data — just an empty panel.
+> This is the single most common reason a Tally dashboard looks broken.
+
+One worked panel query — plays per day, split by media type:
+
+* **Type** `JSON`, **Parser** `Backend`, **Source** `URL`, **Format** `Table`
+* **URL** `https://tally.example.com/api/stats/series?metric=plays&interval=day&group_by=media_type&from=${__from:date:iso}&to=${__to:date:iso}&tz=Europe/Oslo`
+* **Columns** — the three mappings, and they never change with the metric:
+
+  | Selector | Title | Format |
+  |---|---|---|
+  | `ts` | Time | Timestamp |
+  | `series` | Series | String |
+  | `value` | Value | Number |
+
+Leave the root selector **empty** — the response is already an array at the
+root. In the panel's *Transform* tab, add **Partition by values** on `series`
+to get one line per media type.
+
+A starting dashboard lives at
+[`docs/grafana/tally-overview.json`](docs/grafana/tally-overview.json). Import
+it, pick your Tally datasource when prompted, and edit freely — it is an example
+to take apart, not a supported artifact, and it will not be kept in step with
+future releases.
+
+### Prometheus
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: tally
+    scrape_interval: 60s
+    metrics_path: /metrics
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: tally_your_key_here
+      # or, to keep the key out of this file:
+      # credentials_file: /etc/prometheus/tally.key
+    static_configs:
+      - targets: ["tally.example.com"]
+```
+
+What it exports: `tally_build_info`, `tally_library_items`,
+`tally_watch_events_total`, `tally_watch_events_by_type_total`,
+`tally_watch_minutes_total`, `tally_watchlist_items`,
+`tally_current_streak_days`, `tally_longest_streak_days`, `tally_sync_running`
+and `tally_last_sync_timestamp_seconds`.
+
+**Everything is a gauge, including the names ending in `_total`.** Deleting a
+history row lowers a total, and Prometheus reads any fall in a counter as a
+process restart — which makes `rate()` over-report rather than merely lag. Use
+`delta()` or `deriv()` if you want a rate.
+
+Per-account metrics carry a `user` label with the display name or username on
+it, never the email address. A `stats` key belonging to an ordinary account sees
+only that account's series; one belonging to an administrator sees the whole
+household. Nothing is labelled by title — that would be one time series per
+film, and it is what `/api/stats/series` is for.
+
+The response is cached for about ten seconds, so a fast scrape interval does not
+re-aggregate the history every time.
+
+### Not supported
+
+* **The SimpleJSON datasource** (`/search`, `/query`, `/annotations`). That
+  plugin reached end of life in June 2024 and Grafana points people at Infinity.
+* **Pointing a SQLite datasource straight at `/data/tally.db`.** It works, and
+  it bypasses authentication, scopes and the per-user boundary entirely — every
+  account's ratings, notes and history, to anyone who can edit a panel.
 
 ---
 
