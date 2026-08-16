@@ -72,9 +72,9 @@ entry, 447 duplicates on a real instance, and the phantom half had no
 tmdb id, which made it look like dedup had simply failed.
 
 So: **always request guids**, and when a payload still has none,
-`_existing_match_for_discover` looks for the row that already exists rather than
-minting a new identity. `merge_duplicates.py` cleans up what the old behaviour
-left behind.
+`_existing_match` looks for the row that already exists rather than minting a
+new identity. `merge_duplicates.py` cleans up what the old behaviour left
+behind.
 
 **It then happened a second time, in the history import.** `_ingest_history_entry`
 fetched full metadata only when the entry had no `guid` at all — but a modern
@@ -99,6 +99,38 @@ Two things follow, and both were missing:
   never looked at again by anything. `backfill_missing_metadata` is the only
   pass that goes back for them. It only ever adds; `merge_duplicates` stays the
   only pass allowed to delete.
+
+**And a third time, in the same import, for the payloads with no `ratingKey`.**
+Plex drops it from a history row whose metadata item it no longer holds — the
+file was deleted, or replaced and rescanned under a new key — and returns the
+stored snapshot of the play instead: a title, an air date, nothing else. With
+no key, `find_by_rating_key` has nothing to look up and the re-fetch above has
+nothing to ask for, so the `identifying` test never even ran. The snapshot went
+straight to `upsert_from_plex`.
+
+The test now gates the *mint*, not just the fetch: `existing_match_for_thin_payload`
+runs first, and only when it finds nothing is a row created. That "nothing" is
+the common answer and must stay allowed — a play of something since deleted
+from Plex is history that should outlive the file, and on a live instance ~75
+of the ~105 mapping-less rows are exactly that, correctly kept.
+
+**A snapshot title is whatever the item was called that day, which may be the
+filename.** A file still unmatched when it was played is snapshotted as
+`The.Jungle.Book.2.2003.1080p.BluRay.H264.AAC-RARBG`, and Plex keeps that
+string forever even after you fix the match. No provider matches it, so the row
+never gets an id — and `merge_duplicates` pairs on an id, so the ghost sits
+beside the real row permanently, blank tile and all. `services/release_names.py`
+recovers a title from it, in `upsert_from_plex` for new rows and in
+`enrich_existing` for the ones already stored.
+
+That parser renames rows, so it is gated hard: a quality token (`1080p`,
+`XviD`, `AC3`) has to be present, or the string has to contain no spaces at
+all. `Blade Runner 2049`, `2001: A Space Odyssey`, `2 Fast 2 Furious` and
+`S.W.A.T.` must all come back untouched — see `tests/test_release_names.py`,
+where the refusals are the more important half. And like the recovered year, the
+cleaned title goes **onto `item.title` only, never into `build_guid_key`**: the
+history import re-upserts the same entry on every overlapping sync, so a cleaned
+title in the key would mint a fresh duplicate on each one.
 
 ### Every timestamp column must be `UtcDateTime`
 
@@ -461,7 +493,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 112 tests
+cd backend && .venv/bin/python -m pytest -q     # 142 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
@@ -535,12 +567,18 @@ the built-in `GITHUB_TOKEN`.
   for additive columns. A single-file SQLite database the user owns does not
   justify the dependency. If a destructive migration ever becomes necessary,
   revisit — but additive columns go in that list.
-  Two steps are not additive: `_scrub_token_bearing_artwork()`, which clears the
-  old token-carrying `poster_url` values so the proxy can take over, and
-  `merge_duplicates.py`, which collapses items the old watchlist import recorded
-  twice. Both are idempotent, both log what they did, and neither may assume it
-  runs exactly once. Anything else that has to *change* data needs the same
-  treatment — a named function and a reason.
+  Three steps are not additive: `_scrub_token_bearing_artwork()`, which clears
+  the old token-carrying `poster_url` values so the proxy can take over;
+  `_recover_release_name_titles()`, which replaces a filename Plex stored as a
+  title and clears `metadata_updated_at` so the backfill re-asks under the real
+  name instead of waiting out its weekly window; and `merge_duplicates.py`,
+  which collapses items recorded twice. All three are idempotent, all three log
+  what they did, and none may assume it runs exactly once. Anything else that
+  has to *change* data needs the same treatment — a named function and a reason.
+
+  Each exists because the import-path fix cannot reach what the import already
+  produced: the history sync reads incrementally and never revisits a 2019 play,
+  so nothing would run `upsert_from_plex` over those rows again.
 
   The merge deletes rows unattended, so it is deliberately timid: it needs a
   **matching external id and a matching normalised title**. The id alone is not
@@ -548,6 +586,15 @@ the built-in `GITHUB_TOKEN`.
   wrong id can be attached, and fusing two unrelated films would take one's
   history with it. A missed merge leaves a visible duplicate; a wrong merge
   loses data silently. Prefer the visible mistake.
+
+  The title check **partitions** the group, it does not veto it. A wrong id does
+  not only invent a pair — it joins one, and vetoing then held the sound pair
+  open too: two "Thelma & Louise" rows could not merge because a row titled
+  "Thelma" had been enriched onto the same tmdb id, and two "Pokémon" rows
+  because *Plex's own agent* gave a spin-off the parent series' id. Five live
+  duplicates were stuck that way. Partitioning is no less careful — two rows
+  still merge only on an exact normalised-title match — it just leaves the odd
+  one out instead of letting it block the others.
 * **`create_all()` at startup**, not a migration step.
 * **bcrypt pinned to 4.0.1** — passlib 1.7.4 reads `bcrypt.__about__`, which
   bcrypt ≥ 4.1 removed. Unpinning brings back a traceback on every hash.

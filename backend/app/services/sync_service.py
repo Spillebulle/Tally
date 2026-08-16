@@ -628,7 +628,25 @@ class SyncService:
                 except PlexServerError:
                     fetched = None
                 meta = fetched or entry
-            item = await repo.upsert_from_plex(meta, server=server, client=client)
+
+            # The `identifying` test decided whether to ask Plex for more. It
+            # has to decide whether we may *create* something too, because the
+            # answer can still be no afterwards — and for the rows that started
+            # this, it never even ran. Plex drops `ratingKey` from a history row
+            # whose metadata item it no longer holds, leaving a snapshot of the
+            # play: a title, an air date, nothing else. With no key there is
+            # nothing to re-fetch and nothing to look up a mapping by, so the
+            # snapshot went straight to `upsert_from_plex` and became a second
+            # row for a film still sitting in the library.
+            #
+            # Look for that row first. When there is none the mint is correct
+            # and goes ahead: a play of something since deleted from Plex is
+            # history that should outlive the file, and those rows are the
+            # majority here.
+            if not extract_ids(meta).identifying:
+                item = await repo.existing_match_for_thin_payload(meta)
+            if item is None:
+                item = await repo.upsert_from_plex(meta, server=server, client=client)
         if item is None:
             return False
 

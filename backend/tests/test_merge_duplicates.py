@@ -210,6 +210,51 @@ async def test_a_shared_id_with_different_titles_is_not_merged(db):
     assert await db.scalar(select(func.count(MediaItem.id))) == 2
 
 
+async def test_a_third_row_with_a_wrong_id_does_not_block_the_pair(db):
+    """Regression: five live duplicates held open by a row that did not belong.
+
+    A wrong external id does not only invent a pair — it *joins* one. Two
+    "Thelma & Louise" rows carrying tmdb 1541 could not merge because a ghost
+    titled "Thelma" had been enriched onto 1541 as well, and the title check
+    vetoed the whole group rather than the row that disagreed.
+
+    Partitioning is no less careful: "Thelma" still merges with nothing.
+    """
+    db.add_all(
+        [
+            MediaItem(
+                guid_key="tmdb:movie:1541",
+                media_type=MediaType.MOVIE,
+                title="Thelma & Louise",
+                year=1991,
+                tmdb_id=1541,
+            ),
+            MediaItem(
+                guid_key="title:movie:thelma-louise",
+                media_type=MediaType.MOVIE,
+                title="Thelma & Louise",
+                year=1991,
+                tmdb_id=1541,
+            ),
+            MediaItem(
+                guid_key="title:movie:thelma",
+                media_type=MediaType.MOVIE,
+                title="Thelma",
+                year=2017,
+                tmdb_id=1541,  # wrong: enrichment matched the wrong film
+            ),
+        ]
+    )
+    await db.commit()
+
+    assert await merge_duplicate_media_items(db) == 1
+
+    remaining = list(
+        (await db.execute(select(MediaItem).order_by(MediaItem.title))).scalars()
+    )
+    assert [item.title for item in remaining] == ["Thelma", "Thelma & Louise"]
+
+
 async def test_punctuation_and_case_do_not_block_a_merge(db):
     """The title check normalises, so it does not fail on cosmetics."""
     db.add_all(

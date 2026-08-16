@@ -16,6 +16,10 @@ It runs unattended on startup, so it is deliberately timid:
 * **Only an external id merges two rows.** Same tmdb id, or same imdb id, and
   the same media type. Never a title, never a year — "101 Dalmatians" is two
   different films and no automatic pass should have to guess which.
+* **A matching title is required on top of it**, because a wrong id does get
+  attached. Rows sharing an id are partitioned by title and each partition is
+  merged on its own, so one row carrying somebody else's id is left behind
+  rather than blocking the pair it landed among.
 * **The row Plex knows about wins**, because it is the one with mappings and
   artwork. Failing that, the older row wins.
 * **Nothing is discarded.** History, ratings, watchlist entries and mappings are
@@ -116,20 +120,35 @@ def _normalised_title(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", ascii_only.lower())
 
 
-def _titles_agree(items: list[MediaItem]) -> bool:
-    """Whether every row in a group is plausibly the same title.
+def _title_partitions(items: list[MediaItem]) -> list[list[MediaItem]]:
+    """Split rows sharing an external id into runs that agree on the title.
 
     A shared external id is *nearly* proof, but not quite: enrichment can attach
     the wrong tmdb id, and real data shows it happening — one instance had two
     rows for "Seven" (1995) carrying tmdb 807 and 966. If a wrong id can be
     assigned once it can be assigned twice, and two unrelated films fused
-    together would silently take one's history with it.
+    together would silently take one's history with it. So the title has to
+    agree as well.
 
-    So the title has to agree as well. The cost is a missed merge when the two
-    sides spell it differently ("Se7en" and "Seven"), which leaves a visible
-    duplicate — much the cheaper mistake of the two.
+    This used to veto the whole group when any member disagreed, and that was
+    too blunt. A wrong id does not only create a pair — it *joins* a pair that
+    was otherwise sound, and then blocked it. Five duplicates on a live instance
+    were held open by a third row that had no business in the group at all: the
+    two "Thelma & Louise" rows could not merge because a ghost titled "Thelma"
+    had been enriched onto tmdb 1541; the two "Pokémon" rows could not merge
+    because Plex's own agent had given "Pokémon: To Be a Pokémon Master" the
+    parent series' tmdb id.
+
+    Partitioning is no less careful than vetoing: two rows still only merge when
+    their titles match exactly once normalised, and the odd one out is simply
+    left alone instead of taking the others down with it. The remaining cost is
+    a missed merge when the two sides spell it differently ("Se7en" and
+    "Seven"), which leaves a visible duplicate — much the cheaper mistake.
     """
-    return len({_normalised_title(item.title or "") for item in items}) == 1
+    buckets: dict[str, list[MediaItem]] = defaultdict(list)
+    for item in sorted(items, key=lambda item: item.id):
+        buckets[_normalised_title(item.title or "")].append(item)
+    return list(buckets.values())
 
 
 async def _pick_survivor(db: AsyncSession, items: list[MediaItem]) -> MediaItem:
@@ -233,53 +252,64 @@ async def merge_duplicate_media_items(db: AsyncSession) -> int:
         )
         if len(items) < 2:
             continue
-        if not _titles_agree(items):
-            log.info(
-                "Not merging %s: same external id but different titles (%s)",
-                member_ids,
-                ", ".join(sorted({item.title for item in items})),
-            )
-            continue
 
-        survivor = await _pick_survivor(db, items)
-        for loser in items:
-            if loser.id == survivor.id:
-                continue
-
-            for field in _FILLABLE:
-                if getattr(survivor, field, None) in (None, "") and (
-                    value := getattr(loser, field, None)
-                ) not in (None, ""):
-                    setattr(survivor, field, value)
-            if loser.genres and not survivor.genres:
-                survivor.genres = loser.genres
-
-            await _absorb_state(db, survivor.id, loser.id)
-            await _absorb_watchlist(db, survivor.id, loser.id)
-
-            # These have no per-user uniqueness against the item, so a bulk
-            # repoint is safe. Children first: an episode whose show is about to
-            # disappear would be cascaded away with it.
-            for table, column in (
-                (WatchEvent, WatchEvent.media_item_id),
-                (PlexMapping, PlexMapping.media_item_id),
-                (MediaItem, MediaItem.show_id),
-                (MediaItem, MediaItem.parent_id),
-            ):
-                await db.execute(
-                    update(table).where(column == loser.id).values(
-                        {column.key: survivor.id}
-                    )
+        for partition in _title_partitions(items):
+            if len(partition) < 2:
+                log.info(
+                    "Not merging item %s (%r): shares an external id with %s but "
+                    "not a title",
+                    partition[0].id,
+                    partition[0].title,
+                    sorted(item.id for item in items if item.id != partition[0].id),
                 )
-
-            log.info(
-                "Merging duplicate %r: item %s absorbed into %s",
-                survivor.title,
-                loser.id,
-                survivor.id,
-            )
-            await db.delete(loser)
-            removed += 1
+                continue
+            removed += await _merge_partition(db, partition)
 
     await db.commit()
+    return removed
+
+
+async def _merge_partition(db: AsyncSession, items: list[MediaItem]) -> int:
+    """Fold every row in one agreed-title group into the best of them."""
+    removed = 0
+    survivor = await _pick_survivor(db, items)
+    for loser in items:
+        if loser.id == survivor.id:
+            continue
+
+        for field in _FILLABLE:
+            if getattr(survivor, field, None) in (None, "") and (
+                value := getattr(loser, field, None)
+            ) not in (None, ""):
+                setattr(survivor, field, value)
+        if loser.genres and not survivor.genres:
+            survivor.genres = loser.genres
+
+        await _absorb_state(db, survivor.id, loser.id)
+        await _absorb_watchlist(db, survivor.id, loser.id)
+
+        # These have no per-user uniqueness against the item, so a bulk
+        # repoint is safe. Children first: an episode whose show is about to
+        # disappear would be cascaded away with it.
+        for table, column in (
+            (WatchEvent, WatchEvent.media_item_id),
+            (PlexMapping, PlexMapping.media_item_id),
+            (MediaItem, MediaItem.show_id),
+            (MediaItem, MediaItem.parent_id),
+        ):
+            await db.execute(
+                update(table).where(column == loser.id).values(
+                    {column.key: survivor.id}
+                )
+            )
+
+        log.info(
+            "Merging duplicate %r: item %s absorbed into %s",
+            survivor.title,
+            loser.id,
+            survivor.id,
+        )
+        await db.delete(loser)
+        removed += 1
+
     return removed

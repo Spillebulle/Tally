@@ -19,6 +19,7 @@ from .guids import ExternalIds, build_guid_key, extract_ids
 from .metadata import MetadataService, get_metadata_service
 from .metadata.anime import library_looks_like_anime
 from .plex_server import PlexServerClient
+from .release_names import parse_release_name
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +162,24 @@ class MediaRepository:
             episode_number=episode_number,
         )
 
+        # Plex sometimes hands us a filename where a title belongs. A watch
+        # history row snapshots whatever the item was called on the day it
+        # played, so a file that was unmatched then comes back forever as
+        # `The.Jungle.Book.2.2003.1080p.BluRay.H264.AAC-RARBG` — a string no
+        # provider can match, which is why those rows never got an id, never
+        # got artwork, and could never be paired with the properly matched row
+        # sitting beside them.
+        #
+        # Deliberately *after* `build_guid_key` and never fed into it, for the
+        # same reason as the recovered year below and with worse consequences:
+        # the key's last-resort branch is title+year, so keying on a cleaned
+        # title would orphan every id-less row already stored — and the history
+        # import re-upserts the same entry on every overlapping sync, so it
+        # would mint a fresh duplicate on each one.
+        if (release := parse_release_name(title)) is not None:
+            title = release.title
+            year = year or release.year
+
         item = await self.find_by_guid_key(guid_key)
         created = item is None
         if item is None:
@@ -281,7 +300,16 @@ class MediaRepository:
         for, and nothing will ever run `upsert_from_plex` over them again. A
         bare title is not enough for a provider to match on — recovering the
         year is most of what makes this pass work at all.
+
+        The same goes for a title that is really a filename. Recovering it here
+        renames the row, which no other enrichment is allowed to do — but the
+        string being replaced is not a title, it is the thing standing between
+        this row and ever having one. `guid_key` is untouched, so identity does
+        not move; only what the user reads, and what the providers are asked.
         """
+        if (release := parse_release_name(item.title or "")) is not None:
+            item.title = release.title
+            item.year = item.year or release.year
         if not item.year and item.first_aired:
             item.year = item.first_aired.year
 
@@ -485,22 +513,56 @@ class MediaRepository:
         self._by_rating_key[(server.id, rating_key)] = item
         return mapping
 
-    # -- watchlist / discover ---------------------------------------------
+    # -- matching a payload that cannot name itself ------------------------
 
-    async def _existing_match_for_discover(
+    async def existing_match_for_thin_payload(
+        self, meta: dict[str, Any]
+    ) -> MediaItem | None:
+        """The row a payload with no usable ids is probably already talking about.
+
+        `ExternalIds.identifying` is the test for whether a payload may mint an
+        identity, and until now it only decided whether the history import went
+        back to Plex for more — never whether it was allowed to *create* a row
+        when it came back with nothing. So a watch-history snapshot for an item
+        Plex no longer holds (no ratingKey, no guids, just a title and an air
+        date) became a second row for a film the library already had.
+
+        Returning ``None`` is the safe answer and the common one: a play of
+        something genuinely gone from the library has no row to land on, and
+        minting one is exactly right — that history should outlive the file.
+        """
+        media_type = _PLEX_TYPE_TO_MEDIA.get((meta.get("type") or "").lower())
+        if media_type not in (MediaType.MOVIE, MediaType.SHOW):
+            return None
+
+        ids = extract_ids(meta)
+        if ids.identifying:
+            return None
+
+        title = str(meta.get("title") or "")
+        year = _int_or_none(meta.get("year"))
+        if not year and (aired := _parse_date(meta.get("originallyAvailableAt"))):
+            year = aired.year
+        if (release := parse_release_name(title)) is not None:
+            title = release.title
+            year = year or release.year
+        return await self._existing_match(media_type, ids, title, year)
+
+    async def _existing_match(
         self, media_type: MediaType, ids: ExternalIds, title: str, year: int | None
     ) -> MediaItem | None:
-        """Find the library row a Discover payload is really talking about.
+        """Find the row a thin payload is really talking about.
 
         Discover identifies things by a `plex://` ratingKey, while a library scan
         identifies the same film by its tmdb id — so `build_guid_key` gives the
         two a different answer and the watchlist ends up as a parallel copy of
-        the library. That is where 400-odd duplicate rows came from.
+        the library. That is where 400-odd duplicate rows came from. A watch
+        history snapshot arrives with even less and lands the same way.
 
         Matching on an external id is exact. Matching on title *and* year is a
-        judgement call, and only made when Discover gave no id at all: without a
-        year it is not made, because "101 Dalmatians" is two different films and
-        guessing between them is worse than a duplicate.
+        judgement call, and only made when the payload gave no id at all:
+        without a year it is not made, because "101 Dalmatians" is two different
+        films and guessing between them is worse than a duplicate.
         """
         for column, value in (
             (MediaItem.tmdb_id, ids.tmdb_id),
@@ -551,7 +613,7 @@ class MediaRepository:
 
         item = await self.find_by_guid_key(guid_key)
         if item is None:
-            item = await self._existing_match_for_discover(media_type, ids, title, year)
+            item = await self._existing_match(media_type, ids, title, year)
         created = item is None
         if item is None:
             item = MediaItem(guid_key=guid_key, media_type=media_type, title=title)
