@@ -149,6 +149,9 @@ export const api = {
     detail: (id: number) => get<MediaDetail>(`/api/media/${id}`),
     children: (id: number, season?: number) =>
       get<MediaCard[]>(`/api/media/${id}/children`, { season }),
+    // Unwatched titles sharing the most genres, best-rated first within a tier.
+    recommendations: (id: number, limit = 12) =>
+      get<MediaCard[]>(`/api/media/${id}/recommendations`, { limit }),
     continueWatching: () =>
       get<ContinueWatchingItem[]>('/api/media/continue-watching'),
     recentlyWatched: (limit = 20) =>

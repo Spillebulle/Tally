@@ -5,7 +5,7 @@ import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
 import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/lib/utils'
-import { Artwork } from '@/components/Poster'
+import { Artwork, PosterRail } from '@/components/Poster'
 import {
   BookmarkIcon,
   CheckIcon,
@@ -14,7 +14,7 @@ import {
   SparkIcon,
   XIcon,
 } from '@/components/Icons'
-import { Spinner, StarRating, StatusBadge } from '@/components/ui'
+import { ErrorState, Spinner, StarRating, StatusBadge } from '@/components/ui'
 
 const STATUS_OPTIONS: WatchStatus[] = [
   'plan_to_watch',
@@ -66,6 +66,8 @@ export function ItemDetail() {
     queryClient.invalidateQueries({ queryKey: ['stats'] })
     queryClient.invalidateQueries({ queryKey: ['history'] })
     queryClient.invalidateQueries({ queryKey: ['continue-watching'] })
+    // Marking something watched takes it out of every recommendation shelf.
+    queryClient.invalidateQueries({ queryKey: ['recommendations'] })
   }
 
   const rate = useMutation({
@@ -544,7 +546,56 @@ export function ItemDetail() {
             />
           </aside>
         </div>
+
+        {(item.media_type === 'movie' || item.media_type === 'show') && (
+          <Recommendations itemId={item.id} />
+        )}
       </div>
+    </div>
+  )
+}
+
+/**
+ * Unwatched titles that share the most genres with this one.
+ *
+ * Its own component so the shelf owns its request, and so the three states a
+ * request has — loading, failed, genuinely nothing — stay visible next to each
+ * other. An empty strip under a heading reads as broken; a failed request that
+ * falls through to the empty branch reads as "you have watched everything".
+ */
+function Recommendations({ itemId }: { itemId: number }) {
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ['recommendations', itemId],
+    queryFn: () => api.media.recommendations(itemId),
+  })
+
+  if (isError) {
+    return (
+      <section className="mt-12">
+        <h2 className="mb-3 text-lg font-semibold tracking-tight text-ink">More like this</h2>
+        <ErrorState
+          error={error}
+          onRetry={() => refetch()}
+          title="Could not load recommendations"
+        />
+      </section>
+    )
+  }
+
+  if (!isLoading && (data?.length ?? 0) === 0) {
+    return (
+      <section className="mt-12">
+        <h2 className="text-lg font-semibold tracking-tight text-ink">More like this</h2>
+        <p className="mt-2 text-sm text-muted">
+          Nothing unwatched shares enough genres with this one yet.
+        </p>
+      </section>
+    )
+  }
+
+  return (
+    <div className="mt-12">
+      <PosterRail title="More like this" cards={data ?? []} loading={isLoading} />
     </div>
   )
 }
