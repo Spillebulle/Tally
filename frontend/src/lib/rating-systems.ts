@@ -1,120 +1,101 @@
 /**
- * Content ratings drawn the way the boards themselves draw them.
+ * Content ratings, shown as the marks the boards actually publish.
  *
  * `certificates.ts` answers "how is this certificate *written*". This answers
- * "what does it *look* like" — a BBFC 15 is a pink circle, an FSK 16 a blue
- * square, a TV-MA a black box. Boards publish a mark rather than a word for a
+ * "which mark stands for it". Boards publish a symbol rather than a word for a
  * reason: `12`, `15` and `18` are indistinguishable from years and runtimes as
- * plain text, and the mark is what a viewer already recognises at a glance.
+ * plain text, and the mark is what a viewer already recognises.
  *
  * ## This never touches a query
  *
- * Same rule as `certificates.ts`, and for the same reason: the raw string is
- * the identity of the facet. Everything here is display, keyed off the raw
- * value but never replacing it.
+ * Same rule as `certificates.ts`: the raw string is the identity of the facet.
+ * Everything here is display, keyed off the raw value but never replacing it.
  *
- * ## Why the colours are literal hex
+ * ## Where the marks come from
  *
- * The house rule is that a colour is a semantic token that shifts with the
- * theme. These are the opposite: they are other organisations' marks, and a
- * BBFC 15 that turned a different pink in dark mode would no longer be the
- * thing it is quoting. They are fixed on purpose, they carry their own ink
- * colour so contrast holds on any surface, and they live in this table rather
- * than in a component so no component holds a hex.
+ * `assets/ratings/*.svg`, vendored from Wikimedia Commons. Every file is in the
+ * **public domain** — the symbols are simple geometry and text, which is not
+ * copyrightable — and `assets/ratings/PROVENANCE.md` records the source file,
+ * licence and any edit for each one. The symbols are nonetheless **trademarks**
+ * of their boards; they are used here to state the certificate a title actually
+ * carries, which is what they exist to do.
  *
- * ## Two tiers, and the difference is deliberate
+ * Five boards have their real marks: BBFC (UK), MPA (US film), US TV Parental
+ * Guidelines, FSK (Germany) and Kijkwijzer (Netherlands). Between them they
+ * cover the overwhelming majority of what Plex agents attach.
  *
- * **Tier one** — BBFC, MPA, US TV, FSK — is drawn to the board's published
- * shape and colour, because those four cover the overwhelming majority of what
- * Plex agents actually attach and their marks are well enough documented to
- * quote. Colours are matched to the published marks by eye, not sampled from
- * official artwork; they read correctly but are not colour-exact.
+ * ## Everything else gets a plain age disc
  *
- * **Tier two** is any other `<country>/<age>` certificate — Norway, the
- * Netherlands, France, Australia and the rest. Those get a plain age disc on
- * one consistent ramp, with the country kept beside it. That is Tally showing
- * an age rating, *not* a claim to reproduce that board's mark, which is the
- * honest option: inventing a brand colour per board would produce a dozen
- * confident, wrong logos. Adding a board to tier one is one table entry.
+ * Norway, France, Australia and the rest have no free asset, so they get a
+ * neutral disc on one shared ramp with the country kept beside it. That is
+ * Tally showing an age rating, *not* a claim to be reproducing that board's
+ * mark. Adding a board is one asset plus one table entry.
  *
- * Anything that is not a recognised mark and not an age at all — `NR`,
- * `Approved`, `Unrated` — resolves to `null` and the caller falls back to the
- * plain boxed text, so nothing is ever dropped for want of a picture.
+ * Anything that is not a mark and not an age — `NR`, `Approved`, `Unrated` —
+ * resolves to `null`, and the caller falls back to plain boxed text so that no
+ * certificate is ever dropped for want of a picture.
  */
 import { splitCertificate } from './certificates'
 
-export type BadgeShape = 'triangle' | 'circle' | 'square' | 'card' | 'tv'
+export type RatingMark =
+  /** A board's own mark, bundled. `asset` is the filename stem. */
+  | { kind: 'asset'; asset: string; title: string }
+  /** Tally's own age disc, for a board with no free mark available. */
+  | { kind: 'drawn'; text: string; fill: string; ink: string; title: string }
 
-export interface RatingMark {
-  /** What is drawn inside the mark. */
-  text: string
-  shape: BadgeShape
-  /** Ground colour. Fixed — see the note above. */
-  fill: string
-  /** Text colour, chosen against `fill`. */
-  ink: string
-  /** An edge, where the ground alone would not read against the page. */
-  edge?: string
-  /** Named in full, for the tooltip and for assistive tech. */
-  title: string
+/** BBFC (UK), current marks — in cinemas from October 2019. */
+const BBFC: Record<string, [string, string]> = {
+  U: ['bbfc-u', 'BBFC U — Universal'],
+  PG: ['bbfc-pg', 'BBFC PG — Parental Guidance'],
+  '12A': ['bbfc-12a', 'BBFC 12A'],
+  '12': ['bbfc-12', 'BBFC 12'],
+  '15': ['bbfc-15', 'BBFC 15'],
+  '18': ['bbfc-18', 'BBFC 18'],
+  R18: ['bbfc-r18', 'BBFC R18'],
 }
 
-/**
- * BBFC (UK). Shapes are not decorative and not interchangeable: U and PG are
- * triangles, the age categories circles, R18 a square. Current marks, in
- * cinemas from October 2019.
- */
-const BBFC: Record<string, RatingMark> = {
-  U: { text: 'U', shape: 'triangle', fill: '#00A650', ink: '#FFFFFF', title: 'BBFC U — Universal' },
-  PG: { text: 'PG', shape: 'triangle', fill: '#FFC20E', ink: '#1A1A1A', title: 'BBFC PG — Parental Guidance' },
-  '12A': { text: '12A', shape: 'circle', fill: '#F58220', ink: '#FFFFFF', title: 'BBFC 12A' },
-  '12': { text: '12', shape: 'circle', fill: '#F58220', ink: '#FFFFFF', title: 'BBFC 12' },
-  '15': { text: '15', shape: 'circle', fill: '#EC008C', ink: '#FFFFFF', title: 'BBFC 15' },
-  '18': { text: '18', shape: 'circle', fill: '#ED1C24', ink: '#FFFFFF', title: 'BBFC 18' },
-  R18: { text: 'R18', shape: 'square', fill: '#0072BC', ink: '#FFFFFF', title: 'BBFC R18' },
+/** MPA (US theatrical). */
+const MPA: Record<string, [string, string]> = {
+  G: ['mpa-g', 'MPA G — General Audiences'],
+  PG: ['mpa-pg', 'MPA PG — Parental Guidance Suggested'],
+  'PG-13': ['mpa-pg-13', 'MPA PG-13 — Parents Strongly Cautioned'],
+  R: ['mpa-r', 'MPA R — Restricted'],
+  'NC-17': ['mpa-nc-17', 'MPA NC-17 — Adults Only'],
+  X: ['mpa-x', 'MPA X'],
 }
 
-/**
- * MPA (US theatrical). The mark is monochrome by design — a bordered white
- * card — so it keeps its own light ground in dark mode rather than inverting.
- */
-const MPA_TITLES: Record<string, string> = {
-  G: 'MPA G — General Audiences',
-  PG: 'MPA PG — Parental Guidance Suggested',
-  'PG-13': 'MPA PG-13 — Parents Strongly Cautioned',
-  R: 'MPA R — Restricted',
-  'NC-17': 'MPA NC-17 — Adults Only',
-  X: 'MPA X',
-  GP: 'MPA GP',
-  M: 'MPA M',
+/** US TV Parental Guidelines. */
+const US_TV: Record<string, [string, string]> = {
+  'TV-Y': ['ustv-tv-y', 'TV-Y — All Children'],
+  'TV-Y7': ['ustv-tv-y7', 'TV-Y7 — Directed to Older Children'],
+  'TV-Y7-FV': ['ustv-tv-y7-fv', 'TV-Y7-FV — Fantasy Violence'],
+  'TV-G': ['ustv-tv-g', 'TV-G — General Audience'],
+  'TV-PG': ['ustv-tv-pg', 'TV-PG — Parental Guidance Suggested'],
+  'TV-14': ['ustv-tv-14', 'TV-14 — Parents Strongly Cautioned'],
+  'TV-MA': ['ustv-tv-ma', 'TV-MA — Mature Audience Only'],
 }
 
-/** US TV Parental Guidelines: white on a black box. */
-const US_TV = new Set([
-  'TV-Y',
-  'TV-Y7',
-  'TV-Y7-FV',
-  'TV-G',
-  'TV-PG',
-  'TV-14',
-  'TV-MA',
-])
-
-/** FSK (Germany). Colour is the whole signal here; the shape does not vary. */
-const FSK: Record<string, { fill: string; ink: string; edge?: string }> = {
-  '0': { fill: '#FFFFFF', ink: '#1A1A1A', edge: '#B0B0B0' },
-  '6': { fill: '#FFED00', ink: '#1A1A1A' },
-  '12': { fill: '#009640', ink: '#FFFFFF' },
-  '16': { fill: '#0069B4', ink: '#FFFFFF' },
-  '18': { fill: '#E30613', ink: '#FFFFFF' },
+/** FSK (Germany). */
+const FSK: Record<string, [string, string]> = {
+  '0': ['fsk-0', 'FSK 0 — ohne Altersbeschränkung'],
+  '6': ['fsk-6', 'FSK 6 — ab 6 Jahren'],
+  '12': ['fsk-12', 'FSK 12 — ab 12 Jahren'],
+  '16': ['fsk-16', 'FSK 16 — ab 16 Jahren'],
+  '18': ['fsk-18', 'FSK 18 — keine Jugendfreigabe'],
 }
 
-/**
- * The tier-two ramp: green through red as the age rises.
- *
- * One ramp for every board that has no entry above, so two countries' "12"
- * at least look like the same *kind* of statement. Not any board's palette.
- */
+/** Kijkwijzer (Netherlands). */
+const KIJKWIJZER: Record<string, [string, string]> = {
+  AL: ['kijkwijzer-al', 'Kijkwijzer AL — alle leeftijden'],
+  '6': ['kijkwijzer-6', 'Kijkwijzer 6'],
+  '9': ['kijkwijzer-9', 'Kijkwijzer 9'],
+  '12': ['kijkwijzer-12', 'Kijkwijzer 12'],
+  '14': ['kijkwijzer-14', 'Kijkwijzer 14'],
+  '16': ['kijkwijzer-16', 'Kijkwijzer 16'],
+  '18': ['kijkwijzer-18', 'Kijkwijzer 18'],
+}
+
+/** The shared ramp: green through red as the age rises. Not any board's palette. */
 function ageColour(age: number): { fill: string; ink: string } {
   if (age <= 0) return { fill: '#2E7D32', ink: '#FFFFFF' }
   if (age <= 6) return { fill: '#7CB342', ink: '#1A1A1A' }
@@ -124,14 +105,18 @@ function ageColour(age: number): { fill: string; ink: string } {
   return { fill: '#C62828', ink: '#FFFFFF' }
 }
 
-/** "All ages" as the boards variously spell it. */
-const ALL_AGES = new Set(['A', 'AL', 'T', 'TOUS', 'U'])
+/** "All ages", as the boards variously spell it. */
+const ALL_AGES = new Set(['A', 'AL', 'T', 'TOUS'])
+
+function fromTable(table: Record<string, [string, string]>, key: string): RatingMark | null {
+  const hit = table[key]
+  return hit ? { kind: 'asset', asset: hit[0], title: hit[1] } : null
+}
 
 /**
  * The mark for a raw certificate, or `null` when it has none worth drawing.
  *
- * `null` is a normal answer, not a failure: `Unrated`, `NR` and `Approved` are
- * real values a library holds and the caller draws them as boxed text.
+ * `null` is a normal answer, not a failure — see the note at the top.
  */
 export function ratingMark(raw: string): RatingMark | null {
   const parts = splitCertificate(raw)
@@ -139,64 +124,25 @@ export function ratingMark(raw: string): RatingMark | null {
 
   const { region, key } = parts
 
-  if (region === 'GB' || region === 'UK') {
-    return BBFC[key] ?? ageMark(region, key)
-  }
+  if (region === 'GB' || region === 'UK') return fromTable(BBFC, key) ?? ageMark(region, key)
+  if (region === 'DE') return fromTable(FSK, key) ?? ageMark(region, key)
+  if (region === 'NL') return fromTable(KIJKWIJZER, key) ?? ageMark(region, key)
 
-  if (region === 'DE') {
-    const fsk = FSK[key]
-    if (fsk) {
-      return {
-        text: key,
-        shape: 'square',
-        fill: fsk.fill,
-        ink: fsk.ink,
-        edge: fsk.edge,
-        title: `FSK ${key}`,
-      }
-    }
-    return ageMark(region, key)
-  }
-
-  // No prefix means a US rating: that is what the agents omit the board for.
+  // No prefix means a US rating: that is the board the agents omit.
   if (region === '' || region === 'US') {
-    if (US_TV.has(key)) {
-      return {
-        text: key,
-        shape: 'tv',
-        fill: '#111111',
-        ink: '#FFFFFF',
-        // The box is nearly the colour of a dark page, so without an edge the
-        // mark disappears entirely and only the lettering survives. Grey reads
-        // against both surfaces; black-on-black does not.
-        edge: '#5A5F66',
-        title: `US TV Parental Guidelines ${key}`,
-      }
-    }
-    const mpa = MPA_TITLES[key]
-    if (mpa) {
-      return {
-        text: key,
-        shape: 'card',
-        fill: '#FFFFFF',
-        ink: '#111111',
-        edge: '#111111',
-        title: mpa,
-      }
-    }
-    return null
+    return fromTable(US_TV, key) ?? fromTable(MPA, key)
   }
 
   return ageMark(region, key)
 }
 
-/** Tier two: an age from any other board, on the shared ramp. */
+/** A board with no free mark: an age on the shared ramp. */
 function ageMark(region: string, key: string): RatingMark | null {
   if (ALL_AGES.has(key)) {
     const { fill, ink } = ageColour(0)
     return {
+      kind: 'drawn',
       text: key,
-      shape: 'circle',
       fill,
       ink,
       title: region ? `${region} ${key} — all ages` : `${key} — all ages`,
@@ -207,13 +153,6 @@ function ageMark(region: string, key: string): RatingMark | null {
   const match = /^(\d{1,2})[A-Z+]?$/.exec(key)
   if (!match) return null
 
-  const age = Number(match[1])
-  const { fill, ink } = ageColour(age)
-  return {
-    text: key,
-    shape: 'circle',
-    fill,
-    ink,
-    title: region ? `${region} ${key}` : key,
-  }
+  const { fill, ink } = ageColour(Number(match[1]))
+  return { kind: 'drawn', text: key, fill, ink, title: region ? `${region} ${key}` : key }
 }

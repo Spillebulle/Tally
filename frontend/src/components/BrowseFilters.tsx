@@ -202,10 +202,22 @@ function MultiControl({
       // The table says *that* an option is a badge; drawing one is this file's
       // business. The badge needs the raw value as well as the label — the mark
       // is chosen by the board that issued the certificate, which only the raw
-      // value names — and it still draws the label when there is no mark.
+      // value names.
+      //
+      // The mark sits *beside* the label rather than replacing it. A board's
+      // symbol is recognised at a glance but not always read at 20px — an MPA
+      // card and an FSK disc both carry a line of descriptor text that becomes
+      // a smudge at that size — and this is a list you search by typing, so the
+      // words have to be there to scan. The mark earns recognition; the label
+      // keeps it legible.
       renderOption={
         control?.style === 'badge'
-          ? (option) => <RatingBadge raw={option.value} label={option.label} />
+          ? (option) => (
+              <span className="flex min-w-0 items-center gap-2">
+                <RatingBadge raw={option.value} label={option.label} fallback="none" />
+                <span className="truncate">{option.label}</span>
+              </span>
+            )
           : undefined
       }
     />
