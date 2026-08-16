@@ -321,6 +321,21 @@ class MediaItem(Base):
     first_aired: Mapped[date | None] = mapped_column(Date, default=None)
     community_rating: Mapped[float | None] = mapped_column(Float, default=None)
 
+    # Where a title comes from, and what it is about. `MetadataResult` has
+    # carried all three since the anime classifier needed them — TMDB and TVDB
+    # both populate them — and until now they were read once and thrown away
+    # because there was nowhere to put them.
+    #
+    # NULL and `[]` are deliberately different answers. NULL means "no provider
+    # has been asked since this column existed"; `[]` means "asked, and the
+    # provider had nothing". `services/media_repo.metadata_is_incomplete` selects
+    # on NULL, so collapsing the two would put every row back in the enrichment
+    # queue every week for good — TMDB lists no `origin_country` for a film at
+    # all, so that is not a hypothetical.
+    original_language: Mapped[str | None] = mapped_column(String(16), default=None)
+    origin_countries: Mapped[list | None] = mapped_column(JSON, default=None)
+    keywords: Mapped[list | None] = mapped_column(JSON, default=None)
+
     # External ids
     tmdb_id: Mapped[int | None] = mapped_column(Integer, default=None, index=True)
     tvdb_id: Mapped[int | None] = mapped_column(Integer, default=None, index=True)
@@ -507,6 +522,21 @@ class WatchEvent(Base):
     player: Mapped[str | None] = mapped_column(String(255), default=None)
     server_id: Mapped[int | None] = mapped_column(
         ForeignKey("plex_servers.id", ondelete="SET NULL"), default=None
+    )
+    # Which Plex library this play came out of, resolved from the `PlexMapping`
+    # at import time. Per-library stats would otherwise have to walk
+    # WatchEvent -> MediaItem -> PlexMapping, and that last hop is one-to-many:
+    # an item held on two servers, or moved between two sections, multiplies
+    # every one of its plays by the number of mappings it has.
+    #
+    # Nullable, and NULL is an honest answer rather than a gap to be filled.
+    # Rows imported before this column existed keep it — there is deliberately
+    # no backfill, because the mapping a 2019 play went through may not exist
+    # any more and reconstructing one would be a guess presented as a fact — and
+    # so does any play whose item has no mapping at all: a file since deleted
+    # from Plex, a watchlist-only title, a webhook that never named a library.
+    library_id: Mapped[int | None] = mapped_column(
+        ForeignKey("plex_libraries.id", ondelete="SET NULL"), default=None, index=True
     )
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
 

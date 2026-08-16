@@ -22,20 +22,26 @@ from ..models import (
     CreditKind,
     MediaItem,
     MediaType,
+    PlexLibrary,
     PlexMapping,
+    PlexServer,
     UserMediaState,
+    UserServerAccess,
     WatchStatus,
 )
 from ..schemas import (
+    BrowsePlacesOut,
     ContinueWatchingItem,
     CreditOut,
     FavoriteRequest,
+    LibraryOption,
     MediaCard,
     MediaCreditsOut,
     MediaItemDetail,
     NotesRequest,
     PaginatedMedia,
     RatingRequest,
+    ServerOption,
     StatusRequest,
     UserStateOut,
 )
@@ -131,6 +137,58 @@ async def list_content_ratings(
         select(MediaItem.content_rating).where(and_(*conditions)).distinct()
     )
     return sorted(rating for rating in result.scalars() if rating)
+
+
+@router.get("/places", response_model=BrowsePlacesOut)
+async def list_places(db: DbSession, user: CurrentUser) -> BrowsePlacesOut:
+    """The servers and libraries the `server_id` / `library_id` filters may name.
+
+    Scoped exactly the way the sync engine scopes a server — through
+    `UserServerAccess`, and only where both the access and the server are
+    enabled. A picker that listed every row in `plex_servers` would disclose
+    the names of servers and libraries this account has no relationship with,
+    which is the same "fail closed on scope" rule the webhook and the PIN poll
+    follow.
+
+    Declared above `/{item_id}` for the same reason `/genres` is: FastAPI
+    matches in declaration order, and `places` would otherwise be parsed as an
+    item id and answer 422.
+    """
+    scope = (
+        select(PlexServer)
+        .join(UserServerAccess, UserServerAccess.server_id == PlexServer.id)
+        .where(
+            UserServerAccess.user_id == user.id,
+            UserServerAccess.enabled.is_(True),
+            PlexServer.enabled.is_(True),
+        )
+    )
+    servers = list((await db.execute(scope.order_by(PlexServer.name))).scalars().unique())
+    if not servers:
+        return BrowsePlacesOut()
+
+    server_names = {server.id: server.name for server in servers}
+    rows = await db.execute(
+        select(PlexLibrary)
+        .where(PlexLibrary.server_id.in_(server_names))
+        .order_by(PlexLibrary.title)
+    )
+    return BrowsePlacesOut(
+        servers=[ServerOption(id=s.id, name=s.name) for s in servers],
+        libraries=[
+            LibraryOption(
+                id=library.id,
+                title=library.title,
+                section_type=library.section_type,
+                server_id=library.server_id,
+                server_name=server_names[library.server_id],
+            )
+            # Disabled libraries are listed too: their rows are still in the
+            # grid, and "which of these came from the library I switched off"
+            # is exactly the question somebody asks after switching it off.
+            for library in rows.scalars()
+        ],
+    )
 
 
 @router.get("/continue-watching", response_model=list[ContinueWatchingItem])

@@ -495,6 +495,49 @@ Two conditions have to be registered as well as written. Anything reading
 table it never joined; and the join is scoped to one `user_id`, which is the
 only reason `has_notes` cannot show you a housemate's annotations.
 
+**A facet that takes several values takes them as repeated keys.**
+`?genre=Crime&genre=Drama`, with `?genre_not=` for exclusion and
+`?genre_mode=all` for AND — omitted means "any", so the default never lands in
+the URL. Repeated keys are backwards compatible *by construction*: a single
+occurrence parses exactly as the single value always did, so every bookmark,
+every `facetLink` on an item page and every stats drill keeps working
+untouched. Not a comma-separated list (studio names contain commas — "Warner
+Bros., Inc.") and not a `-Horror` prefix operator (values legitimately start
+with one). `MULTI_FACETS` says how *one* value matches *one* row and everything
+else is derived from it; the frontend's `multiFilter` is the same trick, and
+`api.ts` must `append` per element rather than stringifying the array.
+
+The AND toggle is offered for **genre alone**. A title has one studio, one
+certificate and one network, so "all" over those is the empty set by
+construction — a control that can only produce a wrong answer.
+
+Three things about the SQL, each of which was a real trap:
+
+* **Exclusion is `NOT EXISTS`, never `NOT (col = value)`.** SQL's `NOT` over a
+  NULL comparison is NULL, and a row the WHERE cannot prove true is dropped —
+  so `?studio_not=A24` would also hide every film with no studio recorded, the
+  ones most obviously not made by A24. `facet_absent()` is the mirror of
+  `facet_source()` and covers the item and its show in one subquery. The same
+  trap over a relation is `EXISTS (… != x)`, which any title with a *second*
+  director satisfies.
+* **Relations stay correlated EXISTS.** `actor` mirrors `director`, and
+  `library_id` / `server_id` go through `PlexMapping` the way `on_plex` does. A
+  join fans a row out, `count_stmt` counts the copies, and the pager then offers
+  pages that render empty.
+* **`q_scope=all` searches your own notes, so the whole `q` clause moves into
+  `state_conditions()`.** It is one OR across title, overview and notes, so it
+  cannot be split across the two lists — and evaluated outside the
+  `user_id`-scoped join it would count a housemate's private notes into your
+  result total. The default stays `title`: an ordinary search that starts
+  matching plot words answers "murder" with half the library.
+
+`/api/media/places` lists the servers and libraries the two "where does it
+live" filters may name, scoped through `UserServerAccess` exactly as
+`servers_for` scopes the sync — a picker over every row in `plex_servers` would
+disclose the names of servers this account has no relationship with. It is
+declared **above** `/api/media/{item_id}`, like `/genres`, or FastAPI parses
+"places" as an item id.
+
 Each page still owns its own `sort`/`order`, because the valid sorts and the
 sensible default differ — the watchlist has `watchlist_added` (when *you*
 watchlisted it, `WatchlistEntry.added_at`) and opens on it, which is a different
@@ -815,14 +858,31 @@ the built-in `GITHUB_TOKEN`.
   for additive columns. A single-file SQLite database the user owns does not
   justify the dependency. If a destructive migration ever becomes necessary,
   revisit — but additive columns go in that list.
-  Three steps are not additive: `_scrub_token_bearing_artwork()`, which clears
+  Four steps are not additive: `_scrub_token_bearing_artwork()`, which clears
   the old token-carrying `poster_url` values so the proxy can take over;
   `_recover_release_name_titles()`, which replaces a filename Plex stored as a
   title and clears `metadata_updated_at` so the backfill re-asks under the real
-  name instead of waiting out its weekly window; and `merge_duplicates.py`,
-  which collapses items recorded twice. All three are idempotent, all three log
-  what they did, and none may assume it runs exactly once. Anything else that
-  has to *change* data needs the same treatment — a named function and a reason.
+  name instead of waiting out its weekly window; `_resweep_incomplete_metadata()`,
+  which re-queues rows enriched before Tally stored language, country, studio or
+  network; and `merge_duplicates.py`, which collapses items recorded twice. All
+  four are idempotent, all four log what they did, and none may assume it runs
+  exactly once. Anything else that has to *change* data needs the same treatment
+  — a named function and a reason.
+
+  **A resweep has to be reachable and it has to terminate**, and the third one
+  is where both nearly went wrong. It backdates `metadata_updated_at` to a
+  sentinel rather than nulling it, because `_needs_enrichment` reads NULL as
+  "enrich now regardless of artwork" — nulling a library would make the *next
+  library scan* re-enrich the whole catalogue inline, which is the burst the
+  bounded backfill exists to avoid. And `backfill_missing_metadata` selected
+  rows with *no* external id, while the resweep targets rows that *have* one:
+  disjoint sets, so without a second arm gated on the sentinel it would have
+  queued rows nothing ever revisits. Its predicate also asks for `studio` **and**
+  `network` both missing, never "either": TMDB returns no network for a film, so
+  "missing a network" is permanently true of every movie and the pass would
+  re-queue the entire film library on every boot, forever. Any future resweep
+  needs the same two questions asked out loud — *what picks these rows up*, and
+  *what makes a row stop coming back*.
 
   Each exists because the import-path fix cannot reach what the import already
   produced: the history sync reads incrementally and never revisits a 2019 play,

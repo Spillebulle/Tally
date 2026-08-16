@@ -39,28 +39,68 @@ something first seen in 2019 a first watch — plausible, wrong, and invisible.
 `ix_watch_events_user_item_time` is `(user_id, media_item_id, watched_at)`,
 exactly the partition and order that ranking asks for, so SQLite reads the rows
 in order rather than sorting them.
+
+**What is on `GET /api/stats` and what is not.** The default response is what a
+page needs to draw its first screen, and it is already four aggregations; a
+filter chip reloads all of it. Everything else is its own endpoint, on one of
+two grounds, and `/api/stats/seasonality` was the first of them:
+
+* **It has no window.** `/shows` (completion and drop-off) and `/coverage`
+  (owned versus watched) answer questions about a library rather than about a
+  fortnight. Accepting a window and applying it to half the numbers is exactly
+  the failure the paragraph above describes; accepting it and ignoring it is
+  worse. So they take none, and say `scope: "all_time"` in the payload.
+* **It is a section nobody has scrolled to yet.** `/rankings` is nine lists and
+  `/ratings` is four cross-tabulations and two rankings. Both share this page's
+  window and filters exactly, and both can arrive after the tiles above them.
+
+`sessions` is the one addition that stayed on the default response, because it
+costs one query over rows the page is already about and the shape of an evening
+is not separable from the count of plays in it.
 """
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from statistics import median
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, select, union
+from sqlalchemy import and_, func, or_, select, union
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
 from ..deps import CurrentUser, DbSession
-from ..media_filters import MediaFilters
-from ..models import MediaItem, MediaType, User, UserMediaState, WatchEvent, utcnow
+from ..media_filters import MediaFilters, facet_value, on_plex_condition
+from ..models import (
+    MediaItem,
+    MediaType,
+    User,
+    UserMediaState,
+    WatchEvent,
+    WatchlistEntry,
+    WatchSource,
+    WatchStatus,
+    utcnow,
+)
 from ..schemas import (
+    ContrarianItem,
+    CoverageOut,
+    CoverageSlice,
     PunchCard,
+    RankedFacet,
+    RankedTitle,
+    RankingsOut,
+    RatingDepthOut,
+    RatingSlice,
     RewatchedItem,
     RewatchSplit,
     RewatchStats,
     SeasonalityOut,
+    SessionStats,
+    ShowCompletionOut,
+    ShowProgress,
     StatCount,
     StatsComparison,
     StatsGranularity,
@@ -69,6 +109,9 @@ from ..schemas import (
     StatsRange,
     StatsTotals,
     TimeBucket,
+    WatchlistConversionOut,
+    WatchlistWaiting,
+    WatchSession,
     YearProfile,
 )
 from ..serializers import poster_for
@@ -115,6 +158,67 @@ MONTHS = (
 # dataset, and it is computed over all of history — which is exactly why it has
 # to be capped in SQL rather than trimmed after the fact.
 REWATCH_RANKING_LIMIT = 12
+
+# What separates one sitting from the next. There is no start time recorded
+# anywhere — Plex stamps `viewedAt` at the scrobble, around 90% of the way
+# through playback — so the gap between two scrobbles is the only evidence a
+# sitting ended. Consecutive episodes of a 45-minute drama land about 45
+# minutes apart and back-to-back hour-long episodes about an hour apart; 90
+# minutes sits above both and below any believable "picked it up again later".
+#
+# The cost is deliberate and visible: a double feature of two long films reads
+# as two sittings, because two scrobbles two hours apart cannot be told from an
+# evening film and a late-night one. Subtracting each play's own runtime to
+# estimate idle time would fix that and break the common case, where
+# `duration_ms` is missing and the fallback runtime is a flat 24 or 110
+# minutes. The threshold is reported in the payload precisely because it is a
+# judgement rather than a fact.
+SESSION_GAP_MINUTES = 90
+
+# The plays-per-sitting histogram's last bucket is open-ended; everything at or
+# above this lands in it.
+SESSION_SIZE_BUCKETS = 6
+
+# When a show counts as abandoned rather than merely paused: less than this
+# much of it watched, and untouched for this long. A judgement, echoed in the
+# response so the UI can state it. An explicit `DROPPED` status always wins,
+# and a show with no known episode count is never judged on a percentage it
+# does not have.
+ABANDONED_UNDER_PERCENT = 80.0
+ABANDONED_AFTER_DAYS = 180
+
+# How many rows each list-shaped block returns. Lists to read, not datasets.
+SHOW_LIST_LIMIT = 12
+WATCHLIST_WAITING_LIMIT = 12
+CONTRARIAN_LIMIT = 10
+COVERAGE_GENRE_LIMIT = 20
+RATING_SLICE_LIMIT = 12
+DEFAULT_RANKING_LIMIT = 12
+
+# How long a watchlist entry may sit unplayed before it counts as the tail.
+WATCHLIST_TAIL_DAYS = 90
+
+# Runtime buckets for the ratings breakdown: label, lower bound inclusive,
+# upper bound exclusive. Sized around what films actually are — the interesting
+# question is whether you are kinder to a 95-minute film than to a three-hour
+# one, and a uniform grid would put every film in one bar.
+RUNTIME_BUCKETS: tuple[tuple[str, int, int | None], ...] = (
+    ("Under 60 min", 0, 60),
+    ("60-89 min", 60, 90),
+    ("90-119 min", 90, 120),
+    ("120-149 min", 120, 150),
+    ("150 min and over", 150, None),
+)
+
+# `WatchSource` is an implementation detail of how a play reached Tally; these
+# are what it is called on screen.
+SOURCE_LABELS = {
+    WatchSource.PLEX_HISTORY: "Plex history",
+    WatchSource.PLEX_WEBHOOK: "Plex webhook",
+    WatchSource.PLEX_SESSION: "Plex session",
+    WatchSource.MANUAL: "Manual",
+    WatchSource.IMPORT: "Import",
+}
 
 
 def _streaks(days: set[date], today: date) -> tuple[int, int]:
@@ -183,8 +287,16 @@ async def _resolve_range(
     until: datetime | None,
     days: int | None,
     granularity: StatsGranularity,
+    earliest: datetime | None = None,
 ) -> StatsRange:
-    """Turn whichever of the three ways to ask into one concrete window."""
+    """Turn whichever of the three ways to ask into one concrete window.
+
+    `earliest` is what `preset="all"` should reach back to. It defaults to the
+    user's first *play*, which is right for every block that counts plays and
+    wrong for the watchlist, whose subject is when an entry was added — a user
+    with no history at all would otherwise get "all" resolving to today and see
+    none of their own watchlist.
+    """
     now = utcnow()
     today = now.astimezone(tz).date()
     end = now
@@ -198,9 +310,12 @@ async def _resolve_range(
         start_day = date(today.year - 1, 1, 1)
         end = _midnight(date(today.year, 1, 1), tz)
     elif preset == "all":
-        earliest = await db.scalar(
-            select(func.min(WatchEvent.watched_at)).where(WatchEvent.user_id == user.id)
-        )
+        if earliest is None:
+            earliest = await db.scalar(
+                select(func.min(WatchEvent.watched_at)).where(
+                    WatchEvent.user_id == user.id
+                )
+            )
         start_day = earliest.astimezone(tz).date() if earliest else today
     elif preset is not None:
         start_day = today - timedelta(days=int(preset.removesuffix("d")))
@@ -344,7 +459,31 @@ def _scope(stmt: Select, filters: MediaFilters, user: User) -> Select:
       module are the window bounds and the user, and both are applied by the
       caller. `_ranked_events` depends on that distinction — see its docstring.
     """
-    stmt = stmt.join(MediaItem, MediaItem.id == WatchEvent.media_item_id)
+    return _scope_items(
+        stmt.join(MediaItem, MediaItem.id == WatchEvent.media_item_id), filters, user
+    )
+
+
+def _scope_items(
+    stmt: Select, filters: MediaFilters, user: User, *, default_types: bool = False
+) -> Select:
+    """Apply the browse filters to a query whose subject is already `MediaItem`.
+
+    `_scope` is the one to reach for: nearly everything here counts plays, and
+    it adds the `watch_events` → `media_items` join before delegating to this.
+    But three blocks have a different subject and no `watch_events` to join
+    from — the watchlist conversion counts *entries*, and library coverage
+    counts *titles* — so the filter application itself lives here, once, and
+    both entry points share it. Two copies of "how the browse filters are
+    applied" is how the pages come to disagree.
+
+    The caller owns the FROM. All this adds is the per-user `user_media_states`
+    outer join when a filter reads it, and the conditions themselves.
+
+    `default_types` is False for anything counting plays — episodes are most of
+    a watch history — and True for the library inventory, where the shared
+    "movies and shows only" default is exactly right. See `CoverageOut`.
+    """
     if filters.needs_state_join():
         stmt = stmt.outerjoin(
             UserMediaState,
@@ -355,9 +494,10 @@ def _scope(stmt: Select, filters: MediaFilters, user: User) -> Select:
         )
         if state := filters.state_conditions():
             stmt = stmt.where(and_(*state))
-    if items := filters.item_conditions(default_types=False):
+    if items := filters.item_conditions(default_types=default_types):
         stmt = stmt.where(and_(*items))
     return stmt
+
 
 
 # --- aggregation ----------------------------------------------------------
@@ -476,6 +616,32 @@ async def _aggregate(
     return agg
 
 
+def _watched_subjects(user: User, filters: MediaFilters, conditions: list):
+    """What this window watched, plus the shows its episodes belong to.
+
+    The subject set every rating question is asked over. Split out of
+    `_ratings_for_window` so `/api/stats/ratings` asks about exactly the same
+    titles the `average_rating` tile on the main page does — two definitions of
+    "the ratings on this window" would be two answers to one question, side by
+    side on the same screen.
+
+    See `_ratings_for_window` for why `correlate(None)` is load-bearing.
+    """
+    watched = (
+        _scope(select(WatchEvent.media_item_id.label("id")), filters, user)
+        .where(and_(*conditions))
+        .correlate(None)
+    )
+    parents = (
+        _scope(select(MediaItem.show_id.label("id")).select_from(WatchEvent), filters, user)
+        .where(and_(*conditions, MediaItem.show_id.is_not(None)))
+        .correlate(None)
+    )
+    # A subquery rather than an IN of ids read back into Python: a long window
+    # holds thousands of items and SQLite caps bound parameters per statement.
+    return union(watched, parents).subquery()
+
+
 async def _ratings_for_window(
     db: DbSession, user: User, filters: MediaFilters, conditions: list
 ) -> list[float]:
@@ -504,19 +670,7 @@ async def _ratings_for_window(
     `.in_(watched)` — the obvious tidy-up — moves it into the WHERE clause,
     where it very much is.
     """
-    watched = (
-        _scope(select(WatchEvent.media_item_id.label("id")), filters, user)
-        .where(and_(*conditions))
-        .correlate(None)
-    )
-    parents = (
-        _scope(select(MediaItem.show_id.label("id")).select_from(WatchEvent), filters, user)
-        .where(and_(*conditions, MediaItem.show_id.is_not(None)))
-        .correlate(None)
-    )
-    # A subquery rather than an IN of ids read back into Python: a long window
-    # holds thousands of items and SQLite caps bound parameters per statement.
-    subjects = union(watched, parents).subquery()
+    subjects = _watched_subjects(user, filters, conditions)
 
     rows = await db.execute(
         select(UserMediaState.rating).where(
@@ -809,6 +963,819 @@ async def _most_rewatched(
     ]
 
 
+# --- sittings and binges --------------------------------------------------
+
+
+async def _sessions(
+    db: DbSession,
+    user: User,
+    window: StatsRange,
+    filters: MediaFilters,
+    tz: tzinfo,
+) -> SessionStats:
+    """Split the window's plays into sittings, wherever the gap is long enough.
+
+    Pure Python over rows already ordered by the index
+    `ix_watch_events_user_time` covers. SQL could do this with a window
+    function and a running sum, and would be harder to read for no gain: the
+    window is bounded, the endpoint already walks every row in it once, and the
+    threshold is a judgement that belongs somewhere a person can see it.
+
+    One extra query rather than reusing `_aggregate`'s rows, because sittings
+    need two columns the totals do not — the title, and the series title — and
+    `_aggregate` runs three times when `compare=true`. Sittings are computed
+    for the current window only.
+    """
+    show = aliased(MediaItem, name="session_show")
+    rows = (
+        await db.execute(
+            _scope(
+                select(
+                    WatchEvent.watched_at,
+                    WatchEvent.duration_ms,
+                    MediaItem.media_type,
+                    MediaItem.runtime_minutes,
+                    MediaItem.title,
+                    show.title,
+                ).select_from(WatchEvent),
+                filters,
+                user,
+            )
+            .outerjoin(show, show.id == MediaItem.show_id)
+            .where(
+                WatchEvent.user_id == user.id,
+                WatchEvent.watched_at >= window.since,
+                WatchEvent.watched_at < window.until,
+            )
+            # Ties break on id so a re-run cannot reshuffle two plays stamped
+            # at the same instant into different sittings.
+            .order_by(WatchEvent.watched_at, WatchEvent.id)
+        )
+    ).all()
+
+    gap = timedelta(minutes=SESSION_GAP_MINUTES)
+    sittings: list[dict] = []
+    for watched_at, duration_ms, media_type, runtime, title, show_title in rows:
+        # A gap *equal* to the threshold is still one sitting; only a longer
+        # one splits. Written as `>` rather than `>=` so the boundary belongs
+        # to exactly one side of the answer.
+        if not sittings or watched_at - sittings[-1]["ended_at"] > gap:
+            sittings.append(
+                {
+                    "started_at": watched_at,
+                    "ended_at": watched_at,
+                    "plays": 0,
+                    "minutes": 0,
+                    "title": title,
+                    "shows": set(),
+                }
+            )
+        current = sittings[-1]
+        current["ended_at"] = watched_at
+        current["plays"] += 1
+        current["minutes"] += _minutes(duration_ms, runtime, media_type)
+        current["shows"].add(show_title)
+
+    def _as_session(sitting: dict) -> WatchSession:
+        shows = sitting["shows"]
+        return WatchSession(
+            started_at=sitting["started_at"],
+            ended_at=sitting["ended_at"],
+            day=sitting["started_at"].astimezone(tz).date(),
+            plays=sitting["plays"],
+            minutes=sitting["minutes"],
+            title=sitting["title"],
+            # One series and nothing else in the sitting: that is a binge and
+            # can be labelled as one. A mixed evening gets no series name
+            # rather than the first one that happened to be in it.
+            show_title=next(iter(shows)) if len(shows) == 1 else None,
+        )
+
+    sizes: Counter[int] = Counter(
+        min(sitting["plays"], SESSION_SIZE_BUCKETS) for sitting in sittings
+    )
+    by_size = [
+        StatCount(
+            label=f"{size}+" if size == SESSION_SIZE_BUCKETS else str(size),
+            value=sizes.get(size, 0),
+        )
+        for size in range(1, SESSION_SIZE_BUCKETS + 1)
+    ]
+
+    plays = sum(sitting["plays"] for sitting in sittings)
+    minutes = sum(sitting["minutes"] for sitting in sittings)
+    return SessionStats(
+        gap_minutes=SESSION_GAP_MINUTES,
+        sessions=len(sittings),
+        plays=plays,
+        average_plays=round(plays / len(sittings), 2) if sittings else 0.0,
+        average_minutes=round(minutes / len(sittings), 1) if sittings else 0.0,
+        longest=_as_session(max(sittings, key=lambda s: s["minutes"])) if sittings else None,
+        biggest_binge=(
+            _as_session(max(sittings, key=lambda s: s["plays"])) if sittings else None
+        ),
+        by_size=by_size,
+    )
+
+
+# --- show completion and drop-off -----------------------------------------
+
+
+async def _show_completion(
+    db: DbSession, user: User, filters: MediaFilters
+) -> ShowCompletionOut:
+    """How far through each show, and which ones were walked away from.
+
+    Two queries and no per-show round trip. The first groups every episode play
+    by its series; the second picks the most recently played episode of each
+    series with one window function, rather than the pair of lookups
+    `serializers.episode_progress` would cost per show — twenty shows is forty
+    round trips that way, which is the whole reason it is not used here.
+
+    The show's own status is read through a second, aliased
+    `user_media_states` join rather than a bulk `IN` lookup: it is unique on
+    `(user_id, media_item_id)` and pinned to this user, so it cannot fan a
+    group out, and it costs nothing beyond the query already being run.
+
+    Only EPISODE plays count towards completion. A play recorded against the
+    show row itself carries no episode number and would inflate a percentage
+    it cannot locate.
+    """
+    show = aliased(MediaItem, name="completion_show")
+    show_state = aliased(UserMediaState, name="completion_show_state")
+    # Distinct episodes, not plays: rewatching the pilot four times is not 4%
+    # of a series.
+    episodes = func.count(func.distinct(WatchEvent.media_item_id))
+    last = func.max(WatchEvent.watched_at)
+
+    rows = (
+        await db.execute(
+            _scope(
+                select(show, show_state.status, episodes, last).select_from(WatchEvent),
+                filters,
+                user,
+            )
+            .join(show, show.id == MediaItem.show_id)
+            .outerjoin(
+                show_state,
+                and_(
+                    show_state.media_item_id == show.id,
+                    show_state.user_id == user.id,
+                ),
+            )
+            .where(
+                WatchEvent.user_id == user.id,
+                MediaItem.media_type == MediaType.EPISODE,
+            )
+            # `status` is functionally dependent on the show, so grouping by it
+            # adds no rows — it is named only so the statement is legal
+            # anywhere, not just under SQLite's tolerance for bare columns.
+            .group_by(show.id, show_state.status)
+            .order_by(last.desc())
+        )
+    ).all()
+
+    stopped = (
+        _scope(
+            select(
+                MediaItem.show_id.label("show_id"),
+                MediaItem.season_number.label("season_number"),
+                MediaItem.episode_number.label("episode_number"),
+                MediaItem.title.label("episode_title"),
+                func.row_number()
+                .over(
+                    partition_by=MediaItem.show_id,
+                    order_by=(WatchEvent.watched_at.desc(), WatchEvent.id.desc()),
+                )
+                .label("rank"),
+            # Every column here reads `media_items`, so the leftmost FROM has
+            # to be named explicitly or `_scope`'s join has nothing to hang
+            # off — the ranking's ORDER BY is inside `over()` and does not put
+            # `watch_events` in the FROM by itself.
+            ).select_from(WatchEvent),
+            filters,
+            user,
+        )
+        .where(WatchEvent.user_id == user.id, MediaItem.media_type == MediaType.EPISODE)
+        .subquery()
+    )
+    stops = {
+        row.show_id: row
+        for row in (await db.execute(select(stopped).where(stopped.c.rank == 1))).all()
+    }
+
+    stale_before = utcnow() - timedelta(days=ABANDONED_AFTER_DAYS)
+    in_progress: list[ShowProgress] = []
+    abandoned: list[ShowProgress] = []
+    completed = unknown_total = 0
+
+    for item, status_value, watched, last_watched in rows:
+        total = item.leaf_count
+        # `leaf_count` and nothing else. See `ShowProgress` for why counting the
+        # episode rows Tally holds would report every history-only show at 100%.
+        # A total smaller than what has demonstrably been watched is not a
+        # total, so it answers "unknown" rather than a clamped 100% — which
+        # would file the show under "completed" and hide the fact that the
+        # number is wrong.
+        stale_total = bool(total) and watched > total
+        percent = None if not total or stale_total else round(watched / total * 100, 1)
+
+        stop = stops.get(item.id)
+        progress = ShowProgress(
+            media_item_id=item.id,
+            title=item.title,
+            year=item.year,
+            poster_url=poster_for(item),
+            status=status_value,
+            episodes_watched=watched,
+            episodes_total=total or None,
+            percent_complete=percent,
+            total_is_stale=stale_total,
+            last_watched_at=last_watched,
+            last_season=stop.season_number if stop else None,
+            last_episode=stop.episode_number if stop else None,
+            last_episode_title=stop.episode_title if stop else None,
+        )
+
+        if status_value == WatchStatus.COMPLETED or (percent is not None and percent >= 100):
+            completed += 1
+            continue
+        if percent is None:
+            unknown_total += 1
+        # An explicit "dropped" is the user saying so and needs no threshold.
+        # The inferred half needs a percentage, which is exactly why a show
+        # with no known episode count can never land here by accident.
+        progress.abandoned = status_value == WatchStatus.DROPPED or (
+            percent is not None
+            and percent < ABANDONED_UNDER_PERCENT
+            and last_watched < stale_before
+        )
+        (abandoned if progress.abandoned else in_progress).append(progress)
+
+    return ShowCompletionOut(
+        abandoned_under_percent=ABANDONED_UNDER_PERCENT,
+        abandoned_after_days=ABANDONED_AFTER_DAYS,
+        shows_started=len(rows),
+        shows_completed=completed,
+        shows_in_progress=len(in_progress),
+        shows_abandoned=len(abandoned),
+        shows_unknown_total=unknown_total,
+        in_progress=in_progress[:SHOW_LIST_LIMIT],
+        abandoned=abandoned[:SHOW_LIST_LIMIT],
+    )
+
+
+# --- watchlist conversion -------------------------------------------------
+
+
+def _first_play_after(user: User, alias_name: str, *, after_add: bool):
+    """When this watchlist entry was first played, as a correlated subquery.
+
+    A watchlisted *show* is never played directly — its history is episode
+    plays against episode rows — so this matches the entry's own item **or**
+    anything whose `show_id` points at it. That is the same "a series answers
+    for its episodes" relationship `media_filters.facet_value` and `facet_source`
+    read in the other direction.
+
+    `after_add` is the difference between two questions the block asks
+    separately: a play at or after `added_at` is a conversion, while *any* play
+    ever is what stops a removal counting as churn.
+    """
+    played = aliased(MediaItem, name=alias_name)
+    stmt = (
+        select(func.min(WatchEvent.watched_at))
+        .select_from(WatchEvent)
+        .join(played, played.id == WatchEvent.media_item_id)
+        .where(
+            WatchEvent.user_id == user.id,
+            or_(
+                played.id == WatchlistEntry.media_item_id,
+                played.show_id == WatchlistEntry.media_item_id,
+            ),
+        )
+    )
+    if after_add:
+        stmt = stmt.where(WatchEvent.watched_at >= WatchlistEntry.added_at)
+    return stmt.correlate(WatchlistEntry).scalar_subquery()
+
+
+async def _watchlist_conversion(
+    db: DbSession, user: User, window: StatsRange, filters: MediaFilters
+) -> WatchlistConversionOut:
+    """Added-then-watched, and everything that did not happen.
+
+    One query. Watchlists are small — hundreds of rows on a large instance —
+    so the two correlated subqueries that price each entry are cheaper than any
+    scheme for avoiding them, and both ride `ix_watch_events_user_item_time`.
+    """
+    rows = (
+        await db.execute(
+            _scope_items(
+                select(
+                    MediaItem,
+                    WatchlistEntry.added_at,
+                    WatchlistEntry.active,
+                    _first_play_after(user, "converted_play", after_add=True),
+                    _first_play_after(user, "any_play", after_add=False),
+                )
+                .select_from(WatchlistEntry)
+                .join(MediaItem, MediaItem.id == WatchlistEntry.media_item_id),
+                filters,
+                user,
+            ).where(
+                WatchlistEntry.user_id == user.id,
+                WatchlistEntry.added_at >= window.since,
+                WatchlistEntry.added_at < window.until,
+            )
+        )
+    ).all()
+
+    now = utcnow()
+    waits: list[float] = []
+    converted = still_waiting = past_tail = churned = removed = 0
+    waiting: list[WatchlistWaiting] = []
+
+    for item, added_at, active, converted_at, ever_at in rows:
+        if converted_at is not None:
+            converted += 1
+            waits.append(round((converted_at - added_at).total_seconds() / 86400, 2))
+        if not active:
+            removed += 1
+            # "Removed without ever being watched" — `ever_at`, not
+            # `converted_at`. Something removed after a play that predated the
+            # add was tidied up, not given up on.
+            if ever_at is None:
+                churned += 1
+        elif converted_at is None:
+            still_waiting += 1
+            days = (now - added_at).days
+            if days >= WATCHLIST_TAIL_DAYS:
+                past_tail += 1
+            waiting.append(
+                WatchlistWaiting(
+                    media_item_id=item.id,
+                    title=item.title,
+                    year=item.year,
+                    media_type=item.media_type,
+                    poster_url=poster_for(item),
+                    added_at=added_at,
+                    days_waiting=days,
+                )
+            )
+
+    waiting.sort(key=lambda entry: entry.added_at)
+    return WatchlistConversionOut(
+        range=window,
+        tail_days=WATCHLIST_TAIL_DAYS,
+        added=len(rows),
+        converted=converted,
+        conversion_rate=round(converted / len(rows), 4) if rows else 0.0,
+        median_days_to_watch=round(median(waits), 2) if waits else None,
+        still_waiting=still_waiting,
+        waiting_past_tail=past_tail,
+        churned=churned,
+        removed=removed,
+        waiting=waiting[:WATCHLIST_WAITING_LIMIT],
+    )
+
+
+# --- library coverage -----------------------------------------------------
+
+
+def _decade_label(year: int) -> str:
+    return f"{year // 10 * 10}s"
+
+
+def _slice(counts: dict[str, list[int]], label: str) -> CoverageSlice:
+    owned, watched = counts[label]
+    return CoverageSlice(
+        label=label,
+        owned=owned,
+        watched=watched,
+        percent=round(watched / owned, 4) if owned else 0.0,
+    )
+
+
+async def _coverage(
+    db: DbSession, user: User, filters: MediaFilters
+) -> CoverageOut:
+    """Owned versus watched, sliced by type, genre and decade.
+
+    Both halves are correlated EXISTS clauses, and that is the point.
+    "Owned" is `on_plex_condition(True)` — the browse filters' own definition,
+    so the endpoint and the grid agree — and a title held on two servers is one
+    row through it, where a join to `plex_mappings` would count it twice. The
+    same shape answers "watched", reaching an item's episodes through
+    `show_id` so a series counts as watched on any episode play.
+
+    One query, one row per owned title. A large library is a few thousand of
+    those and three narrow columns apiece; genres are a JSON array that no
+    portable `GROUP BY` reaches, so the slicing is done in Python off the same
+    pass rather than in three more statements.
+    """
+    played = aliased(MediaItem, name="coverage_played")
+    watched_clause = (
+        select(WatchEvent.id)
+        .select_from(WatchEvent)
+        .join(played, played.id == WatchEvent.media_item_id)
+        .where(
+            WatchEvent.user_id == user.id,
+            or_(played.id == MediaItem.id, played.show_id == MediaItem.id),
+        )
+        .exists()
+    )
+
+    rows = (
+        await db.execute(
+            _scope_items(
+                select(
+                    MediaItem.media_type,
+                    MediaItem.year,
+                    MediaItem.genres,
+                    watched_clause.label("watched"),
+                ).select_from(MediaItem),
+                filters,
+                user,
+                default_types=True,
+            ).where(on_plex_condition(True))
+        )
+    ).all()
+
+    def _empty() -> list[int]:
+        return [0, 0]
+
+    types: dict[str, list[int]] = {}
+    genres: dict[str, list[int]] = {}
+    decades: dict[str, list[int]] = {}
+    owned = watched_total = 0
+
+    for media_type, year, item_genres, watched in rows:
+        owned += 1
+        seen = 1 if watched else 0
+        watched_total += seen
+        label = "Movies" if media_type == MediaType.MOVIE else "Shows"
+        types.setdefault(label, _empty())
+        types[label][0] += 1
+        types[label][1] += seen
+        for genre in item_genres or []:
+            genres.setdefault(genre, _empty())
+            genres[genre][0] += 1
+            genres[genre][1] += seen
+        # A year-less row is in no decade. Counted in the totals, absent from
+        # the decade slice — inventing an "Unknown" decade would put it on the
+        # same axis as the real ones.
+        if year:
+            key = _decade_label(year)
+            decades.setdefault(key, _empty())
+            decades[key][0] += 1
+            decades[key][1] += seen
+
+    top_genres = sorted(genres, key=lambda name: (-genres[name][0], name))
+    return CoverageOut(
+        includes_personal=filters.personal != "exclude",
+        owned=owned,
+        watched=watched_total,
+        unwatched=owned - watched_total,
+        percent=round(watched_total / owned, 4) if owned else 0.0,
+        by_type=[_slice(types, label) for label in sorted(types)],
+        by_genre=[_slice(genres, name) for name in top_genres[:COVERAGE_GENRE_LIMIT]],
+        by_decade=[_slice(decades, key) for key in sorted(decades)],
+    )
+
+
+# --- rating depth ---------------------------------------------------------
+
+
+def _accumulate(
+    buckets: dict[str, list[float]], label: str, rating: float, crowd: float | None
+) -> None:
+    """Add one rated title to a slice: count, rating sum, crowd sum, crowd count.
+
+    The crowd is counted separately because most libraries hold titles with a
+    rating of yours and no `community_rating` at all — dividing the crowd's sum
+    by the slice's count would report an average dragged towards zero by every
+    title that simply had nothing to compare.
+    """
+    bucket = buckets.setdefault(label, [0.0, 0.0, 0.0, 0.0])
+    bucket[0] += 1
+    bucket[1] += float(rating)
+    if crowd is not None:
+        bucket[2] += float(crowd)
+        bucket[3] += 1
+
+
+def _rating_slices(buckets: dict[str, list[float]], limit: int) -> list[RatingSlice]:
+    """Turn `{label: [count, rating sum, community sum, community count]}` into rows."""
+    ordered = sorted(buckets, key=lambda label: (-buckets[label][0], label))
+    return [
+        RatingSlice(
+            label=label,
+            count=int(buckets[label][0]),
+            average=round(buckets[label][1] / buckets[label][0], 2),
+            community_average=(
+                round(buckets[label][2] / buckets[label][3], 2)
+                if buckets[label][3]
+                else None
+            ),
+        )
+        for label in ordered[:limit]
+    ]
+
+
+def _runtime_bucket(runtime: int | None) -> str | None:
+    if not runtime:
+        return None
+    for label, low, high in RUNTIME_BUCKETS:
+        if runtime >= low and (high is None or runtime < high):
+            return label
+    return None
+
+
+async def _rating_depth(
+    db: DbSession, user: User, window: StatsRange, filters: MediaFilters
+) -> RatingDepthOut:
+    """Your ratings against the crowd's, and how they break down.
+
+    The parent show is joined for its genres only, and only as a fallback:
+    enrichment skips episodes, so a rated episode carries none of its own. That
+    is `facet_value`'s rule again, written as a join here because the subject set is
+    already one row per item and `show_id` cannot match twice.
+    """
+    conditions = [
+        WatchEvent.user_id == user.id,
+        WatchEvent.watched_at >= window.since,
+        WatchEvent.watched_at < window.until,
+    ]
+    subjects = _watched_subjects(user, filters, conditions)
+    parent = aliased(MediaItem, name="rating_parent")
+
+    rows = (
+        await db.execute(
+            select(MediaItem, UserMediaState.rating, parent.genres)
+            .join(UserMediaState, UserMediaState.media_item_id == MediaItem.id)
+            .outerjoin(parent, parent.id == MediaItem.show_id)
+            .where(
+                UserMediaState.user_id == user.id,
+                UserMediaState.rating.is_not(None),
+                MediaItem.id.in_(select(subjects.c.id)),
+            )
+        )
+    ).all()
+
+    def _empty() -> list[float]:
+        return [0.0, 0.0, 0.0, 0.0]
+
+    genres: dict[str, list[float]] = {}
+    decades: dict[str, list[float]] = {}
+    runtimes: dict[str, list[float]] = {}
+    contrarian: list[ContrarianItem] = []
+    ratings: list[float] = []
+    community: list[float] = []
+    differences: list[float] = []
+    runtime_unknown = 0
+
+    for item, rating, parent_genres in rows:
+        ratings.append(float(rating))
+        crowd = item.community_rating
+        if crowd is not None:
+            community.append(float(crowd))
+            difference = round(float(rating) - float(crowd), 2)
+            differences.append(difference)
+            contrarian.append(
+                ContrarianItem(
+                    media_item_id=item.id,
+                    title=item.title,
+                    year=item.year,
+                    media_type=item.media_type,
+                    poster_url=poster_for(item),
+                    rating=float(rating),
+                    community_rating=float(crowd),
+                    difference=difference,
+                )
+            )
+
+        for genre in item.genres or parent_genres or []:
+            _accumulate(genres, genre, rating, crowd)
+        if item.year:
+            _accumulate(decades, _decade_label(item.year), rating, crowd)
+        bucket = _runtime_bucket(item.runtime_minutes)
+        if bucket is None:
+            runtime_unknown += 1
+        else:
+            _accumulate(runtimes, bucket, rating, crowd)
+
+    contrarian.sort(key=lambda row: row.difference)
+    comparable = len(differences)
+    return RatingDepthOut(
+        range=window,
+        rated=len(rows),
+        rated_with_community=comparable,
+        average_rating=round(sum(ratings) / len(ratings), 2) if ratings else None,
+        average_community=round(sum(community) / len(community), 2) if community else None,
+        average_difference=(
+            round(sum(differences) / comparable, 2) if comparable else None
+        ),
+        average_absolute_difference=(
+            round(sum(abs(value) for value in differences) / comparable, 2)
+            if comparable
+            else None
+        ),
+        agreement_within_one=(
+            round(sum(1 for value in differences if abs(value) <= 1) / comparable, 4)
+            if comparable
+            else None
+        ),
+        kinder_than_crowd=sum(1 for value in differences if value > 0),
+        harsher_than_crowd=sum(1 for value in differences if value < 0),
+        you_rate_higher=list(reversed(contrarian[-CONTRARIAN_LIMIT:])),
+        you_rate_lower=contrarian[:CONTRARIAN_LIMIT],
+        by_genre=_rating_slices(genres, RATING_SLICE_LIMIT),
+        by_decade=_rating_slices(decades, RATING_SLICE_LIMIT),
+        by_runtime=_rating_slices(runtimes, len(RUNTIME_BUCKETS)),
+        runtime_unknown=runtime_unknown,
+    )
+
+
+# --- ranked lists ---------------------------------------------------------
+
+
+async def _rankings(
+    db: DbSession,
+    user: User,
+    window: StatsRange,
+    filters: MediaFilters,
+    limit: int,
+) -> RankingsOut:
+    """Nine leaderboards from one pass over the window's plays.
+
+    Two queries in total. The first reads one narrow row per play — never an
+    ORM entity, which at a few thousand plays would be a few thousand
+    identity-map inserts for columns nobody reads — and every grouping is
+    derived from that pass in Python. The second fetches the handful of
+    `MediaItem` rows the capped lists actually name, in one batched `IN`: at
+    most three lists of `limit` each, so the query is bounded by the page
+    rather than by the library, and `poster_for` gets a real row to work from
+    instead of a URL assembled by hand.
+
+    Episodes are rolled up into their series by `coalesce(show_id, id)`, so
+    "titles by total runtime" says *The Wire*, not "Episode 4" forty times.
+    """
+    rows = (
+        await db.execute(
+            _scope(
+                select(
+                    WatchEvent.duration_ms,
+                    WatchEvent.source,
+                    MediaItem.id,
+                    MediaItem.media_type,
+                    MediaItem.runtime_minutes,
+                    MediaItem.show_id,
+                    MediaItem.year,
+                    facet_value("studio"),
+                    facet_value("network"),
+                    facet_value("content_rating"),
+                ).select_from(WatchEvent),
+                filters,
+                user,
+            ).where(
+                WatchEvent.user_id == user.id,
+                WatchEvent.watched_at >= window.since,
+                WatchEvent.watched_at < window.until,
+            )
+        )
+    ).all()
+
+    titles: dict[int, dict] = {}
+    facets: dict[str, dict[str, dict]] = {
+        "studio": {},
+        "network": {},
+        "decade": {},
+        "content_rating": {},
+        "source": {},
+    }
+
+    for (
+        duration_ms,
+        source,
+        item_id,
+        media_type,
+        runtime,
+        show_id,
+        year,
+        studio,
+        network,
+        content_rating,
+    ) in rows:
+        minutes = _minutes(duration_ms, runtime, media_type)
+        # A season or episode answers under its series; a movie, and a play
+        # recorded against a show row directly, answer as themselves.
+        key = show_id or item_id
+        entry = titles.setdefault(
+            key,
+            {
+                "plays": 0,
+                "minutes": 0,
+                "episodes": set(),
+                "movie": show_id is None and media_type == MediaType.MOVIE,
+            },
+        )
+        entry["plays"] += 1
+        entry["minutes"] += minutes
+        if media_type == MediaType.EPISODE:
+            entry["episodes"].add(item_id)
+
+        for group, label in (
+            ("studio", studio),
+            ("network", network),
+            ("content_rating", content_rating),
+            ("decade", _decade_label(year) if year else None),
+            ("source", SOURCE_LABELS.get(source, str(source))),
+        ):
+            if not label:
+                continue
+            bucket = facets[group].setdefault(
+                label, {"plays": 0, "minutes": 0, "titles": set()}
+            )
+            bucket["plays"] += 1
+            bucket["minutes"] += minutes
+            bucket["titles"].add(key)
+
+    def _ranked(keys: list[int], sort_key) -> list[int]:
+        return sorted(keys, key=sort_key)[:limit]
+
+    shows = [key for key, entry in titles.items() if not entry["movie"]]
+    films = [key for key, entry in titles.items() if entry["movie"]]
+    top_shows = _ranked(
+        shows, lambda key: (-len(titles[key]["episodes"]), -titles[key]["minutes"], key)
+    )
+    top_films = _ranked(
+        films, lambda key: (-titles[key]["plays"], -titles[key]["minutes"], key)
+    )
+    top_runtime = _ranked(
+        list(titles), lambda key: (-titles[key]["minutes"], -titles[key]["plays"], key)
+    )
+
+    wanted = sorted({*top_shows, *top_films, *top_runtime})
+    items = {
+        item.id: item
+        for item in (
+            await db.execute(select(MediaItem).where(MediaItem.id.in_(wanted)))
+        ).scalars()
+    }
+
+    def _title_rows(keys: list[int]) -> list[RankedTitle]:
+        ranked = []
+        for key in keys:
+            item = items.get(key)
+            if item is None:
+                # The grouping key is a `show_id` whose show row has since been
+                # deleted. The plays are real but there is nothing to name them
+                # with, so the row is left out rather than titled "Unknown".
+                continue
+            entry = titles[key]
+            episodes = len(entry["episodes"])
+            ranked.append(
+                RankedTitle(
+                    media_item_id=item.id,
+                    title=item.title,
+                    year=item.year,
+                    media_type=item.media_type,
+                    poster_url=poster_for(item),
+                    plays=entry["plays"],
+                    minutes=entry["minutes"],
+                    episodes=episodes or None,
+                    episodes_total=item.leaf_count,
+                )
+            )
+        return ranked
+
+    def _facet_rows(group: str) -> list[RankedFacet]:
+        bucket = facets[group]
+        ordered = sorted(bucket, key=lambda label: (-bucket[label]["minutes"], label))
+        return [
+            RankedFacet(
+                label=label,
+                plays=bucket[label]["plays"],
+                minutes=bucket[label]["minutes"],
+                titles=len(bucket[label]["titles"]),
+            )
+            for label in ordered[:limit]
+        ]
+
+    return RankingsOut(
+        range=window,
+        limit=limit,
+        top_shows=_title_rows(top_shows),
+        top_films=_title_rows(top_films),
+        top_by_runtime=_title_rows(top_runtime),
+        studios=_facet_rows("studio"),
+        networks=_facet_rows("network"),
+        decades=_facet_rows("decade"),
+        content_ratings=_facet_rows("content_rating"),
+        by_source=_facet_rows("source"),
+    )
+
+
 # --- endpoints ------------------------------------------------------------
 
 
@@ -901,6 +1868,7 @@ async def get_stats(
         ),
         punch_card=_punch_card(agg.by_weekday_hour),
         rewatch=await _rewatch(db, user, window, filters, zone),
+        sessions=await _sessions(db, user, window, filters, zone),
         current_streak_days=current_streak,
         longest_streak_days=longest_streak,
         top_genres=[
@@ -1005,6 +1973,164 @@ async def seasonality(
         months=_profile(month_plays, month_minutes, MONTHS, offset=1),
         years=years,
     )
+
+
+@router.get("/shows", response_model=ShowCompletionOut)
+async def show_completion(
+    db: DbSession,
+    user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
+    anime_only: bool = False,
+) -> ShowCompletionOut:
+    """How far through each show you are, and which ones you walked away from.
+
+    Its own endpoint and **unwindowed**, for the reason `ShowCompletionOut`
+    sets out: completion is a fact about a viewer and a series, and the
+    abandoned half is invisible inside any window short enough to be useful.
+    It therefore takes no `preset`/`since`/`until`/`days`, rather than
+    accepting them and quietly applying them to half the numbers — which is the
+    exact failure the module docstring opens with.
+
+    No `tz` either. Nothing here is bucketed by day; staleness is a duration,
+    and a duration is the same length in every zone.
+
+    The shared browse filters do apply, so "how far through my anime am I" is
+    one request.
+    """
+    filters = _stats_filters(filters, anime_only)
+    return await _show_completion(db, user, filters)
+
+
+@router.get("/watchlist", response_model=WatchlistConversionOut)
+async def watchlist_conversion(
+    db: DbSession,
+    user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
+    preset: StatsPreset | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    days: int | None = Query(None, ge=1, le=3650),
+    anime_only: bool = False,
+    tz: str | None = None,
+) -> WatchlistConversionOut:
+    """Does watchlisting something mean you watch it?
+
+    The window bounds `WatchlistEntry.added_at`, not `WatchEvent.watched_at` —
+    which entries are being asked about. It is the only bound that makes the
+    question answerable, and it is why this is not on `GET /api/stats`, where
+    the window means something else on every other number.
+
+    `preset=all` reaches back to the earliest watchlist add rather than to the
+    earliest play, so somebody who watchlists and never watches still sees
+    their own list.
+
+    `granularity` is not taken: nothing here is a series.
+    """
+    filters = _stats_filters(filters, anime_only)
+    zone, resolved_name = _zone_for(user, tz)
+    earliest = await db.scalar(
+        select(func.min(WatchlistEntry.added_at)).where(WatchlistEntry.user_id == user.id)
+    )
+    window = await _resolve_range(
+        db, user, zone, resolved_name, preset, since, until, days, "day", earliest
+    )
+    return await _watchlist_conversion(db, user, window, filters)
+
+
+def _inventory_filters(filters: MediaFilters, anime_only: bool) -> MediaFilters:
+    """The browse filters for a question about the shelf rather than the viewing.
+
+    The deliberate difference from `_stats_filters`: **`personal` is left
+    alone.** Everywhere else on this page home videos count, because a play is
+    a play and the hours are real. Coverage is an inventory — the same question
+    `/api/stats/summary` answers — and a phone recording is not a title you
+    have failed to get round to, so the shared `exclude` default is exactly
+    right here and stays a live parameter rather than an inert one. Somebody
+    who wants their home videos counted asks for `personal=all` and gets it.
+
+    `default_types` is left alone too, in `_scope_items`: a season is not a
+    title on the shelf either.
+    """
+    if anime_only:
+        filters.anime = "only"
+    return filters
+
+
+@router.get("/coverage", response_model=CoverageOut)
+async def coverage(
+    db: DbSession,
+    user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
+    anime_only: bool = False,
+) -> CoverageOut:
+    """What fraction of the library has actually been watched.
+
+    Unwindowed and its own endpoint: "have I seen this" is not a question about
+    a fortnight, and the query walks every owned title rather than every play,
+    which is a different and much longer list on a large library.
+
+    `on_plex` is redundant here — the endpoint is about what is on Plex and
+    applies that condition itself — so setting it to `false` returns nothing,
+    honestly rather than confusingly.
+    """
+    filters = _inventory_filters(filters, anime_only)
+    return await _coverage(db, user, filters)
+
+
+@router.get("/ratings", response_model=RatingDepthOut)
+async def rating_depth(
+    db: DbSession,
+    user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
+    preset: StatsPreset | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    days: int | None = Query(None, ge=1, le=3650),
+    anime_only: bool = False,
+    tz: str | None = None,
+) -> RatingDepthOut:
+    """Your ratings against `MediaItem.community_rating`.
+
+    Windowed, on exactly the subject set `StatsOut.average_rating` uses — what
+    was watched, plus the shows whose episodes were — so the tile on the main
+    page and the breakdown here can never disagree. Split out because it is
+    four cross-tabulations and two rankings that most loads of the page will
+    never draw.
+    """
+    filters = _stats_filters(filters, anime_only)
+    zone, resolved_name = _zone_for(user, tz)
+    window = await _resolve_range(
+        db, user, zone, resolved_name, preset, since, until, days, "day"
+    )
+    return await _rating_depth(db, user, window, filters)
+
+
+@router.get("/rankings", response_model=RankingsOut)
+async def rankings(
+    db: DbSession,
+    user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
+    preset: StatsPreset | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    days: int | None = Query(None, ge=1, le=3650),
+    limit: int = Query(DEFAULT_RANKING_LIMIT, ge=1, le=50),
+    anime_only: bool = False,
+    tz: str | None = None,
+) -> RankingsOut:
+    """The leaderboards: top shows, films, studios, networks, decades, sources.
+
+    Nine lists, and the clearest candidate for its own endpoint of anything
+    added here: they share a window with `GET /api/stats` and nothing else, a
+    page can draw its tiles before they arrive, and `limit` is a knob only this
+    block has any use for.
+    """
+    filters = _stats_filters(filters, anime_only)
+    zone, resolved_name = _zone_for(user, tz)
+    window = await _resolve_range(
+        db, user, zone, resolved_name, preset, since, until, days, "day"
+    )
+    return await _rankings(db, user, window, filters, limit)
 
 
 @router.get("/summary")

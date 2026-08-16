@@ -2,6 +2,7 @@ import type {
   AppSettings,
   AppVersion,
   AuthStatus,
+  BrowsePlaces,
   ContinueWatchingItem,
   HistoryPage,
   Library,
@@ -11,6 +12,7 @@ import type {
   Paginated,
   PlexAuthPoll,
   PlexAuthStart,
+  Seasonality,
   Server,
   Stats,
   StatsGranularity,
@@ -38,13 +40,24 @@ export class ApiError extends Error {
   }
 }
 
-type Query = Record<string, string | number | boolean | null | undefined>
+type QueryValue = string | number | boolean | null | undefined
+type Query = Record<string, QueryValue | readonly QueryValue[]>
 
 function withQuery(path: string, query?: Query): string {
   if (!query) return path
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== null && value !== '') {
+    // A list is one occurrence per element — `?genre=Crime&genre=Drama` — which
+    // is what the API's repeatable facets read. Stringified, it would arrive as
+    // the single value "Crime,Drama" and match nothing; and a separator cannot
+    // be chosen anyway, since studio names contain commas.
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (entry !== undefined && entry !== null && entry !== '') {
+          params.append(key, String(entry))
+        }
+      }
+    } else if (value !== undefined && value !== null && value !== '') {
       params.append(key, String(value))
     }
   }
@@ -112,19 +125,36 @@ const del = <T,>(path: string, query?: Query) =>
 
 export interface MediaQuery extends Query {
   q?: string
+  /** `all` widens the search to overviews and your own notes. Default `title`. */
+  q_scope?: string
   media_type?: string
   anime?: string
   /** Defaults to `exclude` on the server: home videos are not titles. */
   personal?: string
   watch_status?: string
-  genre?: string
-  /** The facets a detail page links out on, each an exact match. */
-  content_rating?: string
-  studio?: string
+  /**
+   * The repeatable facets: one parameter per value, plus a parallel `_not` for
+   * exclusion. `genre_mode=all` is the only AND on offer — a title carries
+   * several genres, but one studio, one certificate and one network.
+   */
+  genre?: string[]
+  genre_not?: string[]
+  genre_mode?: string
+  content_rating?: string[]
+  content_rating_not?: string[]
+  studio?: string[]
+  studio_not?: string[]
+  network?: string[]
+  network_not?: string[]
+  anime_format?: string[]
+  anime_format_not?: string[]
+  /** Where the file lives, by id — see `api.media.places()` for the pickers. */
+  library_id?: string[]
+  server_id?: string[]
+  /** Credits, by name. Exact matches, like the facets a detail page links on. */
   director?: string
-  network?: string
+  actor?: string
   release_status?: string
-  anime_format?: string
   year?: number
   unwatched?: boolean
   favorites?: boolean
@@ -184,6 +214,18 @@ export interface StatsQuery extends Query {
   tz?: string
 }
 
+/**
+ * `/api/stats/seasonality` — all of history, so there is no window to name.
+ *
+ * The scope and the zone still apply, and they are the only two things that
+ * can change the answer, which is why this is a separate query key from the
+ * windowed one rather than a flag on it.
+ */
+export interface SeasonalityQuery extends Query {
+  anime_only?: boolean
+  tz?: string
+}
+
 export const api = {
   auth: {
     status: () => get<AuthStatus>('/api/auth/status'),
@@ -205,6 +247,9 @@ export const api = {
     genres: (anime?: string) => get<string[]>('/api/media/genres', { anime }),
     contentRatings: (anime?: string) =>
       get<string[]>('/api/media/content-ratings', { anime }),
+    // The servers and libraries this account can see, for the two "where does
+    // it live" filters. Scoped on the server through `UserServerAccess`.
+    places: () => get<BrowsePlaces>('/api/media/places'),
     detail: (id: number) => get<MediaDetail>(`/api/media/${id}`),
     credits: (id: number) => get<MediaCredits>(`/api/media/${id}/credits`),
     children: (id: number, season?: number) =>
@@ -277,6 +322,16 @@ export const api = {
      * call would only make it spell out a default.
      */
     query: (params: StatsQuery) => get<Stats>('/api/stats', { ...params }),
+    /**
+     * The month-of-year profile over all history.
+     *
+     * A second request rather than a block on the first: it walks every play
+     * the user has ever recorded, and the stats page should not pay for that
+     * every time a filter chip moves. It therefore also gets its own loading,
+     * error and empty states on the page.
+     */
+    seasonality: (params: SeasonalityQuery = {}) =>
+      get<Seasonality>('/api/stats/seasonality', { ...params }),
     summary: () =>
       get<{
         library_movies: number

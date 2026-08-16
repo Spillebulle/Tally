@@ -4,7 +4,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { MediaCard, PaginatedWatchlist } from '@/lib/types'
-import { useBrowseFilters, WATCHLIST_SORTS } from '@/lib/browse-filters'
+import { namesOf, useBrowseFilters, WATCHLIST_SORTS } from '@/lib/browse-filters'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { Artwork, Poster, PosterSkeleton } from '@/components/Poster'
@@ -73,6 +73,8 @@ export function Watchlist() {
     queryFn: () => api.media.contentRatings('all'),
   })
 
+  const places = useQuery({ queryKey: ['places'], queryFn: () => api.media.places() })
+
   const remove = useMutation({
     mutationFn: (mediaItemId: number) => api.watchlist.remove(mediaItemId),
     // Removal also has to reach Plex, so the round trip is long enough to feel
@@ -104,6 +106,8 @@ export function Watchlist() {
   })
 
   const entries = data?.entries ?? []
+  // Several genres read as "in Crime, Drama" — the same phrasing one does.
+  const genre = namesOf(filters.values.genre)
   const total = data?.total ?? 0
   const pageCount = Math.ceil(total / PAGE_SIZE)
   const syncedCount = entries.filter((entry) => entry.synced_with_plex).length
@@ -119,7 +123,7 @@ export function Watchlist() {
           isLoading
             ? 'Loading…'
             : `${total} ${total === 1 ? 'title' : 'titles'}${
-                filters.values.genre ? ` in ${filters.values.genre}` : ''
+                genre ? ` in ${genre}` : ''
               } · ${syncedCount} of ${entries.length} shown in sync with Plex`
         }
         actions={
@@ -147,8 +151,12 @@ export function Watchlist() {
 
       <BrowseFilters
         state={filters}
-        genres={genres.data ?? []}
-        contentRatings={contentRatings.data ?? []}
+        lists={{
+          genres: genres.data ?? [],
+          contentRatings: contentRatings.data ?? [],
+          libraries: places.data?.libraries ?? [],
+          servers: places.data?.servers ?? [],
+        }}
         busy={isFetching && !isLoading}
       />
 

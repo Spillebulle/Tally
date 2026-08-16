@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -45,8 +45,14 @@ from ..models import (
     utcnow,
 )
 from ..security import decrypt_secret, encrypt_secret
+from .credits import fetch_credits
 from .guids import extract_ids
-from .media_repo import ARTWORK_RETRY_INTERVAL, MediaRepository
+from .media_repo import (
+    ARTWORK_RETRY_INTERVAL,
+    METADATA_RESWEEP_MARK,
+    MediaRepository,
+)
+from .metadata import get_metadata_service
 from .metadata.anime import library_looks_like_anime
 from .plex_server import (
     TYPE_EPISODE,
@@ -70,6 +76,11 @@ COMPLETION_THRESHOLD = 0.9
 # than turning a single one into an hour of TMDB traffic.
 METADATA_BACKFILL_BATCH = 100
 
+# How many titles one run fetches cast and crew for. Same shape and same reason
+# as the constant above — one TMDB call each, behind the same rate limiter —
+# and deliberately the same number, because a run does both.
+CREDITS_BACKFILL_BATCH = 100
+
 
 class SyncCancelled(Exception):
     """Raised at a checkpoint when the user asked for the run to stop."""
@@ -89,6 +100,7 @@ class SyncStats:
     watchlist_removed_local: int = 0
     watchlist_removed_remote: int = 0
     metadata_backfilled: int = 0
+    credits_fetched: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -105,6 +117,7 @@ class SyncStats:
             "watchlist_removed_local": self.watchlist_removed_local,
             "watchlist_removed_remote": self.watchlist_removed_remote,
             "metadata_backfilled": self.metadata_backfilled,
+            "credits_fetched": self.credits_fetched,
             "errors": self.errors[:50],
         }
 
@@ -691,12 +704,29 @@ class SyncService:
             )
             .limit(1)
         )
+        # Which library the play came from. The mapping is the only thing that
+        # knows — a history row does not say — and it is resolved here, at the
+        # one moment an event is written, rather than joined at read time:
+        # WatchEvent -> MediaItem -> PlexMapping is one-to-many, so an item held
+        # on two servers multiplies every play by two in a per-library total.
+        #
+        # None is the honest answer for a play whose item Plex no longer holds,
+        # and for every row imported before this column existed. Those stay
+        # NULL; there is no backfill, because the mapping a 2019 play went
+        # through may not exist any more.
+        library_id = (
+            await repo.library_id_for(server.id, rating_key) if rating_key else None
+        )
+
         if (event := adopted.scalar_one_or_none()) is not None:
             event.dedupe_key = dedupe_key
             event.source = WatchSource.PLEX_HISTORY
             event.watched_at = viewed_at
             event.duration_ms = event.duration_ms or _duration_ms(entry.get("duration"))
             event.server_id = event.server_id or server.id
+            # A webhook names no library, so adopting its row is the only chance
+            # that play has to gain one.
+            event.library_id = event.library_id or library_id
             await self.db.flush()
             return False
 
@@ -710,6 +740,7 @@ class SyncService:
                 completed=True,
                 duration_ms=_duration_ms(entry.get("duration")),
                 server_id=server.id,
+                library_id=library_id,
                 device=entry.get("deviceID") and str(entry.get("deviceID")) or None,
             )
         )
@@ -1309,6 +1340,15 @@ class SyncService:
         Items are chosen oldest-attempt-first so the queue rotates instead of
         retrying the same hopeless titles every time.
 
+        There is a second, narrower arm. A row that *does* have an id is out of
+        scope for the first — nothing re-searches a row to take an id away — but
+        it can still be missing everything the sink learned to keep later:
+        language, origin country, and a studio or network the sticky sink left
+        blank. `db._resweep_incomplete_metadata` marks those at startup by
+        moving `metadata_updated_at` back to `METADATA_RESWEEP_MARK`, and this
+        is what picks them up. It is the same bounded queue on purpose: the
+        alternative was re-enriching a whole catalogue in one burst.
+
         This only ever *adds* what it learns. Collapsing the duplicate pair it
         exposes is `merge_duplicates`' job — that is the pass allowed to delete,
         and it stays the only one — but it is invoked from here, because this is
@@ -1320,31 +1360,56 @@ class SyncService:
         self-hosted box may be the next upgrade, weeks away.
         """
         cutoff = utcnow() - ARTWORK_RETRY_INTERVAL
+        # No identity from any provider — `plex_guid` is not one, which is the
+        # whole reason these rows exist.
+        no_identity = and_(
+            MediaItem.tmdb_id.is_(None),
+            MediaItem.tvdb_id.is_(None),
+            MediaItem.imdb_id.is_(None),
+            MediaItem.mal_id.is_(None),
+            MediaItem.anilist_id.is_(None),
+        )
+        never_identified = and_(
+            no_identity,
+            MediaItem.poster_url.is_(None),
+            MediaItem.discover_thumb_path.is_(None),
+            or_(
+                MediaItem.metadata_updated_at.is_(None),
+                MediaItem.metadata_updated_at < cutoff,
+            ),
+        )
+        # The second arm: rows `db._resweep_incomplete_metadata` marked as
+        # holding an answer older than the columns Tally now stores. It selects
+        # on the mark and on nothing else, which is what makes it terminate —
+        # one pass through the sink stamps `utcnow()` and the row is out for
+        # good. Selecting on the missing columns themselves would not: TMDB
+        # lists no `origin_country` and no `networks` for a film, so every movie
+        # in the library would come back here every week, forever.
+        resweep = and_(
+            MediaItem.metadata_updated_at.is_not(None),
+            MediaItem.metadata_updated_at <= METADATA_RESWEEP_MARK,
+        )
         result = await self.db.execute(
             select(MediaItem)
             .where(
                 MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
-                # No identity from any provider — `plex_guid` is not one, which
-                # is the whole reason these rows exist.
-                MediaItem.tmdb_id.is_(None),
-                MediaItem.tvdb_id.is_(None),
-                MediaItem.imdb_id.is_(None),
-                MediaItem.mal_id.is_(None),
-                MediaItem.anilist_id.is_(None),
-                MediaItem.poster_url.is_(None),
-                MediaItem.discover_thumb_path.is_(None),
                 # A home video has no answer waiting at any provider, so it
                 # would sit in this queue forever, costing a call a week and a
                 # slot in a batch that is bounded on purpose. `enrich_existing`
                 # is what marks the ones already stored, so each costs exactly
                 # one more pass through here and then drops out.
                 MediaItem.is_personal_media.is_(False),
-                or_(
-                    MediaItem.metadata_updated_at.is_(None),
-                    MediaItem.metadata_updated_at < cutoff,
-                ),
+                or_(never_identified, resweep),
             )
-            .order_by(MediaItem.metadata_updated_at.asc().nulls_first(), MediaItem.id)
+            # Artwork first. A blank tile is something a user sees and reports;
+            # a missing `original_language` is not, and a resweep queued at
+            # upgrade time is large enough to bury the handful of rows that have
+            # no identity at all if the two shared one ordering.
+            .order_by(
+                case((no_identity, 0), else_=1),
+                MediaItem.metadata_updated_at.asc().nulls_first(),
+                MediaItem.id,
+            )
             .limit(METADATA_BACKFILL_BATCH)
         )
         items = list(result.scalars())
@@ -1356,7 +1421,11 @@ class SyncService:
         await self._progress(0, total=len(items))
         for index, item in enumerate(items, start=1):
             await self._checkpoint()
-            if await repo.enrich_existing(item):
+            # Counted as a win only when the row *gained* artwork. A resweep row
+            # usually has a poster already, and letting those count would both
+            # inflate the number and call the duplicate merge on every sync.
+            had_artwork = bool(item.poster_url or item.discover_thumb_path)
+            if await repo.enrich_existing(item) and not had_artwork:
                 identified += 1
             await self._progress(index)
         await self.db.commit()
@@ -1371,6 +1440,94 @@ class SyncService:
         if identified:
             await self._merge_duplicates_now()
         return identified
+
+    async def backfill_credits(self, stats: SyncStats) -> int:
+        """Fetch cast and crew for titles nobody has opened the detail page of.
+
+        `services/credits.py` argues against fetching credits during a library
+        scan, and that argument still holds — a call per row, inline, against a
+        rate-limited provider, over tens of thousands of rows. This is not that.
+        It is a separate phase that runs *after* the scan, so scan progress stays
+        a count of the library rather than of provider calls, and it is capped at
+        `CREDITS_BACKFILL_BATCH` per run like the metadata backfill beside it.
+
+        The ordering is what makes the cap tolerable. Actor and director stats
+        are about what you have *watched*, so watched titles come first, then
+        what you have watchlisted, then the rest of the library. The few thousand
+        rows those stats actually read are covered in the first few syncs and the
+        long tail drains behind them, instead of the queue starting at whichever
+        title happens to have the lowest id.
+
+        Only rows with a `tmdb_id` are selected, and that is load-bearing rather
+        than an optimisation: `credits.fetch_credits` deliberately does *not* stamp a row
+        it cannot ask about, so an id-less row would be picked, cost nothing,
+        stamp nothing, and be picked again on every future run — a permanent
+        hundred-row blockage in front of the titles that can be answered.
+        """
+        service = get_metadata_service()
+        if not service.tmdb.enabled:
+            # Nothing to ask. Every row would come back unstamped (by design),
+            # so this would be a hundred pointless selects a sync, forever.
+            return 0
+
+        # "Relevance" for a global row, since credits are stored per item and
+        # not per user: watched by anybody here, then watchlisted by anybody,
+        # then everything else. A show's own state carries its watched-episode
+        # count (see `recompute_show_state`), so a series that is being watched
+        # an episode at a time sorts with the films.
+        watched = exists(
+            select(UserMediaState.id).where(
+                UserMediaState.media_item_id == MediaItem.id,
+                UserMediaState.view_count > 0,
+            )
+        )
+        watchlisted = exists(
+            select(WatchlistEntry.id).where(
+                WatchlistEntry.media_item_id == MediaItem.id,
+                WatchlistEntry.active.is_(True),
+            )
+        )
+        result = await self.db.execute(
+            select(MediaItem)
+            .where(
+                # Same scope as enrichment, and for the same reason: a season or
+                # an episode is reached through its show.
+                MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
+                MediaItem.tmdb_id.is_not(None),
+                # "Nobody has asked yet" — the one state this pass exists to
+                # clear. `credits_updated_at` is set either way afterwards, so a
+                # title TMDB has no cast for leaves the queue too.
+                MediaItem.credits_updated_at.is_(None),
+            )
+            .order_by(
+                case((watched, 0), (watchlisted, 1), else_=2),
+                MediaItem.id,
+            )
+            .limit(CREDITS_BACKFILL_BATCH)
+        )
+        items = list(result.scalars())
+        if not items:
+            return 0
+
+        fetched = 0
+        await self._progress(0, total=len(items))
+        for index, item in enumerate(items, start=1):
+            await self._checkpoint()
+            if service.tmdb.paused:
+                # The provider's circuit breaker is open. Stopping matters more
+                # here than on the detail page: `fetch_credits` stamps a row
+                # whose answer was "nothing", and a refused call looks exactly
+                # like one — so carrying on would mark a hundred titles as
+                # having no cast and never ask about them again.
+                log.info("Stopping the credits backfill: TMDB is in cooldown")
+                break
+            if await fetch_credits(self.db, item, metadata_service=service):
+                fetched += 1
+            await self._progress(index)
+
+        log.info("Fetched credits for %s of %s title(s)", fetched, len(items))
+        stats.credits_fetched = fetched
+        return fetched
 
     async def _merge_duplicates_now(self) -> None:
         """Collapse pairs the backfill has just made visible.
@@ -1468,6 +1625,13 @@ class SyncService:
             await self._checkpoint()
             await self._set_phase("Filling in missing artwork")
             await self.backfill_missing_metadata(stats)
+
+            await self._checkpoint()
+            # After the scan, never inside it: the scan's counter is a count of
+            # library items, and a credits call per row would both slow it down
+            # and make its progress mean something else.
+            await self._set_phase("Fetching cast and crew")
+            await self.backfill_credits(stats)
 
             await self._set_phase("Checking what is playing now")
             await self.poll_sessions(user)

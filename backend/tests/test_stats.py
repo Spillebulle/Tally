@@ -20,11 +20,20 @@ from sqlalchemy import select
 from app.models import (
     MediaItem,
     MediaType,
+    PlexMapping,
+    PlexServer,
     User,
     UserMediaState,
     WatchEvent,
+    WatchlistEntry,
     WatchSource,
     WatchStatus,
+)
+from app.routers.stats import (
+    ABANDONED_AFTER_DAYS,
+    ABANDONED_UNDER_PERCENT,
+    SESSION_GAP_MINUTES,
+    WATCHLIST_TAIL_DAYS,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -57,6 +66,15 @@ def _movie(title: str, **kwargs) -> MediaItem:
     )
 
 
+def _show(title: str, **kwargs) -> MediaItem:
+    return MediaItem(
+        guid_key=f"test:{uuid4()}",
+        media_type=MediaType.SHOW,
+        title=title,
+        **kwargs,
+    )
+
+
 def _episode(show: MediaItem, number: int, **kwargs) -> MediaItem:
     return MediaItem(
         guid_key=f"test:{uuid4()}",
@@ -75,12 +93,19 @@ async def _add(db, *rows):
     return rows
 
 
-async def _log(db, user: User, item: MediaItem, when: datetime, **kwargs) -> WatchEvent:
+async def _log(
+    db,
+    user: User,
+    item: MediaItem,
+    when: datetime,
+    source: WatchSource = WatchSource.MANUAL,
+    **kwargs,
+) -> WatchEvent:
     event = WatchEvent(
         user_id=user.id,
         media_item_id=item.id,
         watched_at=when,
-        source=WatchSource.MANUAL,
+        source=source,
         dedupe_key=f"test:{uuid4()}",
         completed=True,
         **kwargs,
@@ -142,6 +167,70 @@ async def _seasonality(client, **params) -> dict:
     response = await client.get("/api/stats/seasonality", params=params)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+async def _block(client, path: str, **params) -> dict:
+    """One of the five split-out stats endpoints."""
+    response = await client.get(f"/api/stats/{path}", params=params)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _bucket_value(series: list[dict], label: str) -> float:
+    for point in series:
+        if point["label"] == label:
+            return point["value"]
+    raise AssertionError(f"{label} is not in {series}")
+
+
+def _row(rows: list[dict], label: str) -> dict:
+    for row in rows:
+        if row["label"] == label:
+            return row
+    raise AssertionError(f"{label} is not in {rows}")
+
+
+async def _plex_mapping(db, item: MediaItem, machine: str) -> PlexMapping:
+    """Put `item` on a Plex server, creating the server if it is new.
+
+    Coverage counts what is *owned*, so nothing reaches it without one of
+    these — and an item mapped on two servers is the case the correlated
+    EXISTS exists to get right.
+    """
+    server = (
+        await db.execute(
+            select(PlexServer).where(PlexServer.machine_identifier == machine)
+        )
+    ).scalar_one_or_none()
+    if server is None:
+        server = PlexServer(
+            machine_identifier=machine,
+            name=machine,
+            base_url=f"http://{machine}:32400",
+            access_token_encrypted="x",
+        )
+        db.add(server)
+        await db.commit()
+    mapping = PlexMapping(
+        media_item_id=item.id,
+        server_id=server.id,
+        rating_key=f"{item.id}-{machine}",
+    )
+    db.add(mapping)
+    await db.commit()
+    return mapping
+
+
+async def _watchlist(db, user: User, item: MediaItem, added_at: datetime, **kwargs):
+    entry = WatchlistEntry(
+        user_id=user.id,
+        media_item_id=item.id,
+        added_at=added_at,
+        **kwargs,
+    )
+    db.add(entry)
+    await db.commit()
+    return entry
 
 
 # --- the empty case -------------------------------------------------------
@@ -1486,3 +1575,810 @@ async def test_seasonality_takes_the_same_browse_filters(authed_client, db):
     rated = await _seasonality(authed_client, tz="UTC", min_rating=8)
     assert rated["plays"] == 1
     assert rated["minutes"] == 88
+
+
+# --- sittings and binges --------------------------------------------------
+#
+# The gap threshold is a judgement, so what is worth pinning is the behaviour
+# *at* it: either side of 90 minutes has to land on a different answer, or the
+# constant is decorative.
+
+
+async def _sessions(client, **params) -> dict:
+    return (await _stats(client, **params))["sessions"]
+
+
+async def test_a_gap_exactly_at_the_threshold_is_still_one_sitting(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Solaris", runtime_minutes=30))
+    start = _utc_at(1, 12)
+    await _log(db, user, item, start)
+    await _log(db, user, item, start + timedelta(minutes=SESSION_GAP_MINUTES))
+
+    sessions = await _sessions(authed_client, days=7, tz="UTC")
+    assert sessions["gap_minutes"] == SESSION_GAP_MINUTES
+    assert sessions["sessions"] == 1
+    assert sessions["plays"] == 2
+    assert sessions["biggest_binge"]["plays"] == 2
+    assert sessions["biggest_binge"]["minutes"] == 60
+
+
+async def test_a_gap_one_minute_past_the_threshold_splits_the_sitting(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Stalker", runtime_minutes=30))
+    start = _utc_at(1, 12)
+    await _log(db, user, item, start)
+    await _log(db, user, item, start + timedelta(minutes=SESSION_GAP_MINUTES + 1))
+
+    sessions = await _sessions(authed_client, days=7, tz="UTC")
+    assert sessions["sessions"] == 2
+    assert sessions["average_plays"] == 1.0
+    assert sessions["average_minutes"] == 30.0
+    assert sessions["biggest_binge"]["plays"] == 1
+    # Two one-play sittings, so the histogram's first bucket holds both.
+    assert _bucket_value(sessions["by_size"], "1") == 2
+    assert _bucket_value(sessions["by_size"], "6+") == 0
+
+
+async def test_a_binge_of_one_series_is_labelled_with_it(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("Twin Peaks"))
+    episodes = await _add(db, *(_episode(show, n) for n in range(1, 5)))
+    start = _utc_at(2, 6)
+    for offset, episode in enumerate(episodes):
+        await _log(db, user, episode, start + timedelta(minutes=45 * offset))
+    # An unrelated film later the same day, well past the gap.
+    (film,) = await _add(db, _movie("Dune", runtime_minutes=155))
+    await _log(db, user, film, start + timedelta(hours=8))
+
+    sessions = await _sessions(authed_client, days=7, tz="UTC")
+    assert sessions["sessions"] == 2
+    binge = sessions["biggest_binge"]
+    assert binge["plays"] == 4
+    assert binge["show_title"] == "Twin Peaks"
+    assert binge["day"] == start.date().isoformat()
+    assert _bucket_value(sessions["by_size"], "4") == 1
+    # The film is the longer sitting by minutes even though it is one play.
+    assert sessions["longest"]["title"] == "Dune"
+    assert sessions["longest"]["show_title"] is None
+
+
+async def test_a_mixed_sitting_is_named_by_nothing_in_particular(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("Cheers"))
+    (episode,) = await _add(db, _episode(show, 1))
+    (film,) = await _add(db, _movie("Airplane!", runtime_minutes=88))
+    start = _utc_at(1, 12)
+    await _log(db, user, episode, start)
+    await _log(db, user, film, start + timedelta(minutes=30))
+
+    binge = (await _sessions(authed_client, days=7, tz="UTC"))["biggest_binge"]
+    assert binge["plays"] == 2
+    assert binge["show_title"] is None
+    assert binge["title"] == "Episode 1"  # whatever started it
+
+
+async def test_sessions_are_shaped_and_empty_when_nothing_was_watched(authed_client):
+    sessions = await _sessions(authed_client, days=7, tz="UTC")
+    assert sessions["sessions"] == 0
+    assert sessions["plays"] == 0
+    assert sessions["average_plays"] == 0.0
+    assert sessions["average_minutes"] == 0.0
+    assert sessions["longest"] is None
+    assert sessions["biggest_binge"] is None
+    assert [b["label"] for b in sessions["by_size"]] == ["1", "2", "3", "4", "5", "6+"]
+    assert all(b["value"] == 0 for b in sessions["by_size"])
+
+
+async def test_sittings_are_per_user_and_narrow_with_the_filters(authed_client, db):
+    user = await _user(db)
+    other = await _second_user(db)
+    horror, comedy = await _add(
+        db,
+        _movie("The Thing", genres=["Horror"], runtime_minutes=109),
+        _movie("Airplane!", genres=["Comedy"], runtime_minutes=88),
+    )
+    start = _utc_at(1, 12)
+    await _log(db, user, horror, start)
+    await _log(db, user, comedy, start + timedelta(minutes=10))
+    await _log(db, other, horror, start + timedelta(minutes=20))
+
+    assert (await _sessions(authed_client, days=7, tz="UTC"))["plays"] == 2
+    # Narrowing to one genre splits the evening, because a sitting is a sitting
+    # *of the filtered set*.
+    narrowed = await _sessions(authed_client, days=7, tz="UTC", genre="Horror")
+    assert narrowed["plays"] == 1
+    assert narrowed["sessions"] == 1
+
+
+# --- show completion and drop-off -----------------------------------------
+#
+# The whole block turns on one refusal: a show whose episode count Plex never
+# gave us must not be reported at 0% or 100%. Both would be a plausible number
+# in the place where "we do not know" belongs, and 100% is the one the obvious
+# fallback — count the episode rows Tally holds — produces for every show
+# reached only through the history import.
+
+
+async def test_completion_is_a_percentage_of_plexs_own_leaf_count(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("The Wire", leaf_count=60, year=2002))
+    episodes = await _add(db, *(_episode(show, n) for n in range(1, 7)))
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(3, 12))
+    # A rewatch is not another 1.7%: distinct episodes, not plays.
+    await _log(db, user, episodes[0], _utc_at(2, 12))
+
+    shows = await _block(authed_client, "shows")
+    assert shows["scope"] == "all_time"
+    assert shows["shows_started"] == 1
+    assert shows["shows_in_progress"] == 1
+    assert shows["shows_unknown_total"] == 0
+    row = shows["in_progress"][0]
+    assert row["title"] == "The Wire"
+    assert row["episodes_watched"] == 6
+    assert row["episodes_total"] == 60
+    assert row["percent_complete"] == 10.0
+    assert row["total_is_stale"] is False
+    assert row["abandoned"] is False
+
+
+async def test_a_show_with_no_leaf_count_reports_unknown_not_zero_or_a_hundred(
+    authed_client, db
+):
+    """The case the whole block is built around.
+
+    A show reached only through the history import has exactly the episodes
+    that were played as rows and no `leaf_count` at all, so counting local rows
+    would call it finished and dividing by nothing would call it 0%.
+    """
+    user = await _user(db)
+    (show,) = await _add(db, _show("Unknown Series", leaf_count=None))
+    (episode,) = await _add(db, _episode(show, 1))
+    await _log(db, user, episode, _utc_at(3, 12))
+
+    shows = await _block(authed_client, "shows")
+    assert shows["shows_started"] == 1
+    assert shows["shows_unknown_total"] == 1
+    assert shows["shows_completed"] == 0
+    row = shows["in_progress"][0]
+    assert row["episodes_total"] is None
+    assert row["percent_complete"] is None
+    # And with no percentage there is nothing to judge it abandoned on, however
+    # long ago it was.
+    assert row["abandoned"] is False
+
+
+async def test_a_leaf_count_smaller_than_what_was_watched_is_not_a_total(
+    authed_client, db
+):
+    user = await _user(db)
+    (show,) = await _add(db, _show("Rescanned", leaf_count=2))
+    episodes = await _add(db, *(_episode(show, n) for n in range(1, 5)))
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(3, 12))
+
+    shows = await _block(authed_client, "shows")
+    row = shows["in_progress"][0]
+    assert row["episodes_watched"] == 4
+    assert row["episodes_total"] == 2  # what Plex said, reported as-is
+    assert row["total_is_stale"] is True
+    # Not 200%, and not a clamped 100% that would file it under "completed".
+    assert row["percent_complete"] is None
+    assert shows["shows_unknown_total"] == 1
+    assert shows["shows_completed"] == 0
+
+
+async def test_a_finished_show_is_completed_and_not_listed(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("Fleabag", leaf_count=2))
+    episodes = await _add(db, _episode(show, 1), _episode(show, 2))
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(3, 12))
+
+    shows = await _block(authed_client, "shows")
+    assert shows["shows_completed"] == 1
+    assert shows["shows_in_progress"] == 0
+    assert shows["in_progress"] == []
+    assert shows["abandoned"] == []
+
+
+async def test_a_dropped_show_is_abandoned_whatever_the_percentage(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("Lost", leaf_count=10))
+    episodes = await _add(db, *(_episode(show, n) for n in range(1, 10)))
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(1, 12))  # yesterday: not stale
+    db.add(
+        UserMediaState(
+            user_id=user.id, media_item_id=show.id, status=WatchStatus.DROPPED
+        )
+    )
+    await db.commit()
+
+    shows = await _block(authed_client, "shows")
+    assert shows["shows_abandoned"] == 1
+    row = shows["abandoned"][0]
+    assert row["status"] == "dropped"
+    assert row["percent_complete"] == 90.0  # above the inferred threshold
+    assert row["abandoned"] is True
+
+
+async def test_a_show_left_alone_long_enough_and_barely_started_is_abandoned(
+    authed_client, db
+):
+    user = await _user(db)
+    stale, recent = await _add(
+        db, _show("Abandoned", leaf_count=20), _show("Paused", leaf_count=20)
+    )
+    (stale_episode,) = await _add(db, _episode(stale, 1))
+    (recent_episode,) = await _add(db, _episode(recent, 1))
+    await _log(db, user, stale_episode, _utc_at(ABANDONED_AFTER_DAYS + 10, 12))
+    await _log(db, user, recent_episode, _utc_at(1, 12))
+
+    shows = await _block(authed_client, "shows")
+    assert shows["abandoned_under_percent"] == ABANDONED_UNDER_PERCENT
+    assert shows["abandoned_after_days"] == ABANDONED_AFTER_DAYS
+    assert [row["title"] for row in shows["abandoned"]] == ["Abandoned"]
+    assert [row["title"] for row in shows["in_progress"]] == ["Paused"]
+
+
+async def test_the_drop_off_point_is_the_last_episode_watched(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("Deadwood", leaf_count=36))
+    first, second = await _add(db, _episode(show, 1), _episode(show, 2))
+    await _log(db, user, second, _utc_at(5, 12))
+    await _log(db, user, first, _utc_at(4, 12))  # watched out of order, later
+
+    row = (await _block(authed_client, "shows"))["in_progress"][0]
+    assert row["last_season"] == 1
+    assert row["last_episode"] == 1
+    assert row["last_episode_title"] == "Episode 1"
+
+
+async def test_show_completion_is_empty_shaped_and_per_user(authed_client, db):
+    empty = await _block(authed_client, "shows")
+    assert empty["shows_started"] == 0
+    assert empty["shows_completed"] == 0
+    assert empty["in_progress"] == []
+    assert empty["abandoned"] == []
+
+    other = await _second_user(db)
+    (show,) = await _add(db, _show("Not Yours", leaf_count=10))
+    (episode,) = await _add(db, _episode(show, 1))
+    await _log(db, other, episode, _utc_at(1, 12))
+
+    assert (await _block(authed_client, "shows"))["shows_started"] == 0
+
+
+async def test_show_completion_takes_the_browse_filters(authed_client, db):
+    user = await _user(db)
+    anime, western = await _add(
+        db,
+        _show("Cowboy Bebop", leaf_count=26, is_anime=True),
+        _show("Cheers", leaf_count=270),
+    )
+    anime_episode, western_episode = await _add(
+        db, _episode(anime, 1, is_anime=True), _episode(western, 1)
+    )
+    await _log(db, user, anime_episode, _utc_at(1, 12))
+    await _log(db, user, western_episode, _utc_at(1, 12))
+
+    assert (await _block(authed_client, "shows"))["shows_started"] == 2
+    narrowed = await _block(authed_client, "shows", anime="only")
+    assert [row["title"] for row in narrowed["in_progress"]] == ["Cowboy Bebop"]
+
+
+# --- watchlist conversion -------------------------------------------------
+
+
+async def test_a_play_before_the_watchlist_add_is_not_a_conversion(authed_client, db):
+    """Watchlisting something you have already seen is not the watchlist
+    working; it is a note to rewatch. `converted` needs a play *after* the add."""
+    user = await _user(db)
+    old, new = await _add(db, _movie("Seen Already"), _movie("Watched After"))
+    await _log(db, user, old, _utc_at(30, 12))
+    await _watchlist(db, user, old, _utc_at(20, 12))
+    await _watchlist(db, user, new, _utc_at(20, 12))
+    await _log(db, user, new, _utc_at(15, 12))
+
+    stats = await _block(authed_client, "watchlist", days=60, tz="UTC")
+    assert stats["added"] == 2
+    assert stats["converted"] == 1
+    assert stats["conversion_rate"] == 0.5
+    assert stats["median_days_to_watch"] == 5.0
+    assert stats["still_waiting"] == 1
+    assert [row["title"] for row in stats["waiting"]] == ["Seen Already"]
+
+
+async def test_a_watchlisted_show_converts_on_an_episode_play(authed_client, db):
+    """A show's history is episode plays; nothing is ever recorded against the
+    show row, so matching only on the entry's own item would convert nothing."""
+    user = await _user(db)
+    (show,) = await _add(db, _show("Severance"))
+    (episode,) = await _add(db, _episode(show, 1))
+    await _watchlist(db, user, show, _utc_at(20, 12))
+    await _log(db, user, episode, _utc_at(10, 12))
+
+    stats = await _block(authed_client, "watchlist", days=60, tz="UTC")
+    assert stats["added"] == 1
+    assert stats["converted"] == 1
+    assert stats["median_days_to_watch"] == 10.0
+    assert stats["still_waiting"] == 0
+
+
+async def test_a_tombstoned_entry_never_played_is_churn(authed_client, db):
+    """`active=False` with `removed_at` is a tombstone, not a delete — which is
+    the only reason this question has an answer at all."""
+    user = await _user(db)
+    churned, tidied = await _add(db, _movie("Gave Up On"), _movie("Already Seen"))
+    await _watchlist(
+        db, user, churned, _utc_at(20, 12), active=False, removed_at=_utc_at(5, 12)
+    )
+    await _log(db, user, tidied, _utc_at(40, 12))  # a play that predates the add
+    await _watchlist(
+        db, user, tidied, _utc_at(20, 12), active=False, removed_at=_utc_at(5, 12)
+    )
+
+    stats = await _block(authed_client, "watchlist", days=60, tz="UTC")
+    assert stats["removed"] == 2
+    # Only the one that was never played at all. The other was tidied up after
+    # a viewing, which is not giving up on it.
+    assert stats["churned"] == 1
+    assert stats["still_waiting"] == 0
+    assert stats["waiting"] == []
+
+
+async def test_the_watchlist_tail_is_what_has_sat_there_longest(authed_client, db):
+    user = await _user(db)
+    old, fresh = await _add(db, _movie("Ageing"), _movie("Fresh"))
+    await _watchlist(db, user, old, _utc_at(WATCHLIST_TAIL_DAYS + 5, 12))
+    await _watchlist(db, user, fresh, _utc_at(2, 12))
+
+    stats = await _block(authed_client, "watchlist", preset="all", tz="UTC")
+    assert stats["tail_days"] == WATCHLIST_TAIL_DAYS
+    assert stats["still_waiting"] == 2
+    assert stats["waiting_past_tail"] == 1
+    # Oldest first, and the wait is in whole days — floor, so the assertion is
+    # a bound rather than an exact figure that depends on the hour of the run.
+    assert [row["title"] for row in stats["waiting"]] == ["Ageing", "Fresh"]
+    assert stats["waiting"][0]["days_waiting"] >= WATCHLIST_TAIL_DAYS
+
+
+async def test_preset_all_reaches_the_first_watchlist_add_not_the_first_play(
+    authed_client, db
+):
+    """A user who watchlists and never watches has no first play to reach back
+    to, and would otherwise see an empty window over their own list."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Never Played"))
+    await _watchlist(db, user, item, _utc_at(400, 12))
+
+    stats = await _block(authed_client, "watchlist", preset="all", tz="UTC")
+    assert stats["added"] == 1
+    assert stats["still_waiting"] == 1
+
+
+async def test_the_window_bounds_the_add_not_the_play(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Old Add"))
+    await _watchlist(db, user, item, _utc_at(40, 12))
+    await _log(db, user, item, _utc_at(2, 12))
+
+    assert (await _block(authed_client, "watchlist", days=7, tz="UTC"))["added"] == 0
+    inside = await _block(authed_client, "watchlist", days=60, tz="UTC")
+    assert inside["added"] == 1
+    assert inside["converted"] == 1
+
+
+async def test_watchlist_conversion_is_empty_shaped_and_per_user(authed_client, db):
+    empty = await _block(authed_client, "watchlist", days=30, tz="UTC")
+    assert empty["added"] == 0
+    assert empty["converted"] == 0
+    assert empty["conversion_rate"] == 0.0
+    assert empty["median_days_to_watch"] is None
+    assert empty["churned"] == 0
+    assert empty["waiting"] == []
+
+    other = await _second_user(db)
+    (item,) = await _add(db, _movie("Theirs"))
+    await _watchlist(db, other, item, _utc_at(5, 12))
+    assert (await _block(authed_client, "watchlist", days=30, tz="UTC"))["added"] == 0
+
+
+async def test_watchlist_conversion_takes_the_browse_filters(authed_client, db):
+    user = await _user(db)
+    horror, comedy = await _add(
+        db, _movie("The Thing", genres=["Horror"]), _movie("Airplane!", genres=["Comedy"])
+    )
+    await _watchlist(db, user, horror, _utc_at(10, 12))
+    await _watchlist(db, user, comedy, _utc_at(10, 12))
+
+    assert (await _block(authed_client, "watchlist", days=30, tz="UTC"))["added"] == 2
+    narrowed = await _block(authed_client, "watchlist", days=30, tz="UTC", genre="Horror")
+    assert narrowed["added"] == 1
+    assert [row["title"] for row in narrowed["waiting"]] == ["The Thing"]
+
+
+# --- library coverage -----------------------------------------------------
+
+
+async def test_coverage_counts_an_item_mapped_on_two_servers_once(authed_client, db):
+    """The bug this codebase has already fixed twice, in a third place. A join
+    to `plex_mappings` doubles the row; a correlated EXISTS cannot."""
+    user = await _user(db)
+    both, one = await _add(db, _movie("Everywhere", year=1999), _movie("Here", year=1999))
+    await _plex_mapping(db, both, "server-a")
+    await _plex_mapping(db, both, "server-b")
+    await _plex_mapping(db, one, "server-a")
+    await _log(db, user, both, _utc_at(3, 12))
+
+    coverage = await _block(authed_client, "coverage")
+    assert coverage["owned"] == 2
+    assert coverage["watched"] == 1
+    assert coverage["unwatched"] == 1
+    assert coverage["percent"] == 0.5
+    assert _row(coverage["by_decade"], "1990s")["owned"] == 2
+
+
+async def test_only_what_is_on_plex_is_owned(authed_client, db):
+    """A watchlist-only title has no `PlexMapping` and is not on the shelf."""
+    owned, _watchlist_only = await _add(
+        db, _movie("On The Shelf"), _movie("Watchlist Only")
+    )
+    await _plex_mapping(db, owned, "server-a")
+
+    coverage = await _block(authed_client, "coverage")
+    assert coverage["owned"] == 1
+    assert [row["label"] for row in coverage["by_type"]] == ["Movies"]
+
+
+async def test_a_show_counts_as_watched_on_any_episode_play(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("The Wire", year=2002, leaf_count=60))
+    (episode,) = await _add(db, _episode(show, 1))
+    await _plex_mapping(db, show, "server-a")
+    await _log(db, user, episode, _utc_at(3, 12))
+
+    coverage = await _block(authed_client, "coverage")
+    # The episode is not a title on the shelf; the show is, and it is watched.
+    assert coverage["owned"] == 1
+    assert coverage["watched"] == 1
+    assert _row(coverage["by_type"], "Shows")["watched"] == 1
+
+
+async def test_coverage_leaves_home_videos_out_unless_asked(authed_client, db):
+    """The one stats block where `personal` keeps its shared default. This is
+    an inventory of the shelf, and a phone recording is not a film you have
+    failed to get round to — the same judgement `/api/stats/summary` makes."""
+    user = await _user(db)
+    film, home = await _add(
+        db, _movie("Dune", year=2021), _movie("IMG_4821", is_personal_media=True)
+    )
+    await _plex_mapping(db, film, "server-a")
+    await _plex_mapping(db, home, "server-a")
+    await _log(db, user, home, _utc_at(3, 12))
+
+    default = await _block(authed_client, "coverage")
+    assert default["includes_personal"] is False
+    assert default["owned"] == 1
+    assert default["watched"] == 0
+
+    everything = await _block(authed_client, "coverage", personal="all")
+    assert everything["includes_personal"] is True
+    assert everything["owned"] == 2
+    assert everything["watched"] == 1
+
+    # And the watch numbers still count them, which is the whole distinction.
+    assert (await _stats(authed_client, days=7, tz="UTC"))["watch_events"] == 1
+
+
+async def test_coverage_slices_by_genre_and_decade(authed_client, db):
+    user = await _user(db)
+    seen, unseen, old = await _add(
+        db,
+        _movie("The Thing", genres=["Horror", "Sci-Fi"], year=1982),
+        _movie("The Fly", genres=["Horror"], year=1986),
+        _movie("Nosferatu", genres=["Horror"], year=1922),
+    )
+    for item in (seen, unseen, old):
+        await _plex_mapping(db, item, "server-a")
+    await _log(db, user, seen, _utc_at(3, 12))
+
+    coverage = await _block(authed_client, "coverage")
+    horror = _row(coverage["by_genre"], "Horror")
+    assert (horror["owned"], horror["watched"], horror["percent"]) == (3, 1, 0.3333)
+    assert _row(coverage["by_genre"], "Sci-Fi")["percent"] == 1.0
+    assert [row["label"] for row in coverage["by_decade"]] == ["1920s", "1980s"]
+    assert _row(coverage["by_decade"], "1980s")["owned"] == 2
+
+
+async def test_a_title_with_no_year_is_in_the_totals_but_in_no_decade(authed_client, db):
+    (item,) = await _add(db, _movie("Undated", year=None))
+    await _plex_mapping(db, item, "server-a")
+
+    coverage = await _block(authed_client, "coverage")
+    assert coverage["owned"] == 1
+    assert coverage["by_decade"] == []
+
+
+async def test_coverage_is_empty_shaped_and_per_user(authed_client, db):
+    empty = await _block(authed_client, "coverage")
+    assert empty["owned"] == 0
+    assert empty["watched"] == 0
+    assert empty["percent"] == 0.0
+    assert empty["by_genre"] == []
+
+    other = await _second_user(db)
+    (item,) = await _add(db, _movie("Theirs", year=2000))
+    await _plex_mapping(db, item, "server-a")
+    await _log(db, other, item, _utc_at(3, 12))
+
+    coverage = await _block(authed_client, "coverage")
+    assert coverage["owned"] == 1
+    assert coverage["watched"] == 0  # somebody else's play is not yours
+
+
+# --- rating depth ---------------------------------------------------------
+
+
+async def test_your_rating_is_compared_to_the_crowds(authed_client, db):
+    user = await _user(db)
+    generous, harsh, uncompared = await _add(
+        db,
+        _movie("Overlooked", community_rating=5.0, year=1999, runtime_minutes=95),
+        _movie("Overrated", community_rating=9.0, year=2009, runtime_minutes=160),
+        _movie("No Crowd", community_rating=None, year=1999, runtime_minutes=95),
+    )
+    for item in (generous, harsh, uncompared):
+        await _log(db, user, item, _utc_at(3, 12))
+    await _rate(db, user, generous, 9.0)
+    await _rate(db, user, harsh, 4.0)
+    await _rate(db, user, uncompared, 10.0)
+
+    depth = await _block(authed_client, "ratings", days=30, tz="UTC")
+    assert depth["rated"] == 3
+    assert depth["rated_with_community"] == 2
+    assert depth["average_rating"] == 7.67
+    assert depth["average_community"] == 7.0
+    # +4 and -5 over the two comparable titles; the third has no crowd score
+    # and is in none of these numbers, which is why the two counts are printed
+    # side by side rather than one being inferred from the other.
+    assert depth["average_difference"] == -0.5
+    assert depth["average_absolute_difference"] == 4.5
+    assert depth["kinder_than_crowd"] == 1
+    assert depth["harsher_than_crowd"] == 1
+
+
+async def test_the_most_contrarian_titles_come_back_in_both_directions(authed_client, db):
+    user = await _user(db)
+    higher, lower = await _add(
+        db,
+        _movie("You Love It", community_rating=4.0),
+        _movie("You Hate It", community_rating=9.0),
+    )
+    for item in (higher, lower):
+        await _log(db, user, item, _utc_at(3, 12))
+    await _rate(db, user, higher, 10.0)
+    await _rate(db, user, lower, 3.0)
+
+    depth = await _block(authed_client, "ratings", days=30, tz="UTC")
+    assert [row["title"] for row in depth["you_rate_higher"]] == [
+        "You Love It",
+        "You Hate It",
+    ]
+    assert depth["you_rate_higher"][0]["difference"] == 6.0
+    assert [row["title"] for row in depth["you_rate_lower"]] == [
+        "You Hate It",
+        "You Love It",
+    ]
+    assert depth["you_rate_lower"][0]["difference"] == -6.0
+    assert depth["agreement_within_one"] == 0.0
+    assert depth["average_absolute_difference"] == 6.0
+
+
+async def test_a_slice_averages_the_crowd_over_the_titles_that_have_one(
+    authed_client, db
+):
+    """Dividing the crowd's sum by the slice's count would drag every average
+    towards zero for each title that simply had nothing to compare."""
+    user = await _user(db)
+    rated, unrated = await _add(
+        db,
+        _movie("Compared", genres=["Horror"], community_rating=8.0, runtime_minutes=100),
+        _movie("Uncompared", genres=["Horror"], community_rating=None, runtime_minutes=100),
+    )
+    for item in (rated, unrated):
+        await _log(db, user, item, _utc_at(3, 12))
+    await _rate(db, user, rated, 6.0)
+    await _rate(db, user, unrated, 8.0)
+
+    horror = _row((await _block(authed_client, "ratings", days=30, tz="UTC"))["by_genre"], "Horror")
+    assert horror["count"] == 2
+    assert horror["average"] == 7.0
+    assert horror["community_average"] == 8.0
+
+
+async def test_ratings_break_down_by_decade_and_runtime(authed_client, db):
+    user = await _user(db)
+    short, long_one, unknown = await _add(
+        db,
+        _movie("Short", year=1985, runtime_minutes=88),
+        _movie("Long", year=1985, runtime_minutes=201),
+        _movie("Timeless", year=None, runtime_minutes=None),
+    )
+    for item in (short, long_one, unknown):
+        await _log(db, user, item, _utc_at(3, 12))
+    await _rate(db, user, short, 8.0)
+    await _rate(db, user, long_one, 6.0)
+    await _rate(db, user, unknown, 10.0)
+
+    depth = await _block(authed_client, "ratings", days=30, tz="UTC")
+    assert _row(depth["by_decade"], "1980s")["count"] == 2
+    assert _row(depth["by_decade"], "1980s")["average"] == 7.0
+    assert _row(depth["by_runtime"], "60-89 min")["average"] == 8.0
+    assert _row(depth["by_runtime"], "150 min and over")["average"] == 6.0
+    # A rated title with no runtime is in no bucket, and says so rather than
+    # vanishing.
+    assert depth["runtime_unknown"] == 1
+
+
+async def test_an_episodes_rating_slices_under_its_shows_genre(authed_client, db):
+    """Enrichment skips episodes, so a rated episode carries no genre of its
+    own — the same rule `facet_source` applies to the filters."""
+    user = await _user(db)
+    (show,) = await _add(db, _show("The Wire", genres=["Crime"]))
+    (episode,) = await _add(db, _episode(show, 1))
+    await _log(db, user, episode, _utc_at(3, 12))
+    await _rate(db, user, episode, 9.0)
+
+    depth = await _block(authed_client, "ratings", days=30, tz="UTC")
+    assert _row(depth["by_genre"], "Crime")["count"] == 1
+
+
+async def test_rating_depth_is_windowed_empty_shaped_and_per_user(authed_client, db):
+    empty = await _block(authed_client, "ratings", days=30, tz="UTC")
+    assert empty["rated"] == 0
+    assert empty["average_rating"] is None
+    assert empty["average_difference"] is None
+    assert empty["agreement_within_one"] is None
+    assert empty["you_rate_higher"] == []
+    assert empty["by_genre"] == []
+
+    user = await _user(db)
+    other = await _second_user(db)
+    (item,) = await _add(db, _movie("Old", community_rating=5.0))
+    await _log(db, user, item, _utc_at(200, 12))
+    await _rate(db, user, item, 9.0)
+    await _rate(db, other, item, 2.0)
+
+    # Watched outside the window, so it is not in the subject set.
+    assert (await _block(authed_client, "ratings", days=30, tz="UTC"))["rated"] == 0
+    wide = await _block(authed_client, "ratings", days=365, tz="UTC")
+    assert wide["rated"] == 1
+    assert wide["average_rating"] == 9.0  # never the other account's 2
+
+
+# --- ranked lists ---------------------------------------------------------
+
+
+async def test_an_episodes_play_is_ranked_under_its_shows_studio(authed_client, db):
+    """An episode carries no studio, network or content rating of its own, so a
+    ranking that read them straight off the played row would leave television
+    out of the leaderboard entirely."""
+    user = await _user(db)
+    (show,) = await _add(
+        db,
+        _show("The Wire", studio="HBO", network="HBO", content_rating="TV-MA", year=2002),
+    )
+    episodes = await _add(db, _episode(show, 1, year=2002), _episode(show, 2, year=2002))
+    (film,) = await _add(
+        db, _movie("Uncut Gems", studio="A24", content_rating="R", year=2019)
+    )
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(3, 12))
+    await _log(db, user, film, _utc_at(3, 12))
+
+    rankings = await _block(authed_client, "rankings", days=30, tz="UTC")
+    hbo = _row(rankings["studios"], "HBO")
+    assert hbo["plays"] == 2
+    assert hbo["titles"] == 1  # one series, not two episodes
+    assert _row(rankings["networks"], "HBO")["plays"] == 2
+    assert _row(rankings["content_ratings"], "TV-MA")["plays"] == 2
+    assert _row(rankings["studios"], "A24")["titles"] == 1
+
+
+async def test_episodes_roll_up_into_their_series(authed_client, db):
+    user = await _user(db)
+    (show,) = await _add(db, _show("Twin Peaks", leaf_count=30, year=1990))
+    episodes = await _add(db, *(_episode(show, n) for n in range(1, 4)))
+    (film,) = await _add(db, _movie("Dune", runtime_minutes=155, year=2021))
+    for episode in episodes:
+        await _log(db, user, episode, _utc_at(3, 12))
+    await _log(db, user, film, _utc_at(3, 12))
+    await _log(db, user, film, _utc_at(2, 12))
+
+    rankings = await _block(authed_client, "rankings", days=30, tz="UTC")
+    assert [row["title"] for row in rankings["top_shows"]] == ["Twin Peaks"]
+    show_row = rankings["top_shows"][0]
+    assert show_row["episodes"] == 3
+    assert show_row["episodes_total"] == 30
+    assert show_row["minutes"] == 72  # three episodes at the 24-minute default
+    assert [row["title"] for row in rankings["top_films"]] == ["Dune"]
+    assert rankings["top_films"][0]["plays"] == 2
+    # Hours, not plays: the film wins on 310 minutes against the show's 72.
+    assert [row["title"] for row in rankings["top_by_runtime"]] == ["Dune", "Twin Peaks"]
+
+
+async def test_the_source_split_names_where_each_play_came_from(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Dune", runtime_minutes=155))
+    await _log(db, user, item, _utc_at(3, 12), source=WatchSource.PLEX_HISTORY)
+    await _log(db, user, item, _utc_at(2, 12), source=WatchSource.PLEX_WEBHOOK)
+    await _log(db, user, item, _utc_at(1, 12), source=WatchSource.MANUAL)
+
+    sources = (await _block(authed_client, "rankings", days=30, tz="UTC"))["by_source"]
+    assert {row["label"]: row["plays"] for row in sources} == {
+        "Plex history": 1,
+        "Plex webhook": 1,
+        "Manual": 1,
+    }
+    assert _row(sources, "Manual")["titles"] == 1
+
+
+async def test_a_decade_ranking_uses_the_episodes_own_year(authed_client, db):
+    """The deliberate exception to reading a facet through the series: an
+    episode has its own air date, and a 2019 episode is not from 1989."""
+    user = await _user(db)
+    (show,) = await _add(db, _show("Long Runner", year=1989))
+    (episode,) = await _add(db, _episode(show, 1, year=2019))
+    await _log(db, user, episode, _utc_at(3, 12))
+
+    decades = (await _block(authed_client, "rankings", days=30, tz="UTC"))["decades"]
+    assert [row["label"] for row in decades] == ["2010s"]
+
+
+async def test_the_ranking_limit_is_honoured(authed_client, db):
+    user = await _user(db)
+    films = await _add(db, *(_movie(f"Film {n}", runtime_minutes=100) for n in range(6)))
+    for film in films:
+        await _log(db, user, film, _utc_at(3, 12))
+
+    rankings = await _block(authed_client, "rankings", days=30, tz="UTC", limit=2)
+    assert rankings["limit"] == 2
+    assert len(rankings["top_films"]) == 2
+    assert len(rankings["top_by_runtime"]) == 2
+
+
+async def test_rankings_are_empty_shaped_windowed_and_per_user(authed_client, db):
+    empty = await _block(authed_client, "rankings", days=30, tz="UTC")
+    assert empty["top_shows"] == []
+    assert empty["top_films"] == []
+    assert empty["top_by_runtime"] == []
+    assert empty["studios"] == []
+    assert empty["by_source"] == []
+
+    other = await _second_user(db)
+    (item,) = await _add(db, _movie("Theirs", studio="A24"))
+    await _log(db, other, item, _utc_at(3, 12))
+    assert (await _block(authed_client, "rankings", days=30, tz="UTC"))["studios"] == []
+
+    user = await _user(db)
+    await _log(db, user, item, _utc_at(200, 12))
+    assert (await _block(authed_client, "rankings", days=30, tz="UTC"))["studios"] == []
+    assert (await _block(authed_client, "rankings", days=365, tz="UTC"))["studios"] != []
+
+
+async def test_rankings_take_the_browse_filters(authed_client, db):
+    user = await _user(db)
+    horror, comedy = await _add(
+        db,
+        _movie("The Thing", genres=["Horror"], studio="Universal"),
+        _movie("Airplane!", genres=["Comedy"], studio="Paramount"),
+    )
+    await _log(db, user, horror, _utc_at(3, 12))
+    await _log(db, user, comedy, _utc_at(3, 12))
+
+    narrowed = await _block(authed_client, "rankings", days=30, tz="UTC", genre="Horror")
+    assert [row["label"] for row in narrowed["studios"]] == ["Universal"]
+    assert [row["title"] for row in narrowed["top_films"]] == ["The Thing"]
