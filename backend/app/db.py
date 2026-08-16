@@ -41,6 +41,7 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
     await _run_light_migrations()
     await _close_interrupted_sync_runs()
+    await _recover_release_name_titles()
     await _merge_duplicates()
     log.info("Database ready at %s", settings.db_path)
 
@@ -75,6 +76,62 @@ async def _close_interrupted_sync_runs() -> None:
         log.warning(
             "Closed %s sync run(s) left open by an unclean shutdown", len(orphans)
         )
+
+
+async def _recover_release_name_titles() -> None:
+    """Give rows that Plex titled with a filename a real title.
+
+    Plex snapshots watch history under whatever the item was called that day, so
+    a file that was unmatched then is recorded forever as
+    `The.Jungle.Book.2.2003.1080p.BluRay.H264.AAC-RARBG`. `upsert_from_plex`
+    cleans that up now, but it will never run over the rows already stored: the
+    history import reads incrementally and never revisits a 2019 play.
+
+    `metadata_updated_at` is cleared along with the title, and that is the point
+    of doing this at startup rather than leaving it to `enrich_existing`. The
+    backfill only reconsiders a row once a week, so without this the rows would
+    sit with their filenames until that window came round — and the whole reason
+    they have no artwork is that nobody has ever asked a provider about them
+    under a name it could recognise. Now something has changed, so the retry
+    budget should start again.
+
+    Idempotent: a recovered title is no longer a release name, so the second run
+    finds nothing. Non-destructive in the way that matters — `guid_key` is not
+    touched, so no row moves identity and nothing is deleted here.
+    """
+    from sqlalchemy import select
+
+    from .models import MediaItem
+    from .services.release_names import parse_release_name
+
+    try:
+        async with session_scope() as db:
+            rows = list(
+                await db.execute(select(MediaItem.id, MediaItem.title))
+            )
+            recovered = [
+                (item_id, parsed)
+                for item_id, title in rows
+                if (parsed := parse_release_name(title or "")) is not None
+            ]
+            for item_id, parsed in recovered:
+                item = await db.get(MediaItem, item_id)
+                if item is None:
+                    continue
+                log.info(
+                    "Recovering title for item %s: %r -> %r",
+                    item.id,
+                    item.title,
+                    parsed.title,
+                )
+                item.title = parsed.title
+                item.year = item.year or parsed.year
+                item.metadata_updated_at = None
+    except Exception:
+        log.exception("Could not recover filename titles; continuing")
+        return
+    if recovered:
+        log.info("Recovered a real title for %s item(s)", len(recovered))
 
 
 async def _merge_duplicates() -> None:

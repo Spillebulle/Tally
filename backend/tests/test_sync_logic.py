@@ -388,6 +388,67 @@ async def test_existing_token_bearing_artwork_urls_are_cleared(engine):
     assert rows["b"] == "https://image.tmdb.org/t/p/w500/c.jpg"
 
 
+async def test_filename_titles_already_stored_are_recovered_at_startup(engine):
+    """`upsert_from_plex` will never run over these rows again.
+
+    The history import reads incrementally, so a 2019 play is never revisited
+    and the fix on the import path cannot reach what it already produced. The
+    retry stamp is cleared with the title because the backfill only reconsiders
+    a row weekly — and the reason it has no artwork is that nothing has ever
+    asked a provider under a name it could recognise.
+    """
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app import db as db_module
+
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        session.add_all(
+            [
+                MediaItem(
+                    guid_key="title:movie:the-jungle-book-2-2003-1080p-bluray",
+                    media_type=MediaType.MOVIE,
+                    title="The.Jungle.Book.2.2003.1080p.BluRay.H264.AAC-RARBG",
+                    metadata_updated_at=utcnow(),
+                ),
+                MediaItem(
+                    guid_key="tmdb:movie:14873",
+                    media_type=MediaType.MOVIE,
+                    title="The Jungle Book 2",
+                    year=2003,
+                    metadata_updated_at=utcnow(),
+                ),
+            ]
+        )
+        await session.commit()
+
+    original = db_module.SessionLocal
+    db_module.SessionLocal = maker
+    try:
+        await db_module._recover_release_name_titles()
+        # Idempotent: a recovered title is no longer a release name.
+        await db_module._recover_release_name_titles()
+    finally:
+        db_module.SessionLocal = original
+
+    async with maker() as session:
+        rows = {
+            item.guid_key: item
+            for item in (await session.execute(sa_select(MediaItem))).scalars()
+        }
+
+    ghost = rows["title:movie:the-jungle-book-2-2003-1080p-bluray"]
+    assert ghost.title == "The Jungle Book 2"
+    assert ghost.year == 2003
+    # Cleared, so the backfill picks it up now rather than in a week's time.
+    assert ghost.metadata_updated_at is None
+    # The properly matched row is a real title and is left completely alone.
+    real = rows["tmdb:movie:14873"]
+    assert real.title == "The Jungle Book 2"
+    assert real.metadata_updated_at is not None
+
+
 async def test_scan_progress_counts_items_against_an_item_total(db):
     """Regression: the counter and its total have to be the same unit.
 
@@ -1311,6 +1372,129 @@ async def test_a_year_is_recovered_from_the_air_date_without_moving_the_key(db):
     assert item.year == 1996
     # The key is still the year-less one, so existing rows stay where they are.
     assert item.guid_key == "title:movie:101-dalmatians"
+
+
+async def test_a_filename_title_is_recovered_without_moving_the_key(db):
+    """Plex snapshots history under whatever the item was called that day.
+
+    A file still unmatched then is snapshotted under its filename, and that
+    string comes back forever. No provider matches it, so the row never got an
+    id and `merge_duplicates` — which pairs on an id — could never collapse it
+    against the properly matched row beside it.
+
+    The key must not move for exactly the reason the recovered year must not
+    move it, and more so: the history import re-upserts the same entry on every
+    overlapping sync, so a cleaned title in the key would mint a fresh
+    duplicate each time.
+    """
+    from app.services.guids import slugify
+    from app.services.media_repo import MediaRepository
+
+    server = PlexServer(
+        machine_identifier="abc123",
+        name="Home",
+        base_url="http://plex:32400",
+        access_token_encrypted=encrypt_secret("token") or "",
+    )
+    db.add(server)
+    await db.flush()
+
+    repo = MediaRepository(db, enrich=False)
+    raw = "The.Jungle.Book.2.2003.1080p.BluRay.H264.AAC-RARBG"
+    item = await repo.upsert_from_plex(
+        {"type": "movie", "title": raw, "originallyAvailableAt": "2003-02-06"},
+        server=server,
+    )
+    await db.commit()
+
+    assert item is not None
+    assert item.title == "The Jungle Book 2"
+    assert item.year == 2003
+    assert item.guid_key == "title:movie:" + slugify(raw)
+
+    # And re-importing the same entry finds that row rather than making another.
+    again = await repo.upsert_from_plex(
+        {"type": "movie", "title": raw, "originallyAvailableAt": "2003-02-06"},
+        server=server,
+    )
+    assert again is not None and again.id == item.id
+
+
+async def test_a_thin_history_row_lands_on_the_row_it_names(db, monkeypatch):
+    """Regression: a play of a film still in the library became a second row.
+
+    Plex drops `ratingKey` from a history row whose metadata item it no longer
+    holds — the file was deleted, or replaced and rescanned under a new key —
+    and hands back a snapshot of the play instead. With no key there is nothing
+    to re-fetch and no mapping to look up, so the snapshot went straight into
+    `upsert_from_plex` and minted an identity of its own.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import WatchEvent
+
+    user, server, item, _ = await _fixture_world(db)
+    item.year = 1999
+    await db.commit()
+    before = await db.scalar(select(func.count(MediaItem.id)))
+
+    fake = FakeHistoryClient(
+        [
+            {
+                # No ratingKey at all: this is all Plex still knows about it.
+                "historyKey": "/status/sessions/history/31",
+                "viewedAt": int(utcnow().timestamp()),
+                "title": "The Matrix",
+                "type": "movie",
+                "originallyAvailableAt": "1999-03-30",
+            }
+        ]
+    )
+
+    service = SyncService(db)
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+    await service.sync_history(user, server, SyncStats())
+
+    assert await db.scalar(select(func.count(MediaItem.id))) == before
+    event = await db.scalar(select(WatchEvent))
+    assert event is not None and event.media_item_id == item.id
+
+
+async def test_history_for_a_film_no_longer_in_the_library_still_gets_a_row(
+    db, monkeypatch
+):
+    """The other half of it: most of these snapshots are not duplicates.
+
+    A play of something since deleted from Plex has no row to land on, and
+    minting one is correct — that history should outlive the file. Failing
+    closed here would silently drop years of watches.
+    """
+    from sqlalchemy import func, select
+
+    user, server, _item, _ = await _fixture_world(db)
+    before = await db.scalar(select(func.count(MediaItem.id)))
+
+    fake = FakeHistoryClient(
+        [
+            {
+                "historyKey": "/status/sessions/history/32",
+                "viewedAt": int(utcnow().timestamp()),
+                "title": "A Walt Disney Christmas",
+                "type": "movie",
+                "originallyAvailableAt": "1982-12-04",
+            }
+        ]
+    )
+
+    service = SyncService(db)
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+    await service.sync_history(user, server, SyncStats())
+
+    assert await db.scalar(select(func.count(MediaItem.id))) == before + 1
+    created = await db.scalar(
+        select(MediaItem).where(MediaItem.title == "A Walt Disney Christmas")
+    )
+    assert created is not None and created.year == 1982
 
 
 async def test_the_backfill_revisits_rows_that_nothing_else_looks_at(db, monkeypatch):
