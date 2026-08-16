@@ -5,7 +5,7 @@ import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { AnimeFilter, MediaCard, PersonalFilter } from '@/lib/types'
 import { compactNumber } from '@/lib/utils'
-import { SORTS, useBrowseFilters } from '@/lib/browse-filters'
+import { namesOf, SORTS, useBrowseFilters } from '@/lib/browse-filters'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { PosterGrid } from '@/components/Poster'
@@ -103,6 +103,11 @@ export function Browse({ mode }: BrowseProps) {
     queryFn: () => api.media.contentRatings(animeFilter),
   })
 
+  // Where the rows live. One request for the whole app — the answer does not
+  // depend on which grid is asking — and the controls hide themselves when
+  // there is only one server or one library to offer.
+  const places = useQuery({ queryKey: ['places'], queryFn: () => api.media.places() })
+
   const markWatched = useMutation({
     mutationFn: (card: MediaCard) => api.history.markWatched(card.id),
     onSuccess: (_result, card) => {
@@ -113,7 +118,12 @@ export function Browse({ mode }: BrowseProps) {
     onError: (error: Error) => notify(error.message, 'error'),
   })
 
-  const { q: search, genre, rating, director, studio, content_rating } = filters.values
+  const { q: search, rating, director, actor } = filters.values
+  // The multi-value facets name the page by what they are narrowing to, which
+  // is the values they include: "Crime, Drama" for two, nothing for none.
+  const genre = namesOf(filters.values.genre)
+  const studio = namesOf(filters.values.studio)
+  const contentRating = namesOf(filters.values.content_rating)
 
   const rated =
     rating.min != null && rating.min === rating.max ? `Rated ${rating.min}/10` : null
@@ -122,8 +132,9 @@ export function Browse({ mode }: BrowseProps) {
   // the page — the same courtesy the genre and rating arrivals already get.
   const facetTitle =
     (director && `Directed by ${director}`) ||
+    (actor && `With ${actor}`) ||
     studio ||
-    (content_rating && `Rated ${content_rating}`) ||
+    (contentRating && `Rated ${contentRating}`) ||
     null
 
   const titles: Record<BrowseMode, string> = {
@@ -168,8 +179,12 @@ export function Browse({ mode }: BrowseProps) {
 
       <BrowseFilters
         state={filters}
-        genres={genres.data ?? []}
-        contentRatings={contentRatings.data ?? []}
+        lists={{
+          genres: genres.data ?? [],
+          contentRatings: contentRatings.data ?? [],
+          libraries: places.data?.libraries ?? [],
+          servers: places.data?.servers ?? [],
+        }}
         busy={isFetching && !isLoading}
       />
 
