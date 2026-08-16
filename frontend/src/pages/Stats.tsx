@@ -149,6 +149,47 @@ const PRESET_LABELS: Record<Preset, string> = {
 const SCOPES = ['all', 'anime'] as const
 type Scope = (typeof SCOPES)[number]
 
+/**
+ * Films, television, or both — one control over the whole page.
+ *
+ * Deliberately not per-chart. Every figure here is meant to be read against the
+ * one beside it ("my rewatch share climbed in the months I watched most"), and
+ * a scope that applied to some cards and not others would silently break every
+ * such comparison. So it goes in the URL like the timeframe, rides on every
+ * request, and the two sections it cannot mean anything for say so themselves.
+ *
+ * The values are the API's `StatsMediaScope` verbatim, so a hand-edited URL is
+ * checked against exactly what the server accepts and falls back to `all`
+ * rather than 422ing the page.
+ */
+const MEDIA_SCOPES = ['all', 'movies', 'shows'] as const
+type MediaScope = (typeof MEDIA_SCOPES)[number]
+
+const MEDIA_LABELS: Record<MediaScope, string> = {
+  all: 'Everything',
+  movies: 'Films',
+  shows: 'Series',
+}
+
+/** In prose, where a section has to say what it is currently scoped to. */
+const MEDIA_PHRASES: Record<MediaScope, string> = {
+  all: '',
+  movies: 'films',
+  shows: 'series',
+}
+
+/**
+ * Whether season 0 counts towards series completion.
+ *
+ * Off is the app-wide default and the server's — see `completion.py` — because
+ * a Christmas special and six webisodes nobody has seen kept a series somebody
+ * had genuinely finished at 88% and permanently "still going". This toggle
+ * changes what *this block* reports, not what "finished" means elsewhere, and
+ * it lives in the URL so the other answer can be linked to.
+ */
+const SPECIALS = ['exclude', 'include'] as const
+type Specials = (typeof SPECIALS)[number]
+
 const COMPARISONS = ['off', 'previous', 'year'] as const
 type Comparison = (typeof COMPARISONS)[number]
 
@@ -206,6 +247,8 @@ function useStatsFilters() {
   const { values, set, setMany, reset, active } = useUrlParams({
     preset: { key: 'preset', allowed: PRESETS, fallback: '12m' as Preset },
     scope: { key: 'scope', allowed: SCOPES, fallback: 'all' as Scope },
+    media: { key: 'media', allowed: MEDIA_SCOPES, fallback: 'all' as MediaScope },
+    specials: { key: 'specials', allowed: SPECIALS, fallback: 'exclude' as Specials },
     compare: { key: 'compare', allowed: COMPARISONS, fallback: 'off' as Comparison },
     // Only meaningful together, and only while `preset` is `custom`.
     from: { key: 'from', parse: parseDateParam, fallback: '' },
@@ -823,7 +866,8 @@ export function Stats() {
   // Read through the router rather than off `window`, so the value is the one
   // the app itself navigated to and not a stale read from before hydration.
   const { hash } = useLocation()
-  const { preset, scope, compare, from, to, set, setMany, reset, active } = useStatsFilters()
+  const { preset, scope, media, specials, compare, from, to, set, setMany, reset, active } =
+    useStatsFilters()
 
   // The zone the viewer is actually in. The API resolves `tz` → the stored
   // preference → UTC and reports back which it used, so a day boundary is the
@@ -852,6 +896,9 @@ export function Stats() {
     ...(customRange
       ? { since: localInstant(customRange.since), until: localInstant(customRange.until) }
       : { preset: apiPreset }),
+    // On the shared window query, so every windowed block is scoped by the one
+    // control rather than each remembering to send it.
+    media,
     anime_only: scope === 'anime',
     tz: timezone,
   }
@@ -895,6 +942,7 @@ export function Stats() {
     ? {
         since: localInstant(earlierWindow.since),
         until: localInstant(earlierWindow.until),
+        media,
         anime_only: scope === 'anime',
         tz: timezone,
       }
@@ -910,6 +958,7 @@ export function Stats() {
   // its own states further down the page. Only the scope and the zone can
   // change the answer, so only those are in the key.
   const seasonalityQuery: SeasonalityQuery = {
+    media,
     anime_only: scope === 'anime',
     tz: timezone,
   }
@@ -949,12 +998,19 @@ export function Stats() {
   // The two that take no window at all, so only the scope is in the key —
   // changing the date range must not refetch them, because it cannot change
   // what they say.
-  const unwindowed: UnwindowedStatsQuery = { anime_only: scope === 'anime' }
+  const unwindowed: UnwindowedStatsQuery = { media, anime_only: scope === 'anime' }
 
+  // Its own object rather than `unwindowed` plus a flag: coverage does not read
+  // `include_specials`, and putting it in the shared query would refetch the
+  // inventory every time somebody toggled a control that cannot change it.
+  const showsQuery: UnwindowedStatsQuery = {
+    ...unwindowed,
+    include_specials: specials === 'include',
+  }
   const showsSection = useDrawn('shows', hash)
   const completion = useQuery({
-    queryKey: ['stats', 'show-completion', unwindowed],
-    queryFn: () => api.stats.shows(unwindowed),
+    queryKey: ['stats', 'show-completion', showsQuery],
+    queryFn: () => api.stats.shows(showsQuery),
     enabled: showsSection.drawn,
   })
 
@@ -996,6 +1052,15 @@ export function Stats() {
             )
           }
           options={PRESETS.map((value) => ({ value, label: PRESET_LABELS[value] }))}
+        />
+        {/* Films, television or both, over the whole page. Not per-chart: the
+            findings on this page are comparisons *between* its figures, and a
+            scope that reached some of them would break every one silently. */}
+        <Segmented
+          label="Films or series"
+          value={media}
+          onChange={(value) => set('media', value)}
+          options={MEDIA_SCOPES.map((value) => ({ value, label: MEDIA_LABELS[value] }))}
         />
         <Segmented
           label="Scope"
@@ -1095,7 +1160,9 @@ export function Stats() {
               ? 'Nothing to chart yet'
               : scope === 'anime'
                 ? 'No anime plays in this range'
-                : 'Nothing watched in this range'
+                : media !== 'all'
+                  ? `No ${MEDIA_PHRASES[media]} played in this range`
+                  : 'Nothing watched in this range'
           }
           description={
             noHistoryAnywhere
@@ -1381,6 +1448,12 @@ export function Stats() {
         >
           <ActivityHeatmap
             data={data.activity_by_day}
+            // Enough columns to cover the window, so the chart is about the
+            // range the rest of the page is about — floored at a quarter for
+            // context, capped at a year because that is all a calendar heatmap
+            // can say. The chart then sizes its own cells to fill the card;
+            // it used to claim a fixed 416px however wide the card was.
+            weeks={Math.min(53, Math.max(13, Math.ceil(range.days / 7)))}
             onSelect={(dateKey) => navigate(historyLink(bucketWindow(dateKey)))}
           />
           {busiest.length > 0 && (
@@ -1530,16 +1603,27 @@ export function Stats() {
               phone the card read as almost empty. A profile has to be seen
               whole to be a profile. Thin columns are the right trade; the
               punch card below it is where the same data gets room.
+
+              The axis used to print every third hour and nothing else, which
+              left twenty-four bars under eight numbers and read as a broken
+              chart — the bars appeared to fall between the labels because
+              nothing tied any bar to any label. `minLabelWidth` gives every
+              hour a tick inside its own column and thins only the *text*, to
+              whatever the measured width can hold: all twenty-four on a wide
+              card, every second or third on a phone, and a mark under each one
+              either way.
             */}
             <ColumnChart
               data={hours.map((hour) => ({
                 label: hourLabel(hour.index),
                 value: hour.plays,
               }))}
-              // Every third hour, or the axis is 24 overlapping numbers.
-              formatLabel={(label) =>
-                Number(label.slice(0, 2)) % 3 === 0 ? label.slice(0, 2) : ''
-              }
+              // "07", not "07:00" — the axis says what the units are once, in
+              // the heading, and two digits is what fits under a 14px column.
+              formatLabel={(label) => label.slice(0, 2)}
+              // What one "07" needs, with room around it. The chart works the
+              // rest out from its own width.
+              minLabelWidth={20}
               // Measured: 24 caps ate a third of the frame's height and left
               // the bars a stub. The numbers stay in the tooltip, the
               // accessible name and the table.
@@ -1679,16 +1763,26 @@ export function Stats() {
         description="What the plays were made of."
       >
         <div className="grid gap-6 lg:grid-cols-2">
+          {/*
+            Counted in **plays over this window**, so it drills to History with
+            the window and the genre together — which is exactly the set the bar
+            measured. It used to go to `/browse` with the genre alone: a grid of
+            every title in that genre the library holds, watched or not, over no
+            window at all. Three of the four things the bar says were dropped on
+            the way, and nothing on the destination said so.
+          */}
           <ChartCard
             headingLevel={3}
             title="Most-watched genres"
-            description="Counted per play, so a binged series weighs more than a single film. Pick one to browse it."
+            description="Counted per play, so a binged series weighs more than a single film. Pick one to list those plays."
             table={<DataTable caption="Plays by genre" rows={data.top_genres} valueHeader="Plays" />}
           >
             <BarList
               data={data.top_genres}
               emptyMessage="No genre data yet"
-              onSelect={(entry) => navigate(browseLink({ genre: [entry.label] }))}
+              onSelect={(entry) =>
+                navigate(historyLink({ ...windowDrill, genre: [entry.label] }))
+              }
             />
           </ChartCard>
 
@@ -1893,7 +1987,12 @@ export function Stats() {
         <ChartCard
           headingLevel={3}
           title="How you rate things"
-          description="Your own ratings out of 10, synced both ways with Plex. Pick a bar to see those titles."
+          // The drill is honest but wider than the bar, the same way the
+          // by-genre and by-decade rating bars below are: the counts are over
+          // what was watched in this window, and "rated, and watched between
+          // these dates" is not a question `/browse` can be asked. Said out
+          // loud rather than left for somebody to notice.
+          description="Your own ratings out of 10, synced both ways with Plex. Pick a bar to browse everything you have rated that highly."
           table={
             <DataTable
               caption="Titles by rating out of 10"
@@ -2388,6 +2487,24 @@ export function Stats() {
         >
           {watchlist && (
             <div className="space-y-6">
+              {/*
+                Which date these numbers are counted from, stated where they are
+                read. Plex exposes the moment you watchlisted something only
+                through Discover's `watchlistedAt`, and it does not always send
+                it; where it does not, Tally has nothing better than when its own
+                sync first saw the entry — which on a first sync is one instant
+                for a list built over years. That is a real difference and it is
+                said out loud rather than papered over: the alternative is a
+                page confidently reporting that you watchlisted four hundred
+                films on the afternoon you installed this.
+              */}
+              {watchlist.plex_dated < watchlist.added && (
+                <p className="text-xs text-muted">
+                  {watchlist.plex_dated === 0
+                    ? 'Plex did not tell us when these were watchlisted, so they are dated from when Tally first saw them — for anything imported, that is your first sync rather than the day you added it.'
+                    : `${watchlist.added - watchlist.plex_dated} of these carry no watchlist date from Plex and are dated from when Tally first saw them instead; the other ${watchlist.plex_dated} use Plex's own date.`}
+                </p>
+              )}
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <StatTile
                   label="Added"
@@ -2456,7 +2573,13 @@ export function Stats() {
                     valueLabel: plural(entry.days_waiting, 'day'),
                     // A real instant off the wire, so `new Date` is the right
                     // reader — the banned form is `new Date('2026-08-16')`.
-                    meta: `added ${formatDate(entry.added_at)}`,
+                    // The word in front of it is the honest half: "added" is
+                    // Plex's own watchlist date, "seen" is only when Tally first
+                    // noticed the entry, and the two are years apart on a fresh
+                    // install.
+                    meta: entry.added_on_plex
+                      ? `added ${formatDate(entry.added_at)}`
+                      : `first seen ${formatDate(entry.added_at)}`,
                     to: itemLink(entry.media_item_id),
                   }))}
                 />
@@ -2481,6 +2604,41 @@ export function Stats() {
         description="How far through each series you are, and the ones you walked away from. Deliberately not bounded by the range above: being 40% through a series is a fact about you and that series, and scoping it to a fortnight would report something you finished last year as barely started."
         innerRef={showsSection.ref}
       >
+        {/*
+          The one control on this page that belongs to a single stat, and it is
+          outside the `Block` on purpose: it has to be reachable while the block
+          is loading, empty or errored, because "no series started yet" is
+          itself an answer the toggle can change.
+
+          Not offered under the films scope, where the whole section has nothing
+          to say — a control that cannot change a page of zeroes is furniture.
+        */}
+        {media !== 'movies' && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <Segmented
+              label="Specials"
+              value={specials}
+              onChange={(value) => set('specials', value)}
+              options={[
+                { value: 'exclude', label: 'Specials not counted' },
+                { value: 'include', label: 'Specials counted' },
+              ]}
+            />
+            <p className="text-xs text-muted">
+              Season 0 — Christmas episodes, recaps, webisodes — is tracked and
+              browsable either way. Left out, a series you have watched every
+              episode of reads as finished rather than as 88% forever.
+            </p>
+          </div>
+        )}
+
+        {media === 'movies' ? (
+          <EmptyState
+            icon={<ChartIcon />}
+            title="Series progress does not apply to films"
+            description="This section is about how far through a series you are, and a film has no episodes to be part-way through. Switch the films/series control at the top of the page back to Everything or Series to see it."
+          />
+        ) : (
         <Block
           state={blockState(showsSection, completion)}
           ready={Boolean(shows && shows.shows_started > 0)}
@@ -2504,7 +2662,14 @@ export function Stats() {
                 <StatTile
                   label="Finished"
                   value={compactNumber(shows.shows_completed)}
-                  hint="Every episode played"
+                  // Which episodes, spelled out on the tile the number is on.
+                  // "Every episode played" is two different claims depending on
+                  // the toggle above, and the shorter one is the surprising one.
+                  hint={
+                    shows.includes_specials
+                      ? 'Every episode, specials included'
+                      : 'Every episode bar the specials'
+                  }
                   icon={<CheckIcon />}
                 />
                 <StatTile
@@ -2588,6 +2753,7 @@ export function Stats() {
             </div>
           )}
         </Block>
+        )}
       </Section>
 
       <Section
@@ -2684,7 +2850,7 @@ export function Stats() {
                 <ChartCard
                   headingLevel={3}
                   title="By genre"
-                  description="The twenty genres you own most of. Pick one to browse what you have not seen in it."
+                  description="The twenty genres you own most of. Pick one to browse what you own in it."
                   table={
                     <DataTable
                       caption="Coverage by genre, percent watched"
@@ -2710,15 +2876,17 @@ export function Stats() {
                     meta={(entry) =>
                       `${entry.slice.watched.toLocaleString()} of ${entry.slice.owned.toLocaleString()} watched`
                     }
-                    // Straight at the remainder: owned, in this genre, unwatched
-                    // — and carrying the same home-video decision the inventory
-                    // above was counted with, or the grid would disagree with
-                    // the bar that opened it.
+                    // The set the bar was computed over: owned, in this genre,
+                    // carrying the same home-video decision the inventory above
+                    // was counted with — and **no watched filter**. The bar
+                    // says "you have seen 62% of your horror"; it used to open
+                    // the other 38%, which is a different question the reader
+                    // did not ask, and a filter chip they then had to notice and
+                    // clear to see the set they clicked on.
                     onSelect={(entry) =>
                       navigate(
                         browseLink({
                           genre: [entry.label],
-                          status: 'unwatched',
                           on_plex: true,
                           personal: shelf.includes_personal ? 'all' : 'exclude',
                         }),
@@ -2731,7 +2899,7 @@ export function Stats() {
               <ChartCard
                 headingLevel={3}
                 title="By release decade"
-                description="Where the gaps are. Pick a decade to browse what you own from it and have not watched."
+                description="Where the gaps are. Pick a decade to browse what you own from it."
                 table={
                   <DataTable
                     caption="Coverage by release decade, percent watched"
@@ -2755,13 +2923,17 @@ export function Stats() {
                   meta={(entry) =>
                     `${entry.slice.watched.toLocaleString()} of ${entry.slice.owned.toLocaleString()} watched`
                   }
+                  // Same rule as the genre bars above, and this is the one that
+                  // was reported: a release-decade breakdown has no business
+                  // carrying a watched filter. The mark is "you have seen 41%
+                  // of what you own from the 1990s", so the honest destination
+                  // is what you own from the 1990s.
                   onSelect={
                     shelf.by_decade.every((slice) => decadeBounds(slice.label))
                       ? (entry) =>
                           navigate(
                             browseLink({
                               ...decadeBounds(entry.label)!,
-                              status: 'unwatched',
                               on_plex: true,
                               personal: shelf.includes_personal ? 'all' : 'exclude',
                             }),

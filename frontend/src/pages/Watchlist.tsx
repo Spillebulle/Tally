@@ -113,7 +113,6 @@ export function Watchlist() {
   const genre = namesOf(filters.values.genre)
   const total = data?.total ?? 0
   const pageCount = Math.ceil(total / PAGE_SIZE)
-  const syncedCount = entries.filter((entry) => entry.synced_with_plex).length
   // `kind` is this page's own parameter rather than one of the shared filters,
   // so it is the one thing `filters.active` cannot know about.
   const narrowed = filters.active || kind !== 'all' || Boolean(filters.values.q)
@@ -122,12 +121,16 @@ export function Watchlist() {
     <div>
       <PageHeader
         title="Watchlist"
+        // The count of what is on the watchlist, and nothing else. It used to
+        // carry "· N of M shown in sync with Plex", which counted the *page*
+        // rather than the watchlist and so read as a second, smaller total
+        // disagreeing with the first. Whether a single entry has reached Plex
+        // is still said where it means something — on the entry itself, as
+        // "Pending Plex sync".
         subtitle={
           isLoading
             ? 'Loading…'
-            : `${total} ${total === 1 ? 'title' : 'titles'}${
-                genre ? ` in ${genre}` : ''
-              } · ${syncedCount} of ${entries.length} shown in sync with Plex`
+            : `${total} ${total === 1 ? 'title' : 'titles'}${genre ? ` in ${genre}` : ''}`
         }
         actions={
           <>

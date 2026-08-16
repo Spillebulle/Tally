@@ -26,6 +26,7 @@ from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..completion import episode_conditions
 from ..config import get_settings
 from ..models import (
     MediaItem,
@@ -63,7 +64,7 @@ from .plex_server import (
     _ts,
     player_identity,
 )
-from .plex_tv import PlexAuthError, PlexTVClient, PlexTVError
+from .plex_tv import PlexAuthError, PlexTVClient, PlexTVError, watchlisted_at
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -953,16 +954,30 @@ class SyncService:
         if duration_ms:
             state.duration_ms = duration_ms
 
+        # *When* it was last played, for both branches. This used to be read
+        # only when Plex called the item watched, which left every row whose
+        # only evidence is a resume position — the ones Continue Watching is
+        # actually made of — with `last_watched_at` NULL. `on_deck.cutoff`
+        # judges staleness on that column and the shelf deliberately keeps a
+        # row it cannot date, so the whole On Deck window quietly did nothing:
+        # a film abandoned three years ago sat there under any setting, because
+        # nothing had ever recorded that it *was* three years ago.
+        #
+        # A partial play still has a `lastViewedAt` — Plex stamps it whenever
+        # the item is played at all, not only when it scrobbles — so this is the
+        # answer, not a guess. Advanced, never moved backwards: a local watch
+        # event may already know a later time than the server does.
+        if last_viewed := meta.get("lastViewedAt"):
+            seen_at = datetime.fromtimestamp(int(last_viewed), tz=UTC)
+            if state.last_watched_at is None or state.last_watched_at < seen_at:
+                state.last_watched_at = seen_at
+
         if watched:
             # Plex counts a 90%-complete item as watched but keeps the offset,
             # so clear the resume position rather than leaving it half-finished.
             state.view_count = max(state.view_count, view_count or 1)
             state.progress_ms = None
             state.status = WatchStatus.COMPLETED
-            if last_viewed := meta.get("lastViewedAt"):
-                seen_at = datetime.fromtimestamp(int(last_viewed), tz=UTC)
-                if state.last_watched_at is None or state.last_watched_at < seen_at:
-                    state.last_watched_at = seen_at
         else:
             state.progress_ms = offset_ms
             if state.status is None:
@@ -986,11 +1001,33 @@ class SyncService:
     async def recompute_show_state(
         self, user: User, show_id: int, watched_at: datetime | None = None
     ) -> UserMediaState:
-        """Derive a show's status from how many of its episodes are watched."""
+        """Derive a show's status from how many of its episodes are watched.
+
+        And *when*, which is the half that was missing. Called with an explicit
+        `watched_at` — from `record_watch_state`, i.e. off a real watch event —
+        the show inherits that time. Called without one, which is every call the
+        library scan makes, it used to set the status to WATCHING and leave
+        `last_watched_at` NULL: the rollup said "you are watching this" and
+        nothing said when. Continue Watching's "up next" branch reads exactly
+        that column for the On Deck window and keeps any row it cannot date, so
+        a series abandoned years ago stayed on the shelf under every setting.
+
+        The episodes already hold the answer, so it is derived rather than
+        invented — and never moved backwards, because a rollup already carrying
+        a later time (a webhook, a session poll) knows something the episode
+        rows do not.
+
+        **Specials are in neither count.** `completion.episode_conditions` is
+        the one definition, shared with `serializers.episode_progress` and the
+        Series progress block, so a series cannot read as finished on one
+        screen and 94% on another. Before it, one unwatched Christmas special
+        kept a series somebody had genuinely finished in WATCHING forever.
+        """
+        counted = episode_conditions(include_specials=False)
         total = await self.db.scalar(
             select(func.count(MediaItem.id)).where(
                 MediaItem.show_id == show_id,
-                MediaItem.media_type == MediaType.EPISODE,
+                *counted,
             )
         )
         watched = await self.db.scalar(
@@ -998,7 +1035,7 @@ class SyncService:
             .join(MediaItem, MediaItem.id == UserMediaState.media_item_id)
             .where(
                 MediaItem.show_id == show_id,
-                MediaItem.media_type == MediaType.EPISODE,
+                *counted,
                 UserMediaState.user_id == user.id,
                 UserMediaState.view_count > 0,
             )
@@ -1014,6 +1051,21 @@ class SyncService:
             if state.status not in (WatchStatus.DROPPED, WatchStatus.ON_HOLD):
                 state.status = WatchStatus.WATCHING
         state.view_count = watched
+        if watched_at is None:
+            # Every episode, specials included — deliberately not `counted`.
+            # Whether a special counts towards *finishing* a series is a
+            # judgement; whether watching one was activity on the series is
+            # not. Excluding them here would age a show off Continue Watching
+            # while the user was still watching it.
+            watched_at = await self.db.scalar(
+                select(func.max(UserMediaState.last_watched_at))
+                .join(MediaItem, MediaItem.id == UserMediaState.media_item_id)
+                .where(
+                    MediaItem.show_id == show_id,
+                    MediaItem.media_type == MediaType.EPISODE,
+                    UserMediaState.user_id == user.id,
+                )
+            )
         if watched_at and (state.last_watched_at is None or watched_at > state.last_watched_at):
             state.last_watched_at = watched_at
         await self.db.flush()
@@ -1245,6 +1297,11 @@ class SyncService:
 
         repo = MediaRepository(self.db, enrich=True)
         remote_by_item: dict[int, str] = {}
+        # When Plex says each of these was watchlisted, where Discover said at
+        # all. Kept apart from the guid map because it is allowed to be empty:
+        # `watchlisted_at` returns None rather than guessing, and an entry with
+        # no answer keeps Tally's own "first seen" date, labelled as such.
+        added_on_plex: dict[int, datetime] = {}
 
         for meta in fetched.items:
             item = await repo.upsert_from_discover(meta)
@@ -1252,6 +1309,8 @@ class SyncService:
                 continue
             plex_guid = repo.plex_guid_for(meta) or str(meta.get("guid") or "")
             remote_by_item[item.id] = plex_guid
+            if moment := watchlisted_at(meta):
+                added_on_plex[item.id] = moment
             await self._remember_plex_guid(item, plex_guid)
         await self.db.commit()
 
@@ -1263,6 +1322,11 @@ class SyncService:
         # --- pull: on Plex, not (actively) here ---------------------------
         for item_id, plex_guid in remote_by_item.items():
             entry = local_entries.get(item_id)
+            # Recorded on every pass, not only on creation: the column was added
+            # after the entries were, so an install that has been syncing for a
+            # year has thousands of rows with a NULL to fill in, and the next
+            # sync is the only thing that will ever visit them.
+            plex_moment = added_on_plex.get(item_id)
             if entry is None:
                 self.db.add(
                     WatchlistEntry(
@@ -1270,6 +1334,7 @@ class SyncService:
                         media_item_id=item_id,
                         active=True,
                         source="plex",
+                        plex_added_at=plex_moment,
                         plex_active=True,
                         plex_synced_at=utcnow(),
                     )
@@ -1289,10 +1354,14 @@ class SyncService:
                     entry.removed_at = None
                     entry.plex_active = True
                     entry.plex_synced_at = utcnow()
+                    entry.plex_added_at = plex_moment or entry.plex_added_at
                     stats.watchlist_pulled += 1
             else:
                 entry.plex_active = True
                 entry.plex_synced_at = utcnow()
+                # Never overwritten with None: Discover dropping the field on
+                # one pass must not throw away a date it gave on an earlier one.
+                entry.plex_added_at = plex_moment or entry.plex_added_at
 
         # --- push: active here, absent on Plex ---------------------------
         # "Absent on Plex" is only meaningful if the whole watchlist arrived.

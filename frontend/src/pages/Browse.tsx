@@ -5,6 +5,7 @@ import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { AnimeFilter, MediaCard, PersonalFilter } from '@/lib/types'
 import { compactNumber } from '@/lib/utils'
+import { certificateLabel } from '@/lib/certificates'
 import { namesOf, SORTS, useBrowseFilters } from '@/lib/browse-filters'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
@@ -127,7 +128,9 @@ export function Browse({ mode }: BrowseProps) {
   // is the values they include: "Crime, Drama" for two, nothing for none.
   const genre = namesOf(filters.values.genre)
   const studio = namesOf(filters.values.studio)
-  const contentRating = namesOf(filters.values.content_rating)
+  // Written the way the board writes it — "Rated PG-13", not "Rated pg_13",
+  // which is the agent's spelling of the same certificate.
+  const contentRating = namesOf(filters.values.content_rating, certificateLabel)
 
   const rated =
     rating.min != null && rating.min === rating.max ? `Rated ${rating.min}/10` : null

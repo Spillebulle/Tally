@@ -22,6 +22,7 @@ import type {
   ShowCompletion,
   Stats,
   StatsGranularity,
+  StatsMediaScope,
   StatsPreset,
   SyncRun,
   SyncStatus,
@@ -217,6 +218,14 @@ export interface StatsQuery extends Query {
   /** Also aggregate the window immediately before this one. */
   compare?: boolean
   granularity?: StatsGranularity
+  /**
+   * Films, television, or both — one scope across the whole surface.
+   *
+   * On every stats query type rather than on this one alone: the page carries a
+   * single scope and a section that quietly ignored it would sit under a
+   * control that appears to govern it. See `StatsMediaScope`.
+   */
+  media?: StatsMediaScope
   anime_only?: boolean
   tz?: string
 }
@@ -229,6 +238,7 @@ export interface StatsQuery extends Query {
  * windowed one rather than a flag on it.
  */
 export interface SeasonalityQuery extends Query {
+  media?: StatsMediaScope
   anime_only?: boolean
   tz?: string
 }
@@ -246,7 +256,15 @@ export interface SeasonalityQuery extends Query {
  * length in every zone.
  */
 export interface UnwindowedStatsQuery extends Query {
+  media?: StatsMediaScope
   anime_only?: boolean
+  /**
+   * `/shows` only: count season 0 towards completion. Off by default and
+   * app-wide — see `completion.py` on the server, which the item page and the
+   * sync share, so this toggle changes what *this block* reports and not what
+   * "finished" means everywhere else.
+   */
+  include_specials?: boolean
   /**
    * Coverage only, and the one stats block where this is live rather than
    * inert: `exclude` by default, because a phone recording is not a title you

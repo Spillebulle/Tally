@@ -13,7 +13,7 @@ from ..media_filters import (
     WatchlistSortField,
     apply_filters,
 )
-from ..models import MediaItem, WatchlistEntry
+from ..models import MediaItem, WatchlistEntry, watchlist_added_at
 from ..schemas import MediaCard, PaginatedWatchlist, WatchlistAdd, WatchlistEntryOut
 from ..security import decrypt_secret
 from ..serializers import states_for, to_card
@@ -45,6 +45,11 @@ async def list_watchlist(
     longest, and it belongs at the top rather than buried under everything
     added since. The frontend defaults to the same pair — see
     `useBrowseFilters` — so the page and a direct API call agree.
+
+    The date it sorts on is `watchlist_added_at()`: what Plex says, falling back
+    to when Tally first saw the entry. Sorting on `added_at` alone put every
+    title a first sync imported at the same instant, so the queue opened in
+    whatever order the rows happened to be written.
     """
     active = and_(
         WatchlistEntry.user_id == user.id,
@@ -60,7 +65,7 @@ async def list_watchlist(
         user.id,
         sort=sort,
         order=order,
-        sort_columns={"watchlist_added": WatchlistEntry.added_at},
+        sort_columns={"watchlist_added": watchlist_added_at()},
     )
 
     total = int(await db.scalar(count_stmt) or 0)

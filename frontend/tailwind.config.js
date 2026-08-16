@@ -11,7 +11,15 @@ export default {
         canvas: 'rgb(var(--canvas) / <alpha-value>)',
         surface: 'rgb(var(--surface) / <alpha-value>)',
         raised: 'rgb(var(--raised) / <alpha-value>)',
-        line: 'rgb(var(--line) / <alpha-value>)',
+        // `border-line` still means the plain hairline; the two variants are
+        // the accent edge of a selected or hovered control, pre-blended so the
+        // stroke is opaque. A translucent border on a rounded element renders
+        // jagged — see the note on `.chip` in index.css.
+        line: {
+          DEFAULT: 'rgb(var(--line) / <alpha-value>)',
+          accent: 'rgb(var(--line-accent) / <alpha-value>)',
+          'accent-soft': 'rgb(var(--line-accent-soft) / <alpha-value>)',
+        },
         ink: 'rgb(var(--ink) / <alpha-value>)',
         subtle: 'rgb(var(--subtle) / <alpha-value>)',
         muted: 'rgb(var(--muted) / <alpha-value>)',

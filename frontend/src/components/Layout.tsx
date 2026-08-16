@@ -298,7 +298,7 @@ function UserMenu() {
         onClick={() => setOpen((value) => !value)}
         className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full
                    border border-line bg-raised text-xs font-semibold text-subtle
-                   transition-colors hover:border-accent/50"
+                   transition-colors hover:border-line-accent"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Account menu for ${name}`}

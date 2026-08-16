@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import PlexServer, User, UserServerAccess, utcnow
@@ -30,16 +30,32 @@ async def plex_weeks(db: AsyncSession, user: User) -> int | None:
 
     With more than one server the most generous window wins — a short window on
     a second server should not hide what the main one still lists.
+
+    `func.max()` alone got that backwards, because 0 is not the *smallest*
+    window here, it is the absence of one: Plex reads 0 as "switch On Deck off"
+    and Tally reads it as "never age anything out" (see `effective_weeks`). So a
+    server reporting 0 next to one reporting 2 was answered with 2 — the least
+    generous reading of the two — and the only value that means "no cut-off"
+    could never win. It is checked for first, and only then does max apply.
+
+    None still means *unknown* and is a third answer: no server has told us,
+    usually because none of these tokens is an owner's and `/:/prefs` answers a
+    non-owner with a 403. It must never collapse into 0.
     """
-    return await db.scalar(
-        select(func.max(PlexServer.on_deck_window_weeks))
+    result = await db.execute(
+        select(PlexServer.on_deck_window_weeks)
         .join(UserServerAccess, UserServerAccess.server_id == PlexServer.id)
         .where(
             UserServerAccess.user_id == user.id,
             UserServerAccess.enabled.is_(True),
             PlexServer.enabled.is_(True),
+            PlexServer.on_deck_window_weeks.is_not(None),
         )
     )
+    reported = [weeks for weeks in result.scalars() if weeks is not None]
+    if not reported:
+        return None
+    return 0 if 0 in reported else max(reported)
 
 
 async def effective_weeks(db: AsyncSession, user: User) -> int:

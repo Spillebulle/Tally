@@ -4,6 +4,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .completion import episode_conditions
 from .models import (
     MediaItem,
     MediaType,
@@ -71,20 +72,25 @@ def to_card(
 
 
 async def episode_progress(
-    db: AsyncSession, user_id: int, show_id: int
+    db: AsyncSession, user_id: int, show_id: int, *, include_specials: bool = False
 ) -> tuple[int, int]:
-    """Return (watched, total) episode counts for a show."""
+    """Return (watched, total) episode counts for a show.
+
+    Specials are left out of **both** halves by default — see `completion.py`
+    for why, and why the two halves have to agree. Excluding them from one and
+    not the other is the whole failure this shares its rule with the stats page
+    to avoid.
+    """
+    counted = episode_conditions(include_specials=include_specials)
     total = await db.scalar(
-        select(func.count(MediaItem.id)).where(
-            MediaItem.show_id == show_id, MediaItem.media_type == MediaType.EPISODE
-        )
+        select(func.count(MediaItem.id)).where(MediaItem.show_id == show_id, *counted)
     )
     watched = await db.scalar(
         select(func.count(func.distinct(UserMediaState.media_item_id)))
         .join(MediaItem, MediaItem.id == UserMediaState.media_item_id)
         .where(
             MediaItem.show_id == show_id,
-            MediaItem.media_type == MediaType.EPISODE,
+            *counted,
             UserMediaState.user_id == user_id,
             UserMediaState.view_count > 0,
         )

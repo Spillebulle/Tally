@@ -26,6 +26,17 @@ both of them the ones `routers/history.py` makes: `default_types=False`, because
 episodes are most of a watch history, and `personal="all"`, because home videos
 are real hours.
 
+**One scope, applied to everything, in one place.** `?media=movies|shows` is
+this page's own films/television control and it is not `MediaFilters.media_type`
+— that names a single row type, and "television" has to mean shows, seasons and
+episodes together or a television-only viewer reads as having watched nothing.
+It rides on the parsed filters object (`_media_scope_of`) and is applied by
+`_scope_items`, which every block's item conditions already pass through, so a
+stat cannot be left out of the scope by forgetting a call site. Two blocks
+answer specially and say so: `/shows` is a question about series and returns
+nothing at all under `media=movies`, and `/coverage` intersects the scope with
+its own "movies and shows only" inventory rule.
+
 Home videos (`MediaItem.is_personal_media`) *are* counted in the watch numbers.
 The browse grids hide them by default, but a play is a play and the hours are
 real; only the library inventory on `/summary` leaves them out, because that
@@ -71,6 +82,7 @@ from sqlalchemy import and_, func, or_, select, union
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
+from ..completion import countable_total, episode_conditions, specials_held
 from ..deps import CurrentUser, DbSession
 from ..media_filters import MediaFilters, facet_value, on_plex_condition
 from ..models import (
@@ -83,6 +95,7 @@ from ..models import (
     WatchSource,
     WatchStatus,
     utcnow,
+    watchlist_added_at,
 )
 from ..schemas import (
     ContrarianItem,
@@ -104,6 +117,7 @@ from ..schemas import (
     StatCount,
     StatsComparison,
     StatsGranularity,
+    StatsMediaScope,
     StatsOut,
     StatsPreset,
     StatsRange,
@@ -408,7 +422,46 @@ def _same_window_last_year(window: StatsRange, tz: tzinfo) -> StatsRange:
 # --- the browse filters ---------------------------------------------------
 
 
-def _stats_filters(filters: MediaFilters, anime_only: bool) -> MediaFilters:
+#: What each `media` scope matches. Television is three row types, not one: a
+#: watch history is mostly episodes, and a show or a season can carry a play of
+#: its own when somebody marks the whole thing watched.
+_MEDIA_SCOPE_TYPES: dict[str, tuple[MediaType, ...]] = {
+    "movies": (MediaType.MOVIE,),
+    "shows": (MediaType.SHOW, MediaType.SEASON, MediaType.EPISODE),
+}
+
+
+def _media_scope_condition(scope: StatsMediaScope):
+    """Narrow the whole page to films or to television, or to neither.
+
+    Returns None for `all`, which is the default and therefore adds no clause at
+    all — a filter that is off must not appear in the SQL, or every query plan
+    on the page changes for a control nobody touched.
+    """
+    types = _MEDIA_SCOPE_TYPES.get(scope)
+    return None if types is None else MediaItem.media_type.in_(types)
+
+
+def _media_scope_of(filters: MediaFilters) -> StatsMediaScope:
+    """The scope `_stats_filters` recorded on this request.
+
+    Carried on the parsed `MediaFilters` object rather than threaded through
+    fifteen signatures, for the reason `personal` already is: `_stats_filters`
+    is the one entry point every stats endpoint goes through and `_scope_items`
+    is the one place item-level conditions are applied, so there is exactly one
+    place to set it and one to read it. Threading it by hand is how one block
+    ends up answering a different question from the eight beside it.
+
+    It is *not* `MediaFilters.media_type`. That names a single row type and is a
+    live browse parameter a caller may also be using; this names a family of
+    them and belongs to this page.
+    """
+    return getattr(filters, "media_scope", "all")
+
+
+def _stats_filters(
+    filters: MediaFilters, anime_only: bool, media: StatsMediaScope = "all"
+) -> MediaFilters:
     """The shared browse filters, adjusted for a page that counts plays.
 
     Both adjustments are the ones `routers/history.py` makes, for the same
@@ -429,10 +482,14 @@ def _stats_filters(filters: MediaFilters, anime_only: bool) -> MediaFilters:
 
     `default_types=False` is the third adjustment and lives in `_scope`, because
     it is an argument to `item_conditions` rather than a value on the object.
+
+    `media` is this page's own films/television scope and is recorded here for
+    `_scope_items` to apply — see `_media_scope_of`.
     """
     filters.personal = "all"
     if anime_only:
         filters.anime = "only"
+    filters.media_scope = media
     return filters
 
 
@@ -496,6 +553,12 @@ def _scope_items(
             stmt = stmt.where(and_(*state))
     if items := filters.item_conditions(default_types=default_types):
         stmt = stmt.where(and_(*items))
+    # The page's own films/television scope, applied in the one place every
+    # block's item conditions already pass through. Every stat that *can* be
+    # scoped by media type therefore is, without fifteen call sites having to
+    # remember — see `_media_scope_of`.
+    if (scope := _media_scope_condition(_media_scope_of(filters))) is not None:
+        stmt = stmt.where(scope)
     return stmt
 
 
@@ -1086,7 +1149,7 @@ async def _sessions(
 
 
 async def _show_completion(
-    db: DbSession, user: User, filters: MediaFilters
+    db: DbSession, user: User, filters: MediaFilters, include_specials: bool = False
 ) -> ShowCompletionOut:
     """How far through each show, and which ones were walked away from.
 
@@ -1104,9 +1167,19 @@ async def _show_completion(
     Only EPISODE plays count towards completion. A play recorded against the
     show row itself carries no episode number and would inflate a percentage
     it cannot locate.
+
+    **Specials are out of both halves**, unless `include_specials` says
+    otherwise. `completion.episode_conditions` drops season-0 plays from the
+    numerator and `completion.countable_total` takes the specials Tally holds
+    off `leaf_count`, which is Plex's own total and counts them — adjusting one
+    end and not the other is how a fully-watched series would read as 88%. The
+    same definition backs `serializers.episode_progress` and
+    `sync_service.recompute_show_state`, so the item page, the card badge and
+    this block cannot disagree.
     """
     show = aliased(MediaItem, name="completion_show")
     show_state = aliased(UserMediaState, name="completion_show_state")
+    counted = episode_conditions(include_specials=include_specials)
     # Distinct episodes, not plays: rewatching the pilot four times is not 4%
     # of a series.
     episodes = func.count(func.distinct(WatchEvent.media_item_id))
@@ -1129,7 +1202,7 @@ async def _show_completion(
             )
             .where(
                 WatchEvent.user_id == user.id,
-                MediaItem.media_type == MediaType.EPISODE,
+                *counted,
             )
             # `status` is functionally dependent on the show, so grouping by it
             # adds no rows — it is named only so the statement is legal
@@ -1160,7 +1233,7 @@ async def _show_completion(
             filters,
             user,
         )
-        .where(WatchEvent.user_id == user.id, MediaItem.media_type == MediaType.EPISODE)
+        .where(WatchEvent.user_id == user.id, *counted)
         .subquery()
     )
     stops = {
@@ -1168,15 +1241,29 @@ async def _show_completion(
         for row in (await db.execute(select(stopped).where(stopped.c.rank == 1))).all()
     }
 
+    # One grouped query for every series on the page, so the denominator can be
+    # corrected without a round trip per show. Empty when specials are being
+    # counted, in which case there is nothing to take off.
+    specials = (
+        {}
+        if include_specials
+        else await specials_held(db, [item.id for item, *_ in rows])
+    )
+
     stale_before = utcnow() - timedelta(days=ABANDONED_AFTER_DAYS)
     in_progress: list[ShowProgress] = []
     abandoned: list[ShowProgress] = []
     completed = unknown_total = 0
 
     for item, status_value, watched, last_watched in rows:
-        total = item.leaf_count
-        # `leaf_count` and nothing else. See `ShowProgress` for why counting the
-        # episode rows Tally holds would report every history-only show at 100%.
+        total = countable_total(
+            item.leaf_count,
+            specials.get(item.id, 0),
+            include_specials=include_specials,
+        )
+        # Plex's `leaf_count`, less its specials, and nothing else. See
+        # `ShowProgress` for why counting the episode rows Tally holds would
+        # report every history-only show at 100%.
         # A total smaller than what has demonstrably been watched is not a
         # total, so it answers "unknown" rather than a clamped 100% — which
         # would file the show under "completed" and hide the fact that the
@@ -1217,6 +1304,7 @@ async def _show_completion(
         (abandoned if progress.abandoned else in_progress).append(progress)
 
     return ShowCompletionOut(
+        includes_specials=include_specials,
         abandoned_under_percent=ABANDONED_UNDER_PERCENT,
         abandoned_after_days=ABANDONED_AFTER_DAYS,
         shows_started=len(rows),
@@ -1242,8 +1330,11 @@ def _first_play_after(user: User, alias_name: str, *, after_add: bool):
     read in the other direction.
 
     `after_add` is the difference between two questions the block asks
-    separately: a play at or after `added_at` is a conversion, while *any* play
-    ever is what stops a removal counting as churn.
+    separately: a play at or after the add is a conversion, while *any* play
+    ever is what stops a removal counting as churn. "The add" is
+    `watchlist_added_at()` — Plex's own date where Discover gave one — and it
+    has to be the same expression the window and the payload use, or an entry
+    could be inside the window on one date and priced against the other.
     """
     played = aliased(MediaItem, name=alias_name)
     stmt = (
@@ -1259,7 +1350,7 @@ def _first_play_after(user: User, alias_name: str, *, after_add: bool):
         )
     )
     if after_add:
-        stmt = stmt.where(WatchEvent.watched_at >= WatchlistEntry.added_at)
+        stmt = stmt.where(WatchEvent.watched_at >= watchlist_added_at())
     return stmt.correlate(WatchlistEntry).scalar_subquery()
 
 
@@ -1271,13 +1362,24 @@ async def _watchlist_conversion(
     One query. Watchlists are small — hundreds of rows on a large instance —
     so the two correlated subqueries that price each entry are cheaper than any
     scheme for avoiding them, and both ride `ix_watch_events_user_item_time`.
+
+    **The date is `watchlist_added_at()`, not `WatchlistEntry.added_at`.** The
+    latter is when *Tally* first recorded the entry, which for anything pulled
+    from Plex is the first sync — so a watchlist built over years read as
+    hundreds of titles added on one afternoon, every wait measured from it and
+    every conversion counted from it. Plex's own `watchlistedAt` is preferred
+    wherever Discover sent one; `plex_added_at` rides along in the select so the
+    payload can say which of the two each row is dated by, rather than passing
+    Tally's date off as Plex's.
     """
+    added_at_expr = watchlist_added_at()
     rows = (
         await db.execute(
             _scope_items(
                 select(
                     MediaItem,
-                    WatchlistEntry.added_at,
+                    added_at_expr,
+                    WatchlistEntry.plex_added_at,
                     WatchlistEntry.active,
                     _first_play_after(user, "converted_play", after_add=True),
                     _first_play_after(user, "any_play", after_add=False),
@@ -1288,8 +1390,8 @@ async def _watchlist_conversion(
                 user,
             ).where(
                 WatchlistEntry.user_id == user.id,
-                WatchlistEntry.added_at >= window.since,
-                WatchlistEntry.added_at < window.until,
+                added_at_expr >= window.since,
+                added_at_expr < window.until,
             )
         )
     ).all()
@@ -1297,9 +1399,12 @@ async def _watchlist_conversion(
     now = utcnow()
     waits: list[float] = []
     converted = still_waiting = past_tail = churned = removed = 0
+    plex_dated = 0
     waiting: list[WatchlistWaiting] = []
 
-    for item, added_at, active, converted_at, ever_at in rows:
+    for item, added_at, plex_added_at, active, converted_at, ever_at in rows:
+        on_plex = plex_added_at is not None
+        plex_dated += 1 if on_plex else 0
         if converted_at is not None:
             converted += 1
             waits.append(round((converted_at - added_at).total_seconds() / 86400, 2))
@@ -1323,6 +1428,7 @@ async def _watchlist_conversion(
                     media_type=item.media_type,
                     poster_url=poster_for(item),
                     added_at=added_at,
+                    added_on_plex=on_plex,
                     days_waiting=days,
                 )
             )
@@ -1332,6 +1438,7 @@ async def _watchlist_conversion(
         range=window,
         tail_days=WATCHLIST_TAIL_DAYS,
         added=len(rows),
+        plex_dated=plex_dated,
         converted=converted,
         conversion_rate=round(converted / len(rows), 4) if rows else 0.0,
         median_days_to_watch=round(median(waits), 2) if waits else None,
@@ -1806,6 +1913,8 @@ async def get_stats(
     days: int | None = Query(None, ge=1, le=3650),
     compare: bool = False,
     granularity: StatsGranularity = "day",
+    # Films, television, or both — the whole page at once. See `StatsMediaScope`.
+    media: StatsMediaScope = "all",
     # Deprecated: superseded by the shared `anime` tri-state, and kept because
     # the shipped `Stats.tsx` still sends it. See `_stats_filters`.
     anime_only: bool = False,
@@ -1832,7 +1941,7 @@ async def get_stats(
     stats-only redefinition: a play whose `UserMediaState` row is missing
     entirely still counts, because a missing row *is* "never played".
     """
-    filters = _stats_filters(filters, anime_only)
+    filters = _stats_filters(filters, anime_only, media)
     zone, resolved_name = _zone_for(user, tz)
     window = await _resolve_range(
         db, user, zone, resolved_name, preset, since, until, days, granularity
@@ -1897,6 +2006,8 @@ async def seasonality(
     db: DbSession,
     user: CurrentUser,
     filters: Annotated[MediaFilters, Depends()],
+    # Films, television, or both — the whole page at once. See `StatsMediaScope`.
+    media: StatsMediaScope = "all",
     # Deprecated alias for `anime=only`, exactly as on `GET /api/stats`.
     anime_only: bool = False,
     tz: str | None = None,
@@ -1918,7 +2029,7 @@ async def seasonality(
     everything else; a January play at 00:30 in Auckland is still December in
     UTC.
     """
-    filters = _stats_filters(filters, anime_only)
+    filters = _stats_filters(filters, anime_only, media)
     zone, resolved_name = _zone_for(user, tz)
 
     rows = (
@@ -1984,6 +2095,11 @@ async def show_completion(
     db: DbSession,
     user: CurrentUser,
     filters: Annotated[MediaFilters, Depends()],
+    # Films, television, or both — the whole page at once. See `StatsMediaScope`.
+    media: StatsMediaScope = "all",
+    # Count season 0 towards completion. Off by default, app-wide; see
+    # `completion.py`, which the item page and the sync share.
+    include_specials: bool = False,
     anime_only: bool = False,
 ) -> ShowCompletionOut:
     """How far through each show you are, and which ones you walked away from.
@@ -2000,9 +2116,16 @@ async def show_completion(
 
     The shared browse filters do apply, so "how far through my anime am I" is
     one request.
+
+    **`media=movies` answers with nothing, and that is the honest answer.**
+    Completion is a question about a series; a film has no episodes to be
+    part-way through. The parameter is still accepted rather than rejected —
+    the whole page carries one scope and a shared link must not 422 on the
+    section that cannot use it — and every count comes back zero, which the
+    page states rather than dressing up as "no series started".
     """
-    filters = _stats_filters(filters, anime_only)
-    return await _show_completion(db, user, filters)
+    filters = _stats_filters(filters, anime_only, media)
+    return await _show_completion(db, user, filters, include_specials)
 
 
 @router.get("/watchlist", response_model=WatchlistConversionOut)
@@ -2014,6 +2137,8 @@ async def watchlist_conversion(
     since: datetime | None = None,
     until: datetime | None = None,
     days: int | None = Query(None, ge=1, le=3650),
+    # Films, television, or both — the whole page at once. See `StatsMediaScope`.
+    media: StatsMediaScope = "all",
     anime_only: bool = False,
     tz: str | None = None,
 ) -> WatchlistConversionOut:
@@ -2030,10 +2155,10 @@ async def watchlist_conversion(
 
     `granularity` is not taken: nothing here is a series.
     """
-    filters = _stats_filters(filters, anime_only)
+    filters = _stats_filters(filters, anime_only, media)
     zone, resolved_name = _zone_for(user, tz)
     earliest = await db.scalar(
-        select(func.min(WatchlistEntry.added_at)).where(WatchlistEntry.user_id == user.id)
+        select(func.min(watchlist_added_at())).where(WatchlistEntry.user_id == user.id)
     )
     window = await _resolve_range(
         db, user, zone, resolved_name, preset, since, until, days, "day", earliest
@@ -2041,7 +2166,9 @@ async def watchlist_conversion(
     return await _watchlist_conversion(db, user, window, filters)
 
 
-def _inventory_filters(filters: MediaFilters, anime_only: bool) -> MediaFilters:
+def _inventory_filters(
+    filters: MediaFilters, anime_only: bool, media: StatsMediaScope = "all"
+) -> MediaFilters:
     """The browse filters for a question about the shelf rather than the viewing.
 
     The deliberate difference from `_stats_filters`: **`personal` is left
@@ -2057,6 +2184,7 @@ def _inventory_filters(filters: MediaFilters, anime_only: bool) -> MediaFilters:
     """
     if anime_only:
         filters.anime = "only"
+    filters.media_scope = media
     return filters
 
 
@@ -2065,6 +2193,8 @@ async def coverage(
     db: DbSession,
     user: CurrentUser,
     filters: Annotated[MediaFilters, Depends()],
+    # Films, television, or both — the whole page at once. See `StatsMediaScope`.
+    media: StatsMediaScope = "all",
     anime_only: bool = False,
 ) -> CoverageOut:
     """What fraction of the library has actually been watched.
@@ -2077,7 +2207,7 @@ async def coverage(
     applies that condition itself — so setting it to `false` returns nothing,
     honestly rather than confusingly.
     """
-    filters = _inventory_filters(filters, anime_only)
+    filters = _inventory_filters(filters, anime_only, media)
     return await _coverage(db, user, filters)
 
 
@@ -2090,6 +2220,8 @@ async def rating_depth(
     since: datetime | None = None,
     until: datetime | None = None,
     days: int | None = Query(None, ge=1, le=3650),
+    # Films, television, or both — the whole page at once. See `StatsMediaScope`.
+    media: StatsMediaScope = "all",
     anime_only: bool = False,
     tz: str | None = None,
 ) -> RatingDepthOut:
@@ -2101,7 +2233,7 @@ async def rating_depth(
     four cross-tabulations and two rankings that most loads of the page will
     never draw.
     """
-    filters = _stats_filters(filters, anime_only)
+    filters = _stats_filters(filters, anime_only, media)
     zone, resolved_name = _zone_for(user, tz)
     window = await _resolve_range(
         db, user, zone, resolved_name, preset, since, until, days, "day"
@@ -2119,6 +2251,8 @@ async def rankings(
     until: datetime | None = None,
     days: int | None = Query(None, ge=1, le=3650),
     limit: int = Query(DEFAULT_RANKING_LIMIT, ge=1, le=50),
+    # Films, television, or both — the whole page at once. See `StatsMediaScope`.
+    media: StatsMediaScope = "all",
     anime_only: bool = False,
     tz: str | None = None,
 ) -> RankingsOut:
@@ -2129,7 +2263,7 @@ async def rankings(
     page can draw its tiles before they arrive, and `limit` is a knob only this
     block has any use for.
     """
-    filters = _stats_filters(filters, anime_only)
+    filters = _stats_filters(filters, anime_only, media)
     zone, resolved_name = _zone_for(user, tz)
     window = await _resolve_range(
         db, user, zone, resolved_name, preset, since, until, days, "day"

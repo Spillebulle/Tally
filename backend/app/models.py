@@ -32,6 +32,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
@@ -614,7 +615,18 @@ class WatchlistEntry(Base):
     # False == tombstone. Removals must persist, otherwise the next pull from
     # Plex would happily re-add something the user deleted locally.
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    # When *Tally* first recorded the entry. For something added here that is
+    # the real thing; for something pulled from Plex it is only when the sync
+    # first saw it, which on a fresh install is "today" for a list built over
+    # years. `plex_added_at` is the answer when Plex gives one.
     added_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    # When the account watchlisted it *on Plex*, from Discover's `watchlistedAt`
+    # — see `services/plex_tv.watchlisted_at`, which explains why `addedAt` is
+    # not read for this. Nullable and stays nullable: Discover does not always
+    # send it, and inventing one would be worse than admitting the date is
+    # Tally's own. `UtcDateTime`, never a bare `DateTime` — SQLite hands the
+    # latter back naive and comparing it to `utcnow()` raises.
+    plex_added_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     removed_at: Mapped[datetime | None] = mapped_column(
         UtcDateTime, default=None
     )
@@ -629,6 +641,22 @@ class WatchlistEntry(Base):
     )
 
     item: Mapped[MediaItem] = relationship()
+
+
+def watchlist_added_at():
+    """When an entry was added, as one SQL expression.
+
+    Plex's answer when there is one, Tally's own "first seen" when there is
+    not. Written once because two readers ask — the watchlist page's default
+    sort and the stats page's conversion window — and a queue ordered by one
+    date next to a conversion rate computed from the other is two answers to
+    the same question.
+
+    Not a hybrid property on the class: `WatchlistEntry.plex_added_at` still has
+    to be readable on its own, because the payload says *which* date it is
+    showing and that is the whole point of keeping the two apart.
+    """
+    return func.coalesce(WatchlistEntry.plex_added_at, WatchlistEntry.added_at)
 
 
 # ---------------------------------------------------------------------------

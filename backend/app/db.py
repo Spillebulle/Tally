@@ -43,6 +43,7 @@ async def init_db() -> None:
     await _close_interrupted_sync_runs()
     await _recover_release_name_titles()
     await _resweep_incomplete_metadata()
+    await _reclassify_anime_from_stored_signals()
     await _merge_duplicates()
     log.info("Database ready at %s", settings.db_path)
 
@@ -200,6 +201,112 @@ async def _resweep_incomplete_metadata() -> None:
         )
 
 
+async def _reclassify_anime_from_stored_signals() -> None:
+    """Re-score anime detection for rows a weaker classification wrote off.
+
+    Every offline reclassification path used to call `classify` with
+    `metadata=None`, so it scored on Plex's genre list alone — no origin
+    country, no original language, no TMDB keywords, none of which the
+    classifier can reach the threshold of 5 without for an ordinary anime
+    series. `media_repo.stored_signals` reads those columns back now, but the
+    import-path fix cannot reach what the old behaviour already produced:
+    setting a library's detection chip to *auto* rewrote `is_anime` across it in
+    one pass, and nothing revisits a row that has artwork and an id. Without
+    this, an install that ever touched that chip keeps a near-empty Anime tab
+    until the user finds the admin re-detect button and presses it.
+
+    **What picks a row up:** `is_anime = False` on a movie or show whose stored
+    signals now score at or above the threshold. **What makes it stop coming
+    back:** the flip itself — once `is_anime` is True the row no longer matches,
+    so a second run, or a hundredth, finds nothing left to do.
+
+    Three deliberate limits:
+
+    * **It only ever promotes.** A row this pass would score *below* the
+      threshold is left exactly as it is. It cannot see a library's name or the
+      user's override — the two forcing signals — so it is not equipped to
+      overturn a positive verdict, the same reasoning that guards the sink in
+      `media_repo._apply_enrichment`. Demoting on a partial view is how a whole
+      anime library gets erased, which is the bug this exists to repair.
+    * **An explicit "not anime" override wins.** A row mapped into a library the
+      user has marked `anime_override = False` is skipped outright; the chip is
+      a statement, not a starting point.
+    * **Children follow their show**, because anime-ness is a property of the
+      series and seasons and episodes inherit it.
+
+    No provider is called and nothing is deleted: this reads columns the
+    database already holds and writes a boolean. Rows that stay below the
+    threshold are re-examined on every boot, which is the same shape as
+    `_recover_release_name_titles` re-reading every title — local, cheap, and
+    the only way a row scores differently after a later enrichment fills the
+    columns in.
+    """
+    from sqlalchemy import select, update
+
+    from .models import MediaItem, MediaType, PlexLibrary, PlexMapping
+    from .services.media_repo import stored_signals
+    from .services.metadata.anime import classify
+
+    promoted = 0
+    try:
+        async with session_scope() as db:
+            # A correlated NOT EXISTS, never `id NOT IN (subquery)`: SQL's NOT
+            # over a NULL is NULL and the row is dropped, so one mapping with no
+            # library would silently exclude the entire catalogue. It is also
+            # not a list of ids — a large library would blow past SQLite's bound
+            # parameter limit, the same reason `_reclassify_library` uses a
+            # subquery.
+            said_not_anime = (
+                select(PlexMapping.id)
+                .join(PlexLibrary, PlexLibrary.id == PlexMapping.library_id)
+                .where(
+                    PlexMapping.media_item_id == MediaItem.id,
+                    PlexLibrary.anime_override.is_(False),
+                )
+                .exists()
+            )
+            result = await db.execute(
+                select(MediaItem).where(
+                    MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
+                    MediaItem.is_anime.is_(False),
+                    ~said_not_anime,
+                )
+            )
+            for item in result.scalars():
+                ids, signals = stored_signals(item)
+                verdict = classify(
+                    genres=item.genres or [],
+                    ids=ids,
+                    metadata=signals,
+                    mal_matched=item.mal_id is not None,
+                )
+                if not verdict.is_anime:
+                    continue
+                log.info(
+                    "Reclassifying item %s (%r) as anime: %s",
+                    item.id,
+                    item.title,
+                    verdict.source,
+                )
+                item.is_anime = True
+                item.anime_source = verdict.source
+                await db.execute(
+                    update(MediaItem)
+                    .where(MediaItem.show_id == item.id)
+                    .values(is_anime=True, anime_source=verdict.source)
+                )
+                promoted += 1
+    except Exception:
+        log.exception("Could not re-score anime detection; continuing")
+        return
+    if promoted:
+        log.info(
+            "Re-detected %s title(s) as anime from metadata already stored; "
+            "their seasons and episodes followed",
+            promoted,
+        )
+
+
 async def _merge_duplicates() -> None:
     """Collapse items that the old watchlist import recorded twice.
 
@@ -253,6 +360,10 @@ async def _run_light_migrations() -> None:
         ("sync_runs", "progress_total", "INTEGER NOT NULL DEFAULT 0"),
         ("sync_runs", "cancel_requested", "BOOLEAN NOT NULL DEFAULT 0"),
         ("plex_pins", "link_user_id", "INTEGER"),
+        # When Plex says the account watchlisted something. NULL means Discover
+        # did not tell us, and the entry falls back to when Tally first saw it
+        # — which is a different fact and is labelled as one, never backfilled.
+        ("watchlist_entries", "plex_added_at", "DATETIME"),
         # Keys issued before scopes existed acted as their owner with no limit,
         # so 'full' is the only default that does not silently revoke them.
         ("api_keys", "scope", "VARCHAR(16) NOT NULL DEFAULT 'full'"),
