@@ -445,9 +445,106 @@ class StatsComparison(BaseModel):
     pct_change: dict[str, float]
 
 
+class TimeBucket(BaseModel):
+    """One slot of a time-shape profile: a weekday, an hour, or a month.
+
+    `index` is the machine-readable slot — 0-6 with **Monday first** for a
+    weekday, 0-23 for an hour, 1-12 for a month — and `label` is the name to
+    print. The UI should sort and key on `index`; the label is display only, so
+    it can be localised or shortened without anything else moving.
+
+    **An hour is when a play *finished*, near enough.** Plex stamps `viewedAt`
+    at the scrobble, which fires around 90% of the way through playback, so a
+    two-hour film started at 20:00 lands in the 21:00 bucket. Tally cannot do
+    better — the start time is not recorded anywhere — so a chart of these
+    should say "when you finish watching", not "when you start".
+
+    Every bucket is assigned from `watched_at.astimezone(tz)` in the timezone
+    `StatsRange.timezone` names. Bucketing in UTC would move an evening play
+    into the small hours of the next day for anyone east of Greenwich.
+    """
+
+    index: int
+    label: str
+    plays: int
+    minutes: int
+
+
+class PunchCard(BaseModel):
+    """The 7x24 weekday-by-hour grid, as a matrix rather than 168 objects.
+
+    `plays[weekday][hour]` — `weekdays` and `hours` give the axis labels in the
+    order the rows and columns are in (Monday first, 0-23). `max_plays` is the
+    largest cell, so a chart can scale its marks without a pass over the matrix.
+
+    Same caveat as `TimeBucket`: the hour is the scrobble hour, not the start.
+    """
+
+    weekdays: list[str]
+    hours: list[int]
+    plays: list[list[int]]
+    max_plays: int
+
+
+class RewatchSplit(BaseModel):
+    """One period bucket, split into first-time plays and rewatches.
+
+    `label` matches the corresponding `activity_by_day` bucket exactly, so the
+    two series can be drawn on one axis.
+    """
+
+    label: str
+    first: int
+    rewatch: int
+
+
+class RewatchedItem(BaseModel):
+    """One row of the most-rewatched ranking. Play counts are **all-time**."""
+
+    media_item_id: int
+    title: str
+    # Set for an episode, so a row reading "Episode 4" is legible on its own.
+    show_title: str | None = None
+    year: int | None = None
+    media_type: MediaType
+    poster_url: str
+    plays: int
+    first_watched: datetime
+    last_watched: datetime
+
+
+class RewatchStats(BaseModel):
+    """First-time watches versus rewatches.
+
+    A play is a rewatch when it is not the earliest recorded play of that item
+    **in the user's whole history** — not merely the earliest one inside the
+    selected window. Ranking within the window would call March's viewing of
+    something first seen in 2019 a first watch, which is exactly backwards.
+
+    `plays`, `first_watches`, `rewatches`, `rewatch_ratio` and `by_bucket` are
+    all scoped to the window (and to `anime_only`); `most_rewatched` is
+    deliberately not, because "what do you come back to?" is a question about a
+    library, not about a fortnight. It is capped, and says so via `ranked_over`.
+    """
+
+    plays: int
+    first_watches: int
+    rewatches: int
+    # rewatches / plays, 0.0 when nothing was watched. A fraction, not a
+    # percentage — the UI decides how to render it.
+    rewatch_ratio: float
+    by_bucket: list[RewatchSplit]
+    most_rewatched: list[RewatchedItem]
+    ranked_over: Literal["all_time"] = "all_time"
+
+
 class StatsOut(StatsTotals):
     range: StatsRange
     previous: StatsComparison | None = None
+    # The same window one calendar year earlier. Populated only with
+    # `compare=true`, alongside `previous`, because it costs another
+    # aggregation over another window.
+    previous_year: StatsComparison | None = None
     current_streak_days: int
     longest_streak_days: int
     top_genres: list[StatCount]
@@ -455,6 +552,41 @@ class StatsOut(StatsTotals):
     activity_by_month: list[StatCount]
     by_type: list[StatCount]
     rating_distribution: list[StatCount]
+    by_weekday: list[TimeBucket]
+    by_hour: list[TimeBucket]
+    punch_card: PunchCard
+    rewatch: RewatchStats
+
+
+class YearProfile(BaseModel):
+    """One calendar year of history: totals plus its twelve month counts.
+
+    `months` is twelve play counts, January first — a flat list rather than
+    labelled objects, so a year-by-month heatmap is one small array per year.
+    """
+
+    year: int
+    plays: int
+    minutes: int
+    months: list[int]
+
+
+class SeasonalityOut(BaseModel):
+    """The month-of-year profile, over **all** history rather than a window.
+
+    Its own endpoint on purpose: answering it means walking every play a user
+    has ever recorded, which is the one aggregation here that grows without
+    bound, and the stats page should not pay for it on every load. Timezone and
+    `anime_only` still apply; there is no window to apply.
+    """
+
+    timezone: str
+    plays: int
+    minutes: int
+    first_play: datetime | None = None
+    last_play: datetime | None = None
+    months: list[TimeBucket]
+    years: list[YearProfile]
 
 
 PlexAuthPoll.model_rebuild()
