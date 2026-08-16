@@ -66,12 +66,35 @@
  * matter — a specific January of a specific year is a contiguous window, and
  * those do drill.
  *
- * **A decade drill is expressible** now that `min_year`/`max_year` exist on the
- * browse filters — but nothing on `GET /api/stats` is decade-shaped today
- * (`SeasonalityOut.years` counts the years you *watched* in, not the years
- * titles were released), so there is nothing here to hang it on. `browseLink`
- * already takes the pair, so a release-decade series can drill the day one
- * arrives.
+ * **A source is not a filter.** `RankingsOut.by_source` splits how a play
+ * reached Tally — history import, webhook, manual. Neither destination reads
+ * `WatchEvent.source`, so those rows are read-only: it is a diagnostic, and the
+ * nearest expressible link would be the whole window under a heading naming one
+ * source, which is the silent lie again.
+ *
+ * **A sitting is not a filter either.** The plays-per-sitting histogram counts
+ * *sittings*, and nothing downstream knows what a sitting is — the threshold is
+ * a judgement made inside `routers/stats.py`. The individual sittings do drill,
+ * because a sitting has a first and a last scrobble and that pair is a window.
+ *
+ * ---
+ *
+ * ## Both destinations read the shared filter table
+ *
+ * `/history` omits `status` and `watched` and nothing else, so every facet the
+ * browse grids take — genre, studio, network, certificate, actor, the release
+ * year range, the library and server — narrows a *play* log just as well as a
+ * title grid. That is what makes the rule above decidable rather than academic:
+ * a studio ranked by **plays over a window** drills to `/history` with the
+ * window *and* the studio, which is exactly the set that was counted. The same
+ * studio on a coverage or inventory figure would go to `/browse`, because that
+ * one counts titles.
+ *
+ * A facet that takes several values goes as **repeated keys** —
+ * `?genre=Crime&genre=Drama` — never a comma-separated list, because studio
+ * names contain commas ("Warner Bros., Inc."). One occurrence parses exactly as
+ * the single value always did, so every link written before the facets became
+ * repeatable still works.
  */
 
 /** What `/browse` opens on. A value equal to one of these is left out. */
@@ -90,16 +113,61 @@ const HISTORY_DEFAULTS: Record<string, string> = {
 
 type Param = string | number | boolean | null | undefined
 
-function buildLink(path: string, values: Record<string, Param>, defaults: Record<string, string>) {
+/**
+ * One value, or several under the same key.
+ *
+ * An array is written as repeated occurrences and never joined: a comma is a
+ * legal character in a studio name, and `?studio=Warner Bros., Inc.` has to
+ * arrive as one value rather than two.
+ */
+function buildLink(
+  path: string,
+  values: Record<string, Param | readonly Param[]>,
+  defaults: Record<string, string>,
+) {
   const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(values)) {
-    if (value === null || value === undefined || value === '') continue
+  const put = (key: string, value: Param) => {
+    if (value === null || value === undefined || value === '') return
     const written = String(value)
-    if (defaults[key] === written) continue
+    if (defaults[key] === written) return
     params.append(key, written)
+  }
+  for (const [key, value] of Object.entries(values)) {
+    if (Array.isArray(value)) for (const entry of value) put(key, entry)
+    else put(key, value as Param)
   }
   const query = params.toString()
   return query ? `${path}?${query}` : path
+}
+
+/**
+ * The facets both destinations read, and read identically.
+ *
+ * Shared rather than duplicated because the *set* is shared: `media_filters.py`
+ * builds one query for `/api/media` and `/api/history` alike, and
+ * `browse-filters.ts` writes one table for the grids and the log. A facet that
+ * only one of them understood would be a filter that silently does nothing on
+ * the other, which is the failure this module exists to prevent.
+ *
+ * Each list goes out as repeated keys. `min_year`/`max_year` are a release-year
+ * *span* — 1990–1999 is the 1990s — and both read `MediaItem.year`.
+ */
+export interface FacetDrill {
+  genre?: readonly string[]
+  content_rating?: readonly string[]
+  studio?: readonly string[]
+  network?: readonly string[]
+  /** Credits, by exact name — the same match a detail page's links make. */
+  director?: string
+  actor?: string
+  /** Where the file lives, by id. See `/api/media/places` for the pickers. */
+  library_id?: readonly (string | number)[]
+  server_id?: readonly (string | number)[]
+  min_year?: number
+  max_year?: number
+  /** Minutes. `max` is inclusive on the API. */
+  min_runtime?: number
+  max_runtime?: number
 }
 
 // --- Browse: marks counted in titles --------------------------------------
@@ -113,24 +181,19 @@ function buildLink(path: string, values: Record<string, Param>, defaults: Record
  * subset they clicked. Everything here is checked against `MediaFilters` on the
  * API and `filterTable()` on the page.
  */
-export interface BrowseDrill {
+export interface BrowseDrill extends FacetDrill {
   q?: string
-  genre?: string
-  content_rating?: string
-  studio?: string
-  director?: string
+  /**
+   * The status chips, including the one this page most wants: `unwatched`,
+   * which is how "the 60% of this genre you have not seen" becomes one click.
+   * Written as the chip's own value — the page turns it into `?unwatched=true`
+   * on the wire.
+   */
   status?: string
   min_rating?: number
   max_rating?: number
+  /** One exact release year. `min_year`/`max_year` name a span instead. */
   year?: number
-  /**
-   * A release-year range — the pair behind the "Decade" control.
-   *
-   * `year` pins one; these two name a span, so `min_year: 1990, max_year: 1999`
-   * is the 1990s. Both go through `MediaItem.year` on the API.
-   */
-  min_year?: number
-  max_year?: number
   favorites?: boolean
   on_plex?: boolean | 'all'
   personal?: 'all' | 'exclude' | 'only'
@@ -156,7 +219,7 @@ export function browseLink(drill: BrowseDrill): string {
 /** The one kind filter `/history` offers, matching the `by_type` buckets. */
 export type HistoryKind = 'movie' | 'episode' | 'anime'
 
-export interface HistoryDrill {
+export interface HistoryDrill extends FacetDrill {
   /** Inclusive local start of the window. */
   since?: Date
   /** Inclusive local end of the window — end of day, not start of it. */
@@ -165,15 +228,58 @@ export interface HistoryDrill {
 }
 
 export function historyLink(drill: HistoryDrill): string {
+  const { since, until, filter, ...facets } = drill
   return buildLink(
     '/history',
     {
-      since: drill.since && localInstant(drill.since),
-      until: drill.until && localInstant(drill.until),
-      filter: drill.filter,
+      ...facets,
+      since: since && localInstant(since),
+      until: until && localInstant(until),
+      filter,
     },
     HISTORY_DEFAULTS,
   )
+}
+
+// --- labels the API chose, as bounds the destinations read ------------------
+
+/**
+ * `"1990s"` → the release-year span it names.
+ *
+ * The stats API labels a decade rather than sending its bounds, so the label is
+ * the only thing there is to drill on. Checked rather than assumed: a label
+ * this does not recognise answers `null` and the caller offers no link, which
+ * is the one honest response to "I cannot express what this mark means".
+ */
+export function decadeBounds(label: string): { min_year: number; max_year: number } | null {
+  const match = /^(\d{4})s$/.exec(label)
+  if (!match) return null
+  const start = Number(match[1])
+  return { min_year: start, max_year: start + 9 }
+}
+
+/**
+ * The runtime buckets `RatingDepthOut.by_runtime` is sliced into.
+ *
+ * Keyed on the server's own labels — `routers/stats.RUNTIME_BUCKETS` — because
+ * the payload carries the label and not the bounds. The server's are half-open
+ * `[low, high)` and `max_runtime` on the API is *inclusive*, hence 59 rather
+ * than 60. Any label missing from this map answers `null`, and a list where one
+ * row cannot be expressed offers no links at all rather than a row that
+ * silently does nothing.
+ */
+const RUNTIME_BOUNDS: Record<string, { min_runtime?: number; max_runtime?: number }> = {
+  'Under 60 min': { max_runtime: 59 },
+  '60-89 min': { min_runtime: 60, max_runtime: 89 },
+  '90-119 min': { min_runtime: 90, max_runtime: 119 },
+  '120-149 min': { min_runtime: 120, max_runtime: 149 },
+  '150 min and over': { min_runtime: 150 },
+}
+
+export function runtimeBounds(
+  label: string,
+): { min_runtime?: number; max_runtime?: number } | null {
+  return RUNTIME_BOUNDS[label] ?? null
 }
 
 // --- one title ------------------------------------------------------------

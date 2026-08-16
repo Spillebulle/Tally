@@ -86,6 +86,10 @@ export function History() {
   const { notify } = useToast()
 
   const filters = useBrowseFilters({
+    // Its own shelf of saved views: this page omits `status`, sorts on plays
+    // rather than titles, and its `since`/`until` window belongs to nothing
+    // else.
+    id: 'history',
     sorts: HISTORY_SORTS,
     defaultSort: 'watched_at',
     /**

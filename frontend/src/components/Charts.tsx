@@ -156,6 +156,27 @@ interface BarListProps<T extends StatCount> {
   /** Makes each row a button. Given the whole entry and its index. */
   onSelect?: SelectEntry<T>
   activeLabel?: string | null
+  /**
+   * A second line under the label: "18 titles · 42 hours", "crowd 7.4".
+   *
+   * For the figure that qualifies the bar rather than competes with it. A
+   * facet ranked by plays is unreadable without the number of titles behind
+   * it — "300 plays" is one binged series or thirty films — and folding that
+   * into the label would push it out of a 7.5rem column. It joins the
+   * accessible name too, so it is not a sighted-only aside.
+   */
+  meta?: (entry: T) => string | null
+  /**
+   * The value a full-width bar means. Defaults to the largest in the list.
+   *
+   * A count has no ceiling, so the biggest row filling the track is the right
+   * reading and the bars are a *ranking*. A **percentage** does have one, and
+   * without this the two disagree completely: library coverage of 49% drew as a
+   * full track — because 49 was the largest figure in the list — which reads as
+   * "all of it" for a slice that is barely half watched. Any series on a fixed
+   * scale (a percentage, a 0–10 rating) has to pin it.
+   */
+  scaleTo?: number
 }
 
 export function BarList<T extends StatCount>({
@@ -164,20 +185,24 @@ export function BarList<T extends StatCount>({
   emptyMessage = 'No data yet',
   onSelect,
   activeLabel = null,
+  meta,
+  scaleTo,
 }: BarListProps<T>) {
   if (data.length === 0) {
     return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
   }
-  const max = Math.max(...data.map((d) => d.value), 1)
+  const max = scaleTo ?? Math.max(...data.map((d) => d.value), 1)
 
   return (
     <ul className="space-y-2.5">
       {data.map((entry, index) => {
         const active = activeLabel === entry.label
+        const note = meta?.(entry) ?? null
         const row = (
           <>
-            <span className="truncate text-left text-sm text-subtle" title={entry.label}>
-              {entry.label}
+            <span className="min-w-0 text-left" title={entry.label}>
+              <span className="block truncate text-sm text-subtle">{entry.label}</span>
+              {note && <span className="block truncate text-[11px] text-muted">{note}</span>}
             </span>
             {/* Track is a lighter step of the same hue, so state reads across the bar. */}
             <div className="h-3 overflow-hidden rounded-r-[4px] bg-accent/10">
@@ -207,7 +232,7 @@ export function BarList<T extends StatCount>({
                 type="button"
                 onClick={() => onSelect(entry, index)}
                 aria-pressed={active}
-                aria-label={`${entry.label}: ${entry.value}${unit}`}
+                aria-label={`${entry.label}: ${entry.value}${unit}${note ? `, ${note}` : ''}`}
                 className={cn(
                   layout,
                   'group/bar cursor-pointer rounded-lg py-0.5 focus-visible:outline-none',
@@ -985,6 +1010,16 @@ export interface RankedRow {
   subtitle?: string | null
   posterUrl: string | null
   value: number
+  /**
+   * What to print in place of the bare count, and what to say instead of
+   * "<value> <unit>s" in the accessible name.
+   *
+   * The bar still scales on `value`, so the ranking keeps its shape: a list of
+   * hours ranks on minutes and reads "14h", and a list of disagreements ranks
+   * on the size of the gap and reads "+2.5". Without this the two would have to
+   * choose between a sortable number and a legible one.
+   */
+  valueLabel?: string
   /** Right-hand caption under the figure: "since 2019". */
   meta?: string | null
   /** Where the row goes. A row without one is read-only rather than a dead link. */
@@ -1023,8 +1058,10 @@ export function RankedList({
   return (
     <ol className="space-y-1">
       {rows.map((row, index) => {
-        const name = `${row.title}${row.subtitle ? ` — ${row.subtitle}` : ''}: ${row.value} ${
-          row.value === 1 ? unit : `${unit}s`
+        const figure =
+          row.valueLabel ?? `${row.value} ${row.value === 1 ? unit : `${unit}s`}`
+        const name = `${row.title}${row.subtitle ? ` — ${row.subtitle}` : ''}: ${figure}${
+          row.meta ? `, ${row.meta}` : ''
         }`
         const body = (
           <>
@@ -1053,7 +1090,7 @@ export function RankedList({
             </span>
             <span className="shrink-0 text-right">
               <span className="block text-sm font-semibold tabular-nums text-ink">
-                {compactNumber(row.value)}
+                {row.valueLabel ?? compactNumber(row.value)}
               </span>
               {row.meta && <span className="block text-[11px] text-muted">{row.meta}</span>}
             </span>

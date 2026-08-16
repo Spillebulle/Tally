@@ -9,38 +9,86 @@
  * every other page in this app is a single scroll.
  *
  * What that costs is navigability, so each section is a `<section id>` with its
- * own heading: `#activity`, `#composition`, `#ratings`, `#rewatch`,
- * `#seasonality`, `#records`. A link can target one, and a screen reader's
- * heading list is the outline.
+ * own heading: `#activity`, `#sessions`, `#composition`, `#rankings`,
+ * `#ratings`, `#rewatch`, `#records`, `#watchlist`, `#shows`, `#coverage`,
+ * `#seasonality`. A link can target one, and a screen reader's heading list is
+ * the outline.
  *
- * Two requests, not one. `/api/stats/seasonality` walks every play ever
- * recorded and is not bounded by the window, so it is fetched separately and
- * gets its own loading, error and empty states — folding it into the main
- * query's would make a slow all-time aggregation gate the windowed page above
- * it, and a failure of one report blank out the other seven.
+ * ## Six requests, and why they are six
+ *
+ * `/api/stats` answers the window in one aggregation. The other five — shows,
+ * coverage, ratings, rankings, watchlist — are separate endpoints *on purpose*:
+ * folding them in would make a page that already runs four aggregations run
+ * eleven, on every filter chip. So the page does what the API's own docstring
+ * asks for and fetches each **when its section is drawn**:
+ *
+ *  - Each has its own loading, error and empty state. A failed `/rankings` must
+ *    not blank the page or claim the user has watched nothing. `#seasonality`
+ *    set that precedent and the four new blocks follow it exactly.
+ *  - Each is gated on an `IntersectionObserver` that latches once, 600px ahead
+ *    of the viewport, so the sections nobody scrolls to are never paid for. The
+ *    gate opens **immediately** when the URL's hash names that section, which
+ *    is what keeps a shared link to `#rankings` working — without that, a page
+ *    that never scrolls never draws the thing the link pointed at. No observer
+ *    at all (an old browser, a test runner) means every section loads eagerly,
+ *    which is the safe direction to fail in.
+ *  - A pending block reserves its height, so the sections below it do not all
+ *    fall inside one observer margin and defeat the whole arrangement.
+ *
+ * ## What the window does and does not reach
+ *
+ * `/shows` and `/coverage` take **no window at all** — completion and inventory
+ * are facts about a viewer and a library, not about a fortnight. A date range
+ * sitting above a section it does not affect is a lie, so those two say "all
+ * time" in their own headings and are grouped at the foot of the page with
+ * `#seasonality`, which is unwindowed for the same reason. `/watchlist` is
+ * windowed on `added_at` rather than on the plays, which is a third meaning of
+ * the same control and is stated in the section itself.
  */
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, type SeasonalityQuery, type StatsQuery } from '@/lib/api'
+import {
+  api,
+  type RankingsQuery,
+  type SeasonalityQuery,
+  type StatsQuery,
+  type UnwindowedStatsQuery,
+} from '@/lib/api'
 import type {
+  ContrarianItem,
+  RankedFacet,
+  RankedTitle,
+  RatingSlice,
   RewatchSplit,
+  ShowProgress,
   StatCount,
   StatsPreset,
   StatsRange,
   StatsTotals,
+  WatchSession,
 } from '@/lib/types'
-import { compactNumber, formatWatchTime, parseLocalDateLabel } from '@/lib/utils'
+import {
+  compactNumber,
+  formatDate,
+  formatRuntime,
+  formatWatchTime,
+  parseLocalDateLabel,
+} from '@/lib/utils'
 import { useUrlParams } from '@/lib/url-state'
 import {
   browseLink,
   bucketWindow,
+  decadeBounds,
   endOfDay,
   historyLink,
   itemLink,
   localInstant,
   monthWindow,
+  runtimeBounds,
   startOfDay,
   yearWindow,
+  type HistoryDrill,
 } from '@/lib/drill-links'
 import {
   ActivityHeatmap,
@@ -54,12 +102,15 @@ import {
   RankedList,
   StackedColumnChart,
   StatTile,
+  type RankedRow,
   type StatDelta,
   type StackedEntry,
 } from '@/components/Charts'
 import { EmptyState, ErrorState, PageHeader, Segmented, Spinner } from '@/components/ui'
 import {
+  BookmarkIcon,
   ChartIcon,
+  CheckIcon,
   ClockIcon,
   FilmIcon,
   PlayIcon,
@@ -117,6 +168,15 @@ const COMPARISON_PHRASES: Record<Comparison, string> = {
 
 /** The earliest date the custom picker will accept. */
 const EARLIEST_YEAR = 1970
+
+/**
+ * How many rows each leaderboard asks for.
+ *
+ * The API takes 1–50 and defaults to 12. Twelve is a list somebody reads; fifty
+ * is a dataset, and this page already has eleven sections without turning one
+ * of them into a table.
+ */
+const RANKING_LIMIT = 12
 
 /**
  * A calendar date from the query string, or `null`.
@@ -209,6 +269,197 @@ const describeRange = (range: StatsRange) =>
   `${formatDay(range.start_day)} – ${formatDay(range.end_day)}`
 
 const plural = (count: number, unit: string) => `${count} ${count === 1 ? unit : `${unit}s`}`
+
+/** A 0–1 fraction as a whole percentage. The API sends fractions throughout. */
+const percentLabel = (fraction: number) => `${Math.round(fraction * 100)}%`
+
+/**
+ * A rating difference with its sign kept.
+ *
+ * "+1.2" and "-1.2" are opposite findings and the leading `+` is the only thing
+ * that says which, so it is written rather than left to the reader.
+ */
+const signedRating = (value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)}`
+
+/** "S02E05", or null when the payload does not place the episode. */
+function episodeCode(season: number | null, episode: number | null): string | null {
+  if (season == null || episode == null) return null
+  return `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+}
+
+/**
+ * A sitting's own window: first scrobble to last.
+ *
+ * Exact rather than "the day it started on" — a sitting that runs past midnight
+ * would lose its tail to a day window, and both ends are real instants off the
+ * wire, so there is no calendar arithmetic to get wrong here.
+ */
+const sessionWindow = (sitting: WatchSession) => ({
+  since: new Date(sitting.started_at),
+  until: new Date(sitting.ended_at),
+})
+
+// ---------------------------------------------------------------------------
+// Rows for the ranked lists
+// ---------------------------------------------------------------------------
+
+/**
+ * One leaderboard row, ranked on whichever number that board is about.
+ *
+ * `value` is what the bar scales on and `valueLabel` is what is printed, which
+ * is the only way a board of hours can rank on minutes and still read "14h".
+ * Every one of these goes to the item's own page: a row that *is* a title has
+ * a better destination than any filtered view of it.
+ */
+function titleRow(item: RankedTitle, board: 'episodes' | 'plays' | 'minutes'): RankedRow {
+  const shared = {
+    key: item.media_item_id,
+    title: item.title,
+    subtitle: item.year ? String(item.year) : null,
+    posterUrl: item.poster_url,
+    to: itemLink(item.media_item_id),
+  }
+  if (board === 'minutes') {
+    return {
+      ...shared,
+      value: item.minutes,
+      valueLabel: formatRuntime(item.minutes) ?? '0m',
+      meta: plural(item.plays, 'play'),
+    }
+  }
+  if (board === 'episodes') {
+    const episodes = item.episodes ?? item.plays
+    return {
+      ...shared,
+      value: episodes,
+      // Plex's `leaf_count`, and null when Plex never said — "of 62" is only
+      // printable when there is a 62.
+      meta: item.episodes_total ? `of ${item.episodes_total}` : formatRuntime(item.minutes),
+    }
+  }
+  return { ...shared, value: item.plays, meta: formatRuntime(item.minutes) }
+}
+
+/**
+ * A title you and the crowd disagree about.
+ *
+ * Ranked on the *size* of the gap so both lists share one shape, and labelled
+ * with the signed difference so the direction is never carried by which list it
+ * is in alone.
+ */
+const contrarianRow = (item: ContrarianItem): RankedRow => ({
+  key: item.media_item_id,
+  title: item.title,
+  subtitle: item.year ? String(item.year) : null,
+  posterUrl: item.poster_url,
+  value: Math.abs(item.difference),
+  valueLabel: signedRating(item.difference),
+  meta: `you ${item.rating} · crowd ${item.community_rating}`,
+  to: itemLink(item.media_item_id),
+})
+
+/**
+ * A facet ranking row, in the shape the bar list reads.
+ *
+ * The bar scales on **plays**, which is what the ranking is about, and the
+ * count of distinct titles rides along in `meta`: "300 plays" is one binged
+ * series or thirty films and the bar alone cannot tell them apart.
+ */
+interface FacetEntry extends StatCount {
+  titles: number
+  minutes: number
+}
+
+/**
+ * What qualifies an average-rating bar: how many titles it is over, and what
+ * the crowd said about the same slice.
+ *
+ * The crowd's figure is absent when nothing in the slice carries a community
+ * score, and it is left out rather than written as a zero — "the crowd rates
+ * this genre 0.0" is a different and false claim.
+ */
+const ratingMeta = (slice: RatingSlice) =>
+  `${plural(slice.count, 'title')}${
+    slice.community_average != null ? ` · crowd ${slice.community_average.toFixed(1)}` : ''
+  }`
+
+const facetEntries = (rows: RankedFacet[]): FacetEntry[] =>
+  rows.map((row) => ({
+    label: row.label,
+    value: row.plays,
+    titles: row.titles,
+    minutes: row.minutes,
+  }))
+
+function FacetCard({
+  title,
+  description,
+  caption,
+  rows,
+  onSelect,
+  empty,
+}: {
+  title: string
+  description: string
+  caption: string
+  rows: FacetEntry[]
+  onSelect?: (entry: FacetEntry) => void
+  empty: string
+}) {
+  return (
+    <ChartCard
+      headingLevel={3}
+      title={title}
+      description={description}
+      table={<DataTable caption={caption} rows={rows} valueHeader="Plays" />}
+    >
+      <BarList
+        data={rows}
+        emptyMessage={empty}
+        onSelect={onSelect && ((entry) => onSelect(entry))}
+        meta={(entry) =>
+          `${plural(entry.titles, 'title')} · ${formatRuntime(entry.minutes) ?? '—'}`
+        }
+      />
+    </ChartCard>
+  )
+}
+
+/**
+ * How far through a show, as a row.
+ *
+ * Ranked on episodes watched rather than on percentage, because the percentage
+ * is *nullable* — a show whose episode count Plex never gave has none, and a
+ * list that sorted on it would have to invent a number for those rows or drop
+ * them. The percentage is printed beside the count when it exists and named as
+ * missing when it does not.
+ */
+const progressRow = (show: ShowProgress): RankedRow => ({
+  key: show.media_item_id,
+  title: show.title,
+  subtitle: (() => {
+    const code = episodeCode(show.last_season, show.last_episode)
+    if (!code) return show.year ? String(show.year) : null
+    return show.last_episode_title ? `${code} · ${show.last_episode_title}` : code
+  })(),
+  posterUrl: show.poster_url,
+  value: show.episodes_watched,
+  valueLabel:
+    show.percent_complete != null
+      ? `${Math.round(show.percent_complete)}%`
+      : plural(show.episodes_watched, 'ep'),
+  // Kept short deliberately: the meta column is `shrink-0`, so a long one eats
+  // the title beside it — measured at 375px, "episode count looks stale" cut a
+  // series name down to two words. What the two phrases *mean* is spelled out
+  // once under the tiles rather than on every row.
+  meta:
+    show.percent_complete != null
+      ? `${show.episodes_watched} of ${show.episodes_total}`
+      : show.total_is_stale
+        ? 'total looks stale'
+        : 'total unknown',
+  to: itemLink(show.media_item_id),
+})
 
 // ---------------------------------------------------------------------------
 // Series shaping
@@ -385,24 +636,182 @@ function Section({
   id,
   title,
   description,
+  scope,
+  innerRef,
   children,
 }: {
   id: string
   title: string
   description?: string
+  /**
+   * What window this section covers, when it is not the page's.
+   *
+   * A badge rather than a sentence buried in the description, because the
+   * control that appears to govern it is at the top of the page and out of
+   * sight by the time these sections are on screen. `/shows` and `/coverage`
+   * take no window at all; the watchlist block takes one over a different
+   * column. Each has to say so where it is read.
+   */
+  scope?: string
+  innerRef?: (node: HTMLElement | null) => void
   children: React.ReactNode
 }) {
   return (
-    <section id={id} aria-labelledby={`${id}-heading`} className="scroll-mt-6 space-y-4">
+    <section
+      id={id}
+      ref={innerRef}
+      aria-labelledby={`${id}-heading`}
+      className="scroll-mt-6 space-y-4"
+    >
       <div className="min-w-0">
-        <h2 id={`${id}-heading`} className="text-lg font-semibold tracking-tight text-ink">
-          {title}
-        </h2>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <h2 id={`${id}-heading`} className="text-lg font-semibold tracking-tight text-ink">
+            {title}
+          </h2>
+          {scope && (
+            <span className="rounded-full border border-line px-2 py-0.5 text-[11px] font-medium uppercase tracking-wider text-muted">
+              {scope}
+            </span>
+          )}
+        </div>
         {description && <p className="mt-0.5 text-sm text-muted">{description}</p>}
       </div>
       {children}
     </section>
   )
+}
+
+/**
+ * Whether a section has come near enough the viewport to be worth fetching.
+ *
+ * Latched: once true it never goes back, so scrolling past a section and back
+ * does not re-mount its queries. Three ways to open the gate, and the last two
+ * are the ones that matter:
+ *
+ *  - the observer fires, 600px before the section reaches the screen;
+ *  - the URL's hash names this section, which is checked *before* the first
+ *    render — a shared link to `#rankings` must not depend on somebody
+ *    scrolling, and nothing scrolls a page whose content has not arrived;
+ *  - there is no `IntersectionObserver`, in which case everything loads at
+ *    once, because a section that never loads is a worse failure than a
+ *    request that was not needed.
+ *
+ * The node arrives through a callback ref rather than a `useRef`, because the
+ * sections do not exist on the first render — the page is still a skeleton —
+ * and an effect keyed on a mutable ref would never see them appear.
+ */
+function useDrawn(id: string, hash: string) {
+  const [node, setNode] = useState<HTMLElement | null>(null)
+  const [drawn, setDrawn] = useState(
+    () => hash === `#${id}` || typeof IntersectionObserver === 'undefined',
+  )
+
+  useEffect(() => {
+    if (hash === `#${id}`) setDrawn(true)
+  }, [hash, id])
+
+  useEffect(() => {
+    if (drawn || !node) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setDrawn(true)
+      },
+      // Ahead of the viewport, so the request is in flight by the time the
+      // section is read rather than starting when it is already being looked at.
+      { rootMargin: '600px 0px' },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [drawn, node])
+
+  return { ref: setNode, drawn }
+}
+
+/** What one lazily-fetched block is doing, in the shape `Block` reads. */
+interface BlockState {
+  drawn: boolean
+  /**
+   * Nothing has arrived yet — react-query's `isPending`, deliberately, not
+   * `isLoading`.
+   *
+   * `isLoading` is false for a query whose `enabled` has only just flipped
+   * true, because the fetch starts in an effect one tick later. That single
+   * frame of "not loading, no data" is enough to flash the empty state, which
+   * on this page reads as "you have watched nothing" over data that is on its
+   * way.
+   */
+  pending: boolean
+  isError: boolean
+  error: unknown
+  refetch: () => void
+}
+
+/** The pair of objects a lazy block is made of, as one state. */
+const blockState = (
+  section: { drawn: boolean },
+  query: { isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown },
+): BlockState => ({
+  drawn: section.drawn,
+  pending: query.isPending,
+  isError: query.isError,
+  error: query.error,
+  refetch: () => void query.refetch(),
+})
+
+/**
+ * The four states of a section that fetches its own data.
+ *
+ * One component rather than four copies of the same ternary, and the order is
+ * the rule this codebase keeps getting bitten by: **`isError` before the empty
+ * branch**. Falling through told users their library was empty while hiding a
+ * 500, on a page where five blocks can now fail independently.
+ *
+ * "Not drawn yet" renders a reserved-height skeleton rather than nothing, for
+ * two reasons: the page does not jump when the answer lands, and the blocks
+ * below stay far enough apart that one observer margin does not open all of
+ * them at once.
+ */
+function Block({
+  state,
+  ready,
+  empty,
+  errorTitle,
+  loadingText = 'Loading…',
+  children,
+}: {
+  state: BlockState
+  /** False while the payload is missing or says there is nothing to draw. */
+  ready: boolean
+  empty: { title: string; description: string; action?: React.ReactNode }
+  errorTitle: string
+  loadingText?: string
+  children: React.ReactNode
+}) {
+  if (!state.drawn || state.pending) {
+    return (
+      <div
+        className="card flex min-h-[14rem] items-center justify-center gap-3 p-10 text-sm text-muted"
+        role="status"
+      >
+        {state.drawn && <Spinner className="text-base" />}
+        {state.drawn ? loadingText : ''}
+      </div>
+    )
+  }
+  if (state.isError) {
+    return <ErrorState error={state.error} title={errorTitle} onRetry={state.refetch} />
+  }
+  if (!ready) {
+    return (
+      <EmptyState
+        icon={<ChartIcon />}
+        title={empty.title}
+        description={empty.description}
+        action={empty.action}
+      />
+    )
+  }
+  return <>{children}</>
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +820,9 @@ function Section({
 
 export function Stats() {
   const navigate = useNavigate()
+  // Read through the router rather than off `window`, so the value is the one
+  // the app itself navigated to and not a stale read from before hydration.
+  const { hash } = useLocation()
   const { preset, scope, compare, from, to, set, setMany, reset, active } = useStatsFilters()
 
   // The zone the viewer is actually in. The API resolves `tz` → the stored
@@ -426,7 +838,14 @@ export function Stats() {
   // URL still renders charts, rather than a 422 and an error card.
   const apiPreset: StatsPreset = preset === 'custom' ? '12m' : preset
 
-  const query: StatsQuery = {
+  /**
+   * The window every windowed request shares.
+   *
+   * Held apart from `query` because `compare` belongs to the main aggregation
+   * alone — the depth endpoints take no such flag, and passing one would put a
+   * parameter in a cache key that cannot change the answer.
+   */
+  const windowQuery: StatsQuery = {
     // A half-finished custom range asks the default question rather than a
     // rejected one: the point of validating on read is that a bad URL still
     // renders a page.
@@ -434,12 +853,16 @@ export function Stats() {
       ? { since: localInstant(customRange.since), until: localInstant(customRange.until) }
       : { preset: apiPreset }),
     anime_only: scope === 'anime',
+    tz: timezone,
+  }
+
+  const query: StatsQuery = {
+    ...windowQuery,
     // The API works out the preceding window itself, timezone and all, and
     // hands back both its bounds and the percent movement. Re-deriving "the 90
     // days before these 90 days" on the client would be a second opinion on a
     // calculation that has to agree.
     ...(compare === 'previous' ? { compare: true } : {}),
-    tz: timezone,
   }
 
   const { data, isLoading, isError, error, refetch } = useQuery({
@@ -493,6 +916,53 @@ export function Stats() {
   const seasonality = useQuery({
     queryKey: ['stats', 'seasonality', seasonalityQuery],
     queryFn: () => api.stats.seasonality(seasonalityQuery),
+  })
+
+  // --- the five depth blocks, each fetched when its section is drawn -------
+  //
+  // `enabled` is the whole arrangement: five more aggregations on mount is
+  // exactly the cost the API split these out to avoid, and most loads of this
+  // page never reach the foot of it.
+
+  const rankingsQuery: RankingsQuery = { ...windowQuery, limit: RANKING_LIMIT }
+  const rankingsSection = useDrawn('rankings', hash)
+  const rankings = useQuery({
+    queryKey: ['stats', 'rankings', rankingsQuery],
+    queryFn: () => api.stats.rankings(rankingsQuery),
+    enabled: rankingsSection.drawn,
+  })
+
+  const ratingsSection = useDrawn('ratings', hash)
+  const ratingDepth = useQuery({
+    queryKey: ['stats', 'rating-depth', windowQuery],
+    queryFn: () => api.stats.ratings(windowQuery),
+    enabled: ratingsSection.drawn,
+  })
+
+  const watchlistSection = useDrawn('watchlist', hash)
+  const conversion = useQuery({
+    queryKey: ['stats', 'watchlist-conversion', windowQuery],
+    queryFn: () => api.stats.watchlistConversion(windowQuery),
+    enabled: watchlistSection.drawn,
+  })
+
+  // The two that take no window at all, so only the scope is in the key —
+  // changing the date range must not refetch them, because it cannot change
+  // what they say.
+  const unwindowed: UnwindowedStatsQuery = { anime_only: scope === 'anime' }
+
+  const showsSection = useDrawn('shows', hash)
+  const completion = useQuery({
+    queryKey: ['stats', 'show-completion', unwindowed],
+    queryFn: () => api.stats.shows(unwindowed),
+    enabled: showsSection.drawn,
+  })
+
+  const coverageSection = useDrawn('coverage', hash)
+  const coverage = useQuery({
+    queryKey: ['stats', 'coverage', unwindowed],
+    queryFn: () => api.stats.coverage(unwindowed),
+    enabled: coverageSection.drawn,
   })
 
   // Whether there is *any* history, independent of this page's range and scope.
@@ -738,6 +1208,10 @@ export function Stats() {
   const rewatch = data.rewatch
   const splitBuckets = chunkSplit(data.activity_by_day, rewatch.by_bucket, buckets)
 
+  // --- sittings -----------------------------------------------------------
+
+  const sessions = data.sessions
+
   // --- streaks ------------------------------------------------------------
 
   const runs = streakRuns(data.activity_by_day)
@@ -775,6 +1249,18 @@ export function Stats() {
   const season = seasonality.data
   const seasonYears = season?.years ?? []
   const monthNames = season?.months.map((month) => month.label) ?? []
+
+  // --- the lazily-fetched blocks ------------------------------------------
+  //
+  // Each is `undefined` until its section has been drawn and its request has
+  // answered; `Block` renders the state and only then the children, so every
+  // reader below is inside a `&&` on the same value.
+
+  const board = rankings.data
+  const depth = ratingDepth.data
+  const watchlist = conversion.data
+  const shows = completion.data
+  const shelf = coverage.data
 
   return (
     <div className="space-y-10">
@@ -1098,6 +1584,95 @@ export function Stats() {
         </ChartCard>
       </Section>
 
+      {/*
+        Sittings ride on the main response rather than an endpoint of their own
+        — they are derived from the same rows the totals came from — so this
+        section needs no `Block` and no states beyond the page's.
+      */}
+      <Section
+        id="sessions"
+        title="Sittings"
+        description={`A run of plays with no gap longer than ${sessions.gap_minutes} minutes counts as one sitting. There is no start time recorded anywhere, so the gap between two scrobbles is the only evidence a sitting ended.`}
+      >
+        <div className="grid gap-3 sm:grid-cols-3">
+          <StatTile
+            label="Sittings"
+            value={compactNumber(sessions.sessions)}
+            hint={`From ${plural(sessions.plays, 'play')}`}
+            icon={<PlayIcon />}
+          />
+          <StatTile
+            label="Plays per sitting"
+            value={sessions.average_plays.toFixed(1)}
+            hint="On average"
+            icon={<TvIcon />}
+          />
+          <StatTile
+            label="Time per sitting"
+            value={formatWatchTime(Math.round(sessions.average_minutes))}
+            hint="On average"
+            icon={<ClockIcon />}
+          />
+        </div>
+
+        <ChartCard
+          headingLevel={3}
+          title="Plays in a sitting"
+          // No drill: this counts *sittings*, and nothing downstream knows what
+          // a sitting is — the threshold is a judgement made server-side. The
+          // two sittings named below do drill, because each one is a window.
+          description="How many sittings were one episode, and how many were six. Counted in sittings, so these bars are not clickable — the two below are."
+          table={
+            <DataTable
+              caption="Sittings by number of plays"
+              rows={sessions.by_size}
+              valueHeader="Sittings"
+            />
+          }
+        >
+          <ColumnChart
+            data={sessions.by_size}
+            formatLabel={(label) => label}
+            describe={(entry) =>
+              `${plural(entry.value, 'sitting')} of ${entry.label} ${
+                entry.label === '1' ? 'play' : 'plays'
+              }`
+            }
+            emptyMessage="Nothing watched in this range"
+          />
+        </ChartCard>
+
+        {(sessions.longest || sessions.biggest_binge) && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {sessions.longest && (
+              <StatTile
+                label="Longest sitting"
+                value={formatWatchTime(sessions.longest.minutes)}
+                hint={`${formatDay(sessions.longest.day)} · ${
+                  sessions.longest.show_title ?? sessions.longest.title
+                }`}
+                icon={<ClockIcon />}
+                to={historyLink(sessionWindow(sessions.longest))}
+                toLabel={`Longest sitting, ${formatWatchTime(sessions.longest.minutes)} on ${formatDay(sessions.longest.day)} — see those plays`}
+              />
+            )}
+            {sessions.biggest_binge && (
+              <StatTile
+                label="Biggest binge"
+                value={plural(sessions.biggest_binge.plays, 'play')}
+                hint={`${formatDay(sessions.biggest_binge.day)} · ${
+                  sessions.biggest_binge.show_title ?? sessions.biggest_binge.title
+                }`}
+                icon={<SparkIcon />}
+                accent={sessions.biggest_binge.plays >= 4}
+                to={historyLink(sessionWindow(sessions.biggest_binge))}
+                toLabel={`Biggest binge, ${plural(sessions.biggest_binge.plays, 'play')} on ${formatDay(sessions.biggest_binge.day)} — see those plays`}
+              />
+            )}
+          </div>
+        )}
+      </Section>
+
       <Section
         id="composition"
         title="Composition"
@@ -1113,7 +1688,7 @@ export function Stats() {
             <BarList
               data={data.top_genres}
               emptyMessage="No genre data yet"
-              onSelect={(entry) => navigate(browseLink({ genre: entry.label }))}
+              onSelect={(entry) => navigate(browseLink({ genre: [entry.label] }))}
             />
           </ChartCard>
 
@@ -1150,7 +1725,171 @@ export function Stats() {
         </div>
       </Section>
 
-      <Section id="ratings" title="Ratings" description="What you thought of it.">
+      <Section
+        id="rankings"
+        title="Leaderboards"
+        description="What you watched most of in this range, and where it came from."
+        innerRef={rankingsSection.ref}
+      >
+        <Block
+          state={blockState(rankingsSection, rankings)}
+          ready={Boolean(board && board.top_by_runtime.length > 0)}
+          errorTitle="Could not load the leaderboards"
+          loadingText="Ranking this window…"
+          empty={{
+            title: 'Nothing to rank yet',
+            description: 'Once there are plays in this range, the titles and studios behind them are ranked here.',
+          }}
+        >
+          {board && (
+            <div className="space-y-6">
+              <div className="grid gap-6 lg:grid-cols-2">
+                <ChartCard
+                  headingLevel={3}
+                  title="Most-watched series"
+                  description="By distinct episodes played in this range — a rewatched episode counts once. Pick one to open it."
+                  table={
+                    <DataTable
+                      caption="Series by episodes watched"
+                      rows={board.top_shows.map((item) => ({
+                        label: item.title,
+                        value: item.episodes ?? item.plays,
+                      }))}
+                      valueHeader="Episodes"
+                    />
+                  }
+                >
+                  <RankedList
+                    unit="episode"
+                    rows={board.top_shows.map((item) => titleRow(item, 'episodes'))}
+                    emptyMessage="No episodes watched in this range"
+                  />
+                </ChartCard>
+
+                <ChartCard
+                  headingLevel={3}
+                  title="Most-played films"
+                  description="By plays, so a film watched twice in this range outranks one watched once. Pick one to open it."
+                  table={
+                    <DataTable
+                      caption="Films by plays"
+                      rows={board.top_films.map((item) => ({
+                        label: item.title,
+                        value: item.plays,
+                      }))}
+                      valueHeader="Plays"
+                    />
+                  }
+                >
+                  <RankedList
+                    unit="play"
+                    rows={board.top_films.map((item) => titleRow(item, 'plays'))}
+                    emptyMessage="No films watched in this range"
+                  />
+                </ChartCard>
+              </div>
+
+              <ChartCard
+                headingLevel={3}
+                title="Where the hours went"
+                description="Films and series by total time, with episodes rolled up into their series. Pick one to open it."
+                table={
+                  <DataTable
+                    caption="Titles by minutes watched"
+                    rows={board.top_by_runtime.map((item) => ({
+                      label: item.title,
+                      value: item.minutes,
+                    }))}
+                    valueHeader="Minutes"
+                  />
+                }
+              >
+                <RankedList
+                  unit="minute"
+                  rows={board.top_by_runtime.map((item) => titleRow(item, 'minutes'))}
+                  emptyMessage="Nothing watched in this range"
+                />
+              </ChartCard>
+
+              {/*
+                Facets counted in *plays over this window*, so they drill to
+                History with the window and the facet together — which is
+                exactly the set that was counted. `/browse` would answer with
+                every title that studio ever made, watched or not.
+              */}
+              <div className="grid gap-6 lg:grid-cols-2">
+                <FacetCard
+                  title="Studios"
+                  description="Plays by studio, read through the series for an episode. Pick one to list those plays."
+                  caption="Plays by studio"
+                  rows={facetEntries(board.studios)}
+                  empty="No studio recorded on anything in this range"
+                  onSelect={(entry) =>
+                    navigate(historyLink({ ...windowDrill, studio: [entry.label] }))
+                  }
+                />
+                <FacetCard
+                  title="Networks"
+                  description="Plays by network. Pick one to list those plays."
+                  caption="Plays by network"
+                  rows={facetEntries(board.networks)}
+                  empty="No network recorded on anything in this range"
+                  onSelect={(entry) =>
+                    navigate(historyLink({ ...windowDrill, network: [entry.label] }))
+                  }
+                />
+                <FacetCard
+                  title="Release decades"
+                  description="Plays by when the title came out — an episode's own year, not its series'. Pick one to list those plays."
+                  caption="Plays by release decade"
+                  rows={facetEntries(board.decades)}
+                  empty="No release year recorded on anything in this range"
+                  // Only when every label parses. The API sends "1990s" and not
+                  // its bounds, so an unrecognised label has no link to give and
+                  // a list where one row silently does nothing is worse than a
+                  // list of none.
+                  onSelect={
+                    board.decades.every((row) => decadeBounds(row.label))
+                      ? (entry) =>
+                          navigate(
+                            historyLink({
+                              ...windowDrill,
+                              ...(decadeBounds(entry.label) as HistoryDrill),
+                            }),
+                          )
+                      : undefined
+                  }
+                />
+                <FacetCard
+                  title="Certificates"
+                  description="Plays by content rating. Pick one to list those plays."
+                  caption="Plays by certificate"
+                  rows={facetEntries(board.content_ratings)}
+                  empty="No certificate recorded on anything in this range"
+                  onSelect={(entry) =>
+                    navigate(
+                      historyLink({ ...windowDrill, content_rating: [entry.label] }),
+                    )
+                  }
+                />
+                {/* No drill: neither destination filters on how a play reached
+                    Tally, and this is a diagnostic more than a statistic — a
+                    Plex Pass instance sees webhook and history rows for plays
+                    the sync has since reconciled into one. */}
+                <FacetCard
+                  title="How the plays arrived"
+                  description="Which route recorded each play. Not a filter anywhere, so these rows do not lead off the page."
+                  caption="Plays by source"
+                  rows={facetEntries(board.by_source)}
+                  empty="Nothing watched in this range"
+                />
+              </div>
+            </div>
+          )}
+        </Block>
+      </Section>
+
+      <Section id="ratings" title="Ratings" description="What you thought of it." innerRef={ratingsSection.ref}>
         <ChartCard
           headingLevel={3}
           title="How you rate things"
@@ -1177,6 +1916,265 @@ export function Stats() {
             }
           />
         </ChartCard>
+
+        {/*
+          Everything below comes from `/api/stats/ratings`, which is its own
+          request and therefore its own three states. The distribution above is
+          on the main response and stays readable whatever this one does.
+        */}
+        <Block
+          state={blockState(ratingsSection, ratingDepth)}
+          ready={Boolean(depth && depth.rated > 0)}
+          errorTitle="Could not load the rating breakdown"
+          loadingText="Comparing your ratings…"
+          empty={{
+            title: 'Nothing rated in this range',
+            description:
+              'Rate something — here or in Plex, the two sync both ways — and this compares your scores with the crowd’s.',
+          }}
+        >
+          {depth && (
+            <div className="space-y-6">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <StatTile
+                  label="Your average"
+                  value={depth.average_rating != null ? depth.average_rating.toFixed(1) : '—'}
+                  hint={`Across ${plural(depth.rated, 'title')}`}
+                  icon={<StarIcon filled />}
+                />
+                <StatTile
+                  label="The crowd"
+                  value={
+                    depth.average_community != null
+                      ? depth.average_community.toFixed(1)
+                      : '—'
+                  }
+                  // The denominator of every agreement number here, so it is
+                  // printed rather than left to be inferred from two counts.
+                  hint={`${compactNumber(depth.rated_with_community)} comparable`}
+                  icon={<StarIcon />}
+                />
+                <StatTile
+                  label="You versus them"
+                  value={
+                    depth.average_difference != null
+                      ? signedRating(depth.average_difference)
+                      : '—'
+                  }
+                  hint={
+                    depth.average_absolute_difference != null
+                      ? `${depth.average_absolute_difference.toFixed(1)} apart either way`
+                      : 'Nothing comparable'
+                  }
+                  icon={<ChartIcon />}
+                />
+                <StatTile
+                  label="Agreement"
+                  value={
+                    depth.agreement_within_one != null
+                      ? percentLabel(depth.agreement_within_one)
+                      : '—'
+                  }
+                  hint="Within 1 point"
+                  icon={<CheckIcon />}
+                />
+              </div>
+
+              <div className="grid gap-6 lg:grid-cols-2">
+                {/*
+                  Ranked on the size of the gap, labelled with its direction.
+                  Both lists go to the title itself: a row that *is* one film
+                  has a better destination than a grid filtered down to it.
+                */}
+                <ChartCard
+                  headingLevel={3}
+                  title="You rate higher"
+                  description="Where you are kinder than the crowd. Pick a title to open it."
+                  table={
+                    <DataTable
+                      caption="Titles you rate above the crowd"
+                      rows={depth.you_rate_higher.map((item) => ({
+                        label: item.title,
+                        value: item.difference,
+                      }))}
+                      valueHeader="Difference"
+                    />
+                  }
+                >
+                  <RankedList
+                    unit="point"
+                    rows={depth.you_rate_higher.map(contrarianRow)}
+                    emptyMessage="Nothing you scored above the crowd"
+                  />
+                </ChartCard>
+
+                <ChartCard
+                  headingLevel={3}
+                  title="You rate lower"
+                  description="Where you are harsher than the crowd. Pick a title to open it."
+                  table={
+                    <DataTable
+                      caption="Titles you rate below the crowd"
+                      rows={depth.you_rate_lower.map((item) => ({
+                        label: item.title,
+                        value: item.difference,
+                      }))}
+                      valueHeader="Difference"
+                    />
+                  }
+                >
+                  <RankedList
+                    unit="point"
+                    rows={depth.you_rate_lower.map(contrarianRow)}
+                    emptyMessage="Nothing you scored below the crowd"
+                  />
+                </ChartCard>
+              </div>
+
+              <div className="grid gap-6 lg:grid-cols-2">
+                {/*
+                  These bars are your *average score* in a slice, not a count,
+                  so the crowd's average for the same slice rides in the meta
+                  line rather than as a second series — two bars of averages in
+                  one frame invites reading the pair as a total.
+
+                  The drill is honest but wider than the bar: it lands on every
+                  title you have rated in that slice, not only the ones watched
+                  in this window, because "rated during a window" is not a
+                  question `/browse` can be asked. The description says so.
+                */}
+                <ChartCard
+                  headingLevel={3}
+                  title="Your rating by genre"
+                  description="Your average score out of 10, with the crowd's beside it. Pick one to browse everything you have rated in that genre."
+                  table={
+                    <DataTable
+                      caption="Average rating by genre"
+                      rows={depth.by_genre.map((slice) => ({
+                        label: slice.label,
+                        value: slice.average,
+                      }))}
+                      valueHeader="Your average"
+                    />
+                  }
+                >
+                  <BarList
+                    data={depth.by_genre.map((slice) => ({
+                      label: slice.label,
+                      value: slice.average,
+                      slice,
+                    }))}
+                    emptyMessage="Nothing rated in this range"
+                    // Ratings are 0-10 everywhere in Tally, so the bar is a
+                    // score and not a ranking.
+                    scaleTo={10}
+                    meta={(entry) => ratingMeta(entry.slice)}
+                    onSelect={(entry) =>
+                      navigate(
+                        // `min_rating: 0` is "has a rating of yours at all" —
+                        // the API compares against `UserMediaState.rating`, and
+                        // an unrated title has no row to satisfy it.
+                        browseLink({
+                          genre: [entry.label],
+                          min_rating: 0,
+                          sort: 'rating',
+                        }),
+                      )
+                    }
+                  />
+                </ChartCard>
+
+                <ChartCard
+                  headingLevel={3}
+                  title="Your rating by decade"
+                  description="Whether you are kinder to older films. Pick one to browse what you rated from it."
+                  table={
+                    <DataTable
+                      caption="Average rating by release decade"
+                      rows={depth.by_decade.map((slice) => ({
+                        label: slice.label,
+                        value: slice.average,
+                      }))}
+                      valueHeader="Your average"
+                    />
+                  }
+                >
+                  <BarList
+                    data={depth.by_decade.map((slice) => ({
+                      label: slice.label,
+                      value: slice.average,
+                      slice,
+                    }))}
+                    emptyMessage="Nothing rated in this range"
+                    // Ratings are 0-10 everywhere in Tally, so the bar is a
+                    // score and not a ranking.
+                    scaleTo={10}
+                    meta={(entry) => ratingMeta(entry.slice)}
+                    onSelect={
+                      depth.by_decade.every((slice) => decadeBounds(slice.label))
+                        ? (entry) =>
+                            navigate(
+                              browseLink({
+                                ...decadeBounds(entry.label)!,
+                                min_rating: 0,
+                                sort: 'rating',
+                              }),
+                            )
+                        : undefined
+                    }
+                  />
+                </ChartCard>
+              </div>
+
+              <ChartCard
+                headingLevel={3}
+                title="Your rating by length"
+                description={
+                  depth.runtime_unknown > 0
+                    ? `Whether a three-hour film has to earn it. ${plural(depth.runtime_unknown, 'rated title')} have no runtime recorded and are in no bucket. Pick one to browse it.`
+                    : 'Whether a three-hour film has to earn it. Pick one to browse it.'
+                }
+                table={
+                  <DataTable
+                    caption="Average rating by runtime"
+                    rows={depth.by_runtime.map((slice) => ({
+                      label: slice.label,
+                      value: slice.average,
+                    }))}
+                    valueHeader="Your average"
+                  />
+                }
+              >
+                <BarList
+                  data={depth.by_runtime.map((slice) => ({
+                    label: slice.label,
+                    value: slice.average,
+                    slice,
+                  }))}
+                  emptyMessage="Nothing rated in this range"
+                  scaleTo={10}
+                  meta={(entry) => ratingMeta(entry.slice)}
+                  // The bucket labels are the server's and carry no bounds, so
+                  // the map in `drill-links` is the only thing that can turn one
+                  // into a filter — and a label it does not know takes the whole
+                  // list out of the tab order rather than leaving a dead row.
+                  onSelect={
+                    depth.by_runtime.every((slice) => runtimeBounds(slice.label))
+                      ? (entry) =>
+                          navigate(
+                            browseLink({
+                              ...runtimeBounds(entry.label)!,
+                              min_rating: 0,
+                              sort: 'rating',
+                            }),
+                          )
+                      : undefined
+                  }
+                />
+              </ChartCard>
+            </div>
+          )}
+        </Block>
       </Section>
 
       <Section
@@ -1294,9 +2292,494 @@ export function Stats() {
       </Section>
 
       <Section
+        id="records"
+        title="Streaks and records"
+        description="The extremes of this window."
+      >
+        <div className="card p-5">
+          <h3 className="text-base font-semibold tracking-tight text-ink">Streaks</h3>
+          <p className="mt-0.5 text-xs text-muted">Consecutive days with something watched.</p>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <StatTile
+              label="Current streak"
+              value={plural(data.current_streak_days, 'day')}
+              hint={currentRun ? spanLabel(currentRun) : undefined}
+              icon={<ClockIcon />}
+              accent={data.current_streak_days > 0}
+              to={currentRun ? runLink(currentRun) : undefined}
+              toLabel={currentRun ? `Current streak of ${currentRun.value} days — see those plays` : undefined}
+            />
+            <StatTile
+              label="Longest streak"
+              value={plural(data.longest_streak_days, 'day')}
+              hint={longestRun ? spanLabel(longestRun) : undefined}
+              icon={<ChartIcon />}
+              to={longestRun ? runLink(longestRun) : undefined}
+              toLabel={longestRun ? `Longest streak of ${longestRun.value} days — see those plays` : undefined}
+            />
+          </div>
+          <p className="mt-4 text-sm text-muted">
+            {data.current_streak_days === 0
+              ? 'No active streak — watch something today to start one.'
+              : data.current_streak_days >= data.longest_streak_days
+                ? 'This is your longest streak so far.'
+                : `${data.longest_streak_days - data.current_streak_days} more days to beat your record.`}
+          </p>
+        </div>
+
+        <div className="card p-5">
+          <h3 className="text-base font-semibold tracking-tight text-ink">Records</h3>
+          <p className="mt-0.5 text-xs text-muted">
+            The single busiest day, and the hour you most often finish on.
+          </p>
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            <StatTile
+              label="Heaviest day"
+              value={busiestDay ? plural(busiestDay.value, 'play') : '—'}
+              hint={busiestDay ? formatDay(busiestDay.label) : 'Nothing watched yet'}
+              icon={<ChartIcon />}
+              to={busiestDay ? historyLink(bucketWindow(busiestDay.label)) : undefined}
+              toLabel={
+                busiestDay
+                  ? `${formatDay(busiestDay.label)}, your heaviest day — see those plays`
+                  : undefined
+              }
+            />
+            {/* No link on either of these: an hour is a recurring bucket and
+                `/history` has no parameter that can say one. */}
+            <StatTile
+              label="Peak hour"
+              value={peakHour ? hourLabel(peakHour.index) : '—'}
+              hint={peakHour ? plural(peakHour.plays, 'play') : 'Nothing watched yet'}
+              icon={<ClockIcon />}
+            />
+            <StatTile
+              label="Peak slot"
+              value={peak ? `${shortDay(peak.weekday)} ${hourLabel(peak.hour)}` : '—'}
+              hint={peak ? plural(peak.plays, 'play') : 'Nothing watched yet'}
+              icon={<SparkIcon />}
+            />
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        id="watchlist"
+        title="Watchlist conversion"
+        scope="Added in this range"
+        description="Does watchlisting something mean you watch it? The range above bounds when an entry was added here — not when it was played, which is the only bound that makes the question answerable."
+        innerRef={watchlistSection.ref}
+      >
+        <Block
+          state={blockState(watchlistSection, conversion)}
+          ready={Boolean(watchlist && watchlist.added > 0)}
+          errorTitle="Could not load watchlist conversion"
+          loadingText="Following your watchlist…"
+          empty={{
+            title: 'Nothing watchlisted in this range',
+            description:
+              'Add something to your watchlist — here or in Plex Discover — and this follows how long it takes you to get to it.',
+            action: (
+              <Link to="/watchlist" className="btn-outline mt-2">
+                Open your watchlist
+              </Link>
+            ),
+          }}
+        >
+          {watchlist && (
+            <div className="space-y-6">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <StatTile
+                  label="Added"
+                  value={compactNumber(watchlist.added)}
+                  hint="In this range"
+                  icon={<BookmarkIcon />}
+                />
+                <StatTile
+                  label="Watched since"
+                  value={compactNumber(watchlist.converted)}
+                  // A play *before* the add is not a conversion, and saying so
+                  // is the difference between this number and "how many of
+                  // these have I seen".
+                  hint={`${percentLabel(watchlist.conversion_rate)} of them`}
+                  icon={<CheckIcon />}
+                  accent={watchlist.conversion_rate >= 0.5}
+                />
+                <StatTile
+                  label="Median wait"
+                  value={
+                    watchlist.median_days_to_watch != null
+                      ? plural(Math.round(watchlist.median_days_to_watch), 'day')
+                      : '—'
+                  }
+                  // Median rather than mean: one title watchlisted in 2019 and
+                  // played last week drags an average past anything useful.
+                  hint="Add to first play"
+                  icon={<ClockIcon />}
+                />
+                <StatTile
+                  label="Still waiting"
+                  value={compactNumber(watchlist.still_waiting)}
+                  hint={`${watchlist.waiting_past_tail} past ${plural(watchlist.tail_days, 'day')}`}
+                  icon={<TvIcon />}
+                />
+              </div>
+
+              <ChartCard
+                headingLevel={3}
+                title="Waiting the longest"
+                description={
+                  watchlist.churned > 0
+                    ? `Oldest first. ${plural(watchlist.removed, 'entry')} added in this range have since been removed, ${watchlist.churned} of them never played at all. Pick a title to open it.`
+                    : 'Oldest first — the entries that have been on the list longest without a play. Pick a title to open it.'
+                }
+                table={
+                  <DataTable
+                    caption="Watchlist entries waiting the longest"
+                    rows={watchlist.waiting.map((entry) => ({
+                      label: entry.title,
+                      value: entry.days_waiting,
+                    }))}
+                    valueHeader="Days waiting"
+                  />
+                }
+              >
+                <RankedList
+                  unit="day"
+                  emptyMessage="Nothing is waiting — everything added in this range has been played"
+                  rows={watchlist.waiting.map((entry) => ({
+                    key: entry.media_item_id,
+                    title: entry.title,
+                    subtitle: entry.year ? String(entry.year) : null,
+                    posterUrl: entry.poster_url,
+                    value: entry.days_waiting,
+                    valueLabel: plural(entry.days_waiting, 'day'),
+                    // A real instant off the wire, so `new Date` is the right
+                    // reader — the banned form is `new Date('2026-08-16')`.
+                    meta: `added ${formatDate(entry.added_at)}`,
+                    to: itemLink(entry.media_item_id),
+                  }))}
+                />
+                <div className="mt-4 border-t border-line pt-3">
+                  <Link
+                    to="/watchlist"
+                    className="text-xs font-medium text-accent hover:underline"
+                  >
+                    See the whole watchlist →
+                  </Link>
+                </div>
+              </ChartCard>
+            </div>
+          )}
+        </Block>
+      </Section>
+
+      <Section
+        id="shows"
+        title="Series progress"
+        scope="All time"
+        description="How far through each series you are, and the ones you walked away from. Deliberately not bounded by the range above: being 40% through a series is a fact about you and that series, and scoping it to a fortnight would report something you finished last year as barely started."
+        innerRef={showsSection.ref}
+      >
+        <Block
+          state={blockState(showsSection, completion)}
+          ready={Boolean(shows && shows.shows_started > 0)}
+          errorTitle="Could not load series progress"
+          loadingText="Reading every episode you have watched…"
+          empty={{
+            title: 'No series started yet',
+            description:
+              'Once you have watched an episode of something, how far through it you are shows up here.',
+          }}
+        >
+          {shows && (
+            <div className="space-y-6">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <StatTile
+                  label="Series started"
+                  value={compactNumber(shows.shows_started)}
+                  hint="One episode or more"
+                  icon={<TvIcon />}
+                />
+                <StatTile
+                  label="Finished"
+                  value={compactNumber(shows.shows_completed)}
+                  hint="Every episode played"
+                  icon={<CheckIcon />}
+                />
+                <StatTile
+                  label="Part-way through"
+                  value={compactNumber(shows.shows_in_progress)}
+                  // Four tiles across leaves about 180px of hint. The long form
+                  // — "with no episode count from Plex" — truncates to nothing
+                  // useful, so the count is terse here and the fact it counts
+                  // is spelled out under the tiles.
+                  hint={
+                    shows.shows_unknown_total > 0
+                      ? `${shows.shows_unknown_total} totals unknown`
+                      : 'Still going'
+                  }
+                  icon={<PlayIcon />}
+                />
+                <StatTile
+                  label="Given up on"
+                  value={compactNumber(shows.shows_abandoned)}
+                  // The thresholds are a judgement, not a fact, so the tile
+                  // states them rather than presenting the count as one.
+                  hint={`Under ${Math.round(shows.abandoned_under_percent)}%, ${shows.abandoned_after_days}d idle`}
+                  icon={<ClockIcon />}
+                />
+              </div>
+
+              {shows.shows_unknown_total > 0 && (
+                <p className="text-xs text-muted">
+                  {shows.shows_unknown_total} of these have no episode count from Plex, so
+                  how far through them you are is unknown rather than estimated —
+                  counting the episode rows Tally happens to hold would report every one of
+                  them as finished.
+                </p>
+              )}
+
+              <div className="grid gap-6 lg:grid-cols-2">
+                <ChartCard
+                  headingLevel={3}
+                  title="Still going"
+                  description="Most recently watched first, with where you stopped. Pick one to open it."
+                  table={
+                    <DataTable
+                      caption="Series in progress, by episodes watched"
+                      rows={shows.in_progress.map((show) => ({
+                        label: show.title,
+                        value: show.episodes_watched,
+                      }))}
+                      valueHeader="Episodes watched"
+                    />
+                  }
+                >
+                  <RankedList
+                    unit="episode"
+                    rows={shows.in_progress.map(progressRow)}
+                    emptyMessage="Nothing part-way through"
+                  />
+                </ChartCard>
+
+                <ChartCard
+                  headingLevel={3}
+                  title="Walked away from"
+                  description={`Dropped outright, or under ${Math.round(shows.abandoned_under_percent)}% and untouched for ${shows.abandoned_after_days} days. Pick one to pick it back up.`}
+                  table={
+                    <DataTable
+                      caption="Abandoned series, by episodes watched"
+                      rows={shows.abandoned.map((show) => ({
+                        label: show.title,
+                        value: show.episodes_watched,
+                      }))}
+                      valueHeader="Episodes watched"
+                    />
+                  }
+                >
+                  <RankedList
+                    unit="episode"
+                    rows={shows.abandoned.map(progressRow)}
+                    emptyMessage="Nothing abandoned — you finish what you start"
+                  />
+                </ChartCard>
+              </div>
+            </div>
+          )}
+        </Block>
+      </Section>
+
+      <Section
+        id="coverage"
+        title="Library coverage"
+        scope="All time"
+        description="How much of what you own you have actually watched. An inventory rather than a viewing habit, so the range above does not apply to it."
+        innerRef={coverageSection.ref}
+      >
+        <Block
+          state={blockState(coverageSection, coverage)}
+          ready={Boolean(shelf && shelf.owned > 0)}
+          errorTitle="Could not load library coverage"
+          loadingText="Counting the shelf…"
+          empty={{
+            title: 'Nothing on the shelf yet',
+            description:
+              'Once a Plex library has been scanned, how much of it you have seen shows up here.',
+          }}
+        >
+          {shelf && (
+            <div className="space-y-6">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <StatTile
+                  label="On the shelf"
+                  value={compactNumber(shelf.owned)}
+                  hint="Films and series on Plex"
+                  icon={<FilmIcon />}
+                />
+                <StatTile
+                  label="Watched"
+                  value={compactNumber(shelf.watched)}
+                  hint={`${percentLabel(shelf.percent)} of the shelf`}
+                  icon={<CheckIcon />}
+                  accent={shelf.percent >= 0.5}
+                />
+                <StatTile
+                  label="Not yet watched"
+                  value={compactNumber(shelf.unwatched)}
+                  hint={`${percentLabel(1 - shelf.percent)} still to go`}
+                  icon={<BookmarkIcon />}
+                />
+              </div>
+
+              {/*
+                Stated rather than left in a tile hint that truncates, because
+                it is the one place on this page where home videos are treated
+                differently from everywhere else — every watch figure above
+                counts them, since those hours were really watched.
+              */}
+              <p className="text-xs text-muted">
+                {shelf.includes_personal
+                  ? 'Home videos are counted in this inventory. Every other figure on this page counts them too, because a play is a play.'
+                  : 'Home videos are left out of this inventory — the one figure on this page that does leave them out, because a phone recording is not a title you have failed to get round to. Every watch figure above still counts them.'}
+              </p>
+
+              <div className="grid gap-6 lg:grid-cols-2">
+                {/* No drill: `/browse` has no media-type parameter of its own —
+                    the Films and Series grids are separate pages that force
+                    their own scope, and sending somebody there would change
+                    more than the one thing they clicked. */}
+                <ChartCard
+                  headingLevel={3}
+                  title="By kind"
+                  description="What share of your films, and of your series, you have watched."
+                  table={
+                    <DataTable
+                      caption="Coverage by kind, percent watched"
+                      rows={shelf.by_type.map((slice) => ({
+                        label: slice.label,
+                        value: Math.round(slice.percent * 100),
+                      }))}
+                      valueHeader="Percent watched"
+                    />
+                  }
+                >
+                  <BarList
+                    data={shelf.by_type.map((slice) => ({
+                      label: slice.label,
+                      value: Math.round(slice.percent * 100),
+                      slice,
+                    }))}
+                    unit="%"
+                    // A percentage has a ceiling, so the track is 0-100 rather
+                    // than "relative to the biggest slice".
+                    scaleTo={100}
+                    emptyMessage="Nothing on the shelf"
+                    meta={(entry) =>
+                      `${entry.slice.watched.toLocaleString()} of ${entry.slice.owned.toLocaleString()} watched`
+                    }
+                  />
+                </ChartCard>
+
+                <ChartCard
+                  headingLevel={3}
+                  title="By genre"
+                  description="The twenty genres you own most of. Pick one to browse what you have not seen in it."
+                  table={
+                    <DataTable
+                      caption="Coverage by genre, percent watched"
+                      rows={shelf.by_genre.map((slice) => ({
+                        label: slice.label,
+                        value: Math.round(slice.percent * 100),
+                      }))}
+                      valueHeader="Percent watched"
+                    />
+                  }
+                >
+                  <BarList
+                    data={shelf.by_genre.map((slice) => ({
+                      label: slice.label,
+                      value: Math.round(slice.percent * 100),
+                      slice,
+                    }))}
+                    unit="%"
+                    // A percentage has a ceiling, so the track is 0-100 rather
+                    // than "relative to the biggest slice".
+                    scaleTo={100}
+                    emptyMessage="No genres recorded yet"
+                    meta={(entry) =>
+                      `${entry.slice.watched.toLocaleString()} of ${entry.slice.owned.toLocaleString()} watched`
+                    }
+                    // Straight at the remainder: owned, in this genre, unwatched
+                    // — and carrying the same home-video decision the inventory
+                    // above was counted with, or the grid would disagree with
+                    // the bar that opened it.
+                    onSelect={(entry) =>
+                      navigate(
+                        browseLink({
+                          genre: [entry.label],
+                          status: 'unwatched',
+                          on_plex: true,
+                          personal: shelf.includes_personal ? 'all' : 'exclude',
+                        }),
+                      )
+                    }
+                  />
+                </ChartCard>
+              </div>
+
+              <ChartCard
+                headingLevel={3}
+                title="By release decade"
+                description="Where the gaps are. Pick a decade to browse what you own from it and have not watched."
+                table={
+                  <DataTable
+                    caption="Coverage by release decade, percent watched"
+                    rows={shelf.by_decade.map((slice) => ({
+                      label: slice.label,
+                      value: Math.round(slice.percent * 100),
+                    }))}
+                    valueHeader="Percent watched"
+                  />
+                }
+              >
+                <BarList
+                  data={shelf.by_decade.map((slice) => ({
+                    label: slice.label,
+                    value: Math.round(slice.percent * 100),
+                    slice,
+                  }))}
+                  unit="%"
+                  scaleTo={100}
+                  emptyMessage="No release years recorded yet"
+                  meta={(entry) =>
+                    `${entry.slice.watched.toLocaleString()} of ${entry.slice.owned.toLocaleString()} watched`
+                  }
+                  onSelect={
+                    shelf.by_decade.every((slice) => decadeBounds(slice.label))
+                      ? (entry) =>
+                          navigate(
+                            browseLink({
+                              ...decadeBounds(entry.label)!,
+                              status: 'unwatched',
+                              on_plex: true,
+                              personal: shelf.includes_personal ? 'all' : 'exclude',
+                            }),
+                          )
+                      : undefined
+                  }
+                />
+              </ChartCard>
+            </div>
+          )}
+        </Block>
+      </Section>
+
+      <Section
         id="seasonality"
         title="Seasonality"
-        description="Every play you have ever recorded, by month of the year. Not bounded by the range above — this one is all-time."
+        scope="All time"
+        description="Every play you have ever recorded, by month of the year. Not bounded by the range above."
       >
         {/*
           Its own three states, because it is its own request. A shared spinner
@@ -1405,78 +2888,6 @@ export function Stats() {
             </ChartCard>
           </>
         )}
-      </Section>
-
-      <Section
-        id="records"
-        title="Streaks and records"
-        description="The extremes of this window."
-      >
-        <div className="card p-5">
-          <h3 className="text-base font-semibold tracking-tight text-ink">Streaks</h3>
-          <p className="mt-0.5 text-xs text-muted">Consecutive days with something watched.</p>
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            <StatTile
-              label="Current streak"
-              value={plural(data.current_streak_days, 'day')}
-              hint={currentRun ? spanLabel(currentRun) : undefined}
-              icon={<ClockIcon />}
-              accent={data.current_streak_days > 0}
-              to={currentRun ? runLink(currentRun) : undefined}
-              toLabel={currentRun ? `Current streak of ${currentRun.value} days — see those plays` : undefined}
-            />
-            <StatTile
-              label="Longest streak"
-              value={plural(data.longest_streak_days, 'day')}
-              hint={longestRun ? spanLabel(longestRun) : undefined}
-              icon={<ChartIcon />}
-              to={longestRun ? runLink(longestRun) : undefined}
-              toLabel={longestRun ? `Longest streak of ${longestRun.value} days — see those plays` : undefined}
-            />
-          </div>
-          <p className="mt-4 text-sm text-muted">
-            {data.current_streak_days === 0
-              ? 'No active streak — watch something today to start one.'
-              : data.current_streak_days >= data.longest_streak_days
-                ? 'This is your longest streak so far.'
-                : `${data.longest_streak_days - data.current_streak_days} more days to beat your record.`}
-          </p>
-        </div>
-
-        <div className="card p-5">
-          <h3 className="text-base font-semibold tracking-tight text-ink">Records</h3>
-          <p className="mt-0.5 text-xs text-muted">
-            The single busiest day, and the hour you most often finish on.
-          </p>
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">
-            <StatTile
-              label="Heaviest day"
-              value={busiestDay ? plural(busiestDay.value, 'play') : '—'}
-              hint={busiestDay ? formatDay(busiestDay.label) : 'Nothing watched yet'}
-              icon={<ChartIcon />}
-              to={busiestDay ? historyLink(bucketWindow(busiestDay.label)) : undefined}
-              toLabel={
-                busiestDay
-                  ? `${formatDay(busiestDay.label)}, your heaviest day — see those plays`
-                  : undefined
-              }
-            />
-            {/* No link on either of these: an hour is a recurring bucket and
-                `/history` has no parameter that can say one. */}
-            <StatTile
-              label="Peak hour"
-              value={peakHour ? hourLabel(peakHour.index) : '—'}
-              hint={peakHour ? plural(peakHour.plays, 'play') : 'Nothing watched yet'}
-              icon={<ClockIcon />}
-            />
-            <StatTile
-              label="Peak slot"
-              value={peak ? `${shortDay(peak.weekday)} ${hourLabel(peak.hour)}` : '—'}
-              hint={peak ? plural(peak.plays, 'play') : 'Nothing watched yet'}
-              icon={<SparkIcon />}
-            />
-          </div>
-        </div>
       </Section>
     </div>
   )
