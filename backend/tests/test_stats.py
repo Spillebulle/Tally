@@ -123,6 +123,27 @@ def _utc_at(days_ago: int, hour: int, minute: int = 0) -> datetime:
     return datetime.combine(day, time(hour, minute), tzinfo=UTC)
 
 
+def _slot(buckets: list[dict], index: int) -> dict:
+    """The bucket with this index, whatever order the list happens to be in."""
+    for bucket in buckets:
+        if bucket["index"] == index:
+            return bucket
+    raise AssertionError(f"no bucket {index} in {buckets}")
+
+
+def _a_year_before(day: date) -> date:
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:  # 29 February
+        return day.replace(year=day.year - 1, day=28)
+
+
+async def _seasonality(client, **params) -> dict:
+    response = await client.get("/api/stats/seasonality", params=params)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 # --- the empty case -------------------------------------------------------
 
 
@@ -682,3 +703,455 @@ async def test_compare_omits_a_percentage_it_cannot_compute(authed_client, db):
 
 async def test_compare_is_off_unless_asked_for(authed_client):
     assert (await _stats(authed_client, days=7))["previous"] is None
+    assert (await _stats(authed_client, days=7))["previous_year"] is None
+
+
+async def test_compare_also_returns_the_same_window_a_year_earlier(authed_client, db):
+    """"Down on last month" and "down on last December" are different questions."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Tokyo Godfathers", runtime_minutes=92))
+    await _log(db, user, item, _utc_at(2, 12))
+    await _log(db, user, item, _utc_at(3 + 365, 12))  # the same week, last year
+
+    stats = await _stats(authed_client, days=7, tz="UTC", compare=True)
+    last_year = stats["previous_year"]
+    assert stats["watch_events"] == 1
+    assert stats["previous"]["totals"]["watch_events"] == 0  # nothing last week
+    assert last_year["totals"]["watch_events"] == 1
+    assert last_year["totals"]["total_runtime_minutes"] == 92
+
+    # A calendar year back, not 365 days back: the window must still start at a
+    # local midnight on the same date, whatever leap years intervene.
+    start = date.fromisoformat(stats["range"]["start_day"])
+    assert last_year["range"]["start_day"] == _a_year_before(start).isoformat()
+
+
+# --- time shape: weekday, hour and the punch card -------------------------
+
+
+async def test_the_weekday_and_hour_belong_to_the_viewers_clock_ahead_of_utc(
+    authed_client, db
+):
+    """23:30 UTC is already tomorrow lunchtime in Auckland."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Late Autumn", runtime_minutes=128))
+    when = _utc_at(2, 23, 30)
+    await _log(db, user, item, when)
+
+    local = when.astimezone(ZoneInfo(AUCKLAND))
+    assert local.date() == when.date() + timedelta(days=1)  # the test has teeth
+
+    ahead = await _stats(authed_client, days=7, tz=AUCKLAND)
+    assert _slot(ahead["by_weekday"], local.weekday()) == {
+        "index": local.weekday(),
+        "label": local.strftime("%A"),
+        "plays": 1,
+        "minutes": 128,
+    }
+    assert _slot(ahead["by_weekday"], when.weekday())["plays"] == 0
+    assert _slot(ahead["by_hour"], local.hour)["plays"] == 1
+    assert _slot(ahead["by_hour"], 23)["plays"] == 0
+
+    in_utc = await _stats(authed_client, days=7, tz="UTC")
+    assert _slot(in_utc["by_weekday"], when.weekday())["plays"] == 1
+    assert _slot(in_utc["by_hour"], 23)["plays"] == 1
+
+
+async def test_the_weekday_and_hour_belong_to_the_viewers_clock_behind_utc(
+    authed_client, db
+):
+    """03:00 UTC is still yesterday evening in Los Angeles."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Zodiac", runtime_minutes=157))
+    when = _utc_at(2, 3, 0)
+    await _log(db, user, item, when)
+
+    local = when.astimezone(ZoneInfo(LOS_ANGELES))
+    assert local.date() == when.date() - timedelta(days=1)
+
+    behind = await _stats(authed_client, days=7, tz=LOS_ANGELES)
+    assert _slot(behind["by_weekday"], local.weekday())["plays"] == 1
+    assert _slot(behind["by_weekday"], when.weekday())["plays"] == 0
+    assert _slot(behind["by_hour"], local.hour)["plays"] == 1
+    assert _slot(behind["by_hour"], 3)["plays"] == 0
+    assert local.hour in (19, 20)  # PST or PDT, but never 03:00
+
+
+async def test_the_weekday_profile_is_monday_first_and_always_seven_long(authed_client):
+    stats = await _stats(authed_client, days=7, tz="UTC")
+    assert [bucket["label"] for bucket in stats["by_weekday"]] == [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
+    assert [bucket["index"] for bucket in stats["by_weekday"]] == list(range(7))
+    assert [bucket["index"] for bucket in stats["by_hour"]] == list(range(24))
+    assert [bucket["label"] for bucket in stats["by_hour"]][:3] == ["00", "01", "02"]
+
+
+async def test_minutes_are_counted_beside_plays_in_every_profile(authed_client, db):
+    """Three sitcom episodes and one film are not the same evening."""
+    user = await _user(db)
+    (show,) = await _add(
+        db, MediaItem(guid_key=f"test:{uuid4()}", media_type=MediaType.SHOW, title="Show")
+    )
+    film, episode = await _add(db, _movie("Heat", runtime_minutes=170), _episode(show, 1))
+    await _log(db, user, film, _utc_at(1, 20))
+    await _log(db, user, episode, _utc_at(1, 21))
+
+    stats = await _stats(authed_client, days=7, tz="UTC")
+    assert _slot(stats["by_hour"], 20)["minutes"] == 170
+    assert _slot(stats["by_hour"], 21)["minutes"] == 24  # the episode default
+    assert sum(bucket["minutes"] for bucket in stats["by_weekday"]) == 194
+    assert sum(bucket["minutes"] for bucket in stats["by_weekday"]) == (
+        stats["total_runtime_minutes"]
+    )
+
+
+async def test_the_punch_card_is_a_7x24_matrix_holding_exactly_the_plays(
+    authed_client, db
+):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Chungking Express"))
+    for days_ago, hour in ((1, 21), (2, 21), (3, 9)):
+        await _log(db, user, item, _utc_at(days_ago, hour))
+
+    stats = await _stats(authed_client, days=7, tz="UTC")
+    card = stats["punch_card"]
+    assert len(card["plays"]) == 7
+    assert all(len(row) == 24 for row in card["plays"])
+    assert card["hours"] == list(range(24))
+    assert card["weekdays"][0] == "Monday"
+
+    total = sum(cell for row in card["plays"] for cell in row)
+    assert total == stats["watch_events"] == 3
+    assert card["max_plays"] == 1  # three different (weekday, hour) slots
+
+    for days_ago, hour in ((1, 21), (2, 21), (3, 9)):
+        when = _utc_at(days_ago, hour)
+        assert card["plays"][when.weekday()][hour] == 1
+
+    # And the flat profiles are the same numbers, seen along each axis.
+    for index, bucket in enumerate(stats["by_weekday"]):
+        assert bucket["plays"] == sum(card["plays"][index])
+    for hour, bucket in enumerate(stats["by_hour"]):
+        assert bucket["plays"] == sum(row[hour] for row in card["plays"])
+
+
+async def test_the_punch_card_moves_with_the_timezone_too(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("In the Mood for Love"))
+    when = _utc_at(2, 23, 30)
+    await _log(db, user, item, when)
+
+    in_utc = (await _stats(authed_client, days=7, tz="UTC"))["punch_card"]["plays"]
+    ahead = (await _stats(authed_client, days=7, tz=AUCKLAND))["punch_card"]["plays"]
+    local = when.astimezone(ZoneInfo(AUCKLAND))
+
+    assert in_utc[when.weekday()][23] == 1
+    assert ahead[when.weekday()][23] == 0
+    assert ahead[local.weekday()][local.hour] == 1
+
+
+async def test_the_time_shape_respects_the_window_and_anime_only(authed_client, db):
+    user = await _user(db)
+    anime, western = await _add(
+        db,
+        _movie("Akira", is_anime=True, runtime_minutes=124),
+        _movie("Heat", runtime_minutes=170),
+    )
+    await _log(db, user, anime, _utc_at(1, 20))
+    await _log(db, user, western, _utc_at(1, 20))
+    await _log(db, user, anime, _utc_at(300, 20))  # outside a seven-day window
+
+    week = await _stats(authed_client, days=7, tz="UTC")
+    assert _slot(week["by_hour"], 20)["plays"] == 2
+
+    anime_week = await _stats(authed_client, days=7, tz="UTC", anime_only=True)
+    assert _slot(anime_week["by_hour"], 20)["plays"] == 1
+    assert _slot(anime_week["by_hour"], 20)["minutes"] == 124
+    assert anime_week["punch_card"]["max_plays"] == 1
+
+
+# --- first watch vs rewatch -----------------------------------------------
+
+
+async def test_a_play_is_a_rewatch_because_of_history_outside_the_window(
+    authed_client, db
+):
+    """The easy mistake: ranking inside the window calls this a first watch."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Solaris"))
+    await _log(db, user, item, _utc_at(500, 12))  # years before the window
+    await _log(db, user, item, _utc_at(2, 12))  # inside it
+
+    rewatch = (await _stats(authed_client, days=7, tz="UTC"))["rewatch"]
+    assert rewatch["plays"] == 1
+    assert rewatch["first_watches"] == 0
+    assert rewatch["rewatches"] == 1
+    assert rewatch["rewatch_ratio"] == 1.0
+
+    # Widen the window past the first play and it becomes one of each.
+    wide = (await _stats(authed_client, days=600, tz="UTC"))["rewatch"]
+    assert (wide["first_watches"], wide["rewatches"]) == (1, 1)
+    assert wide["rewatch_ratio"] == 0.5
+
+
+async def test_the_first_and_rewatch_counts_always_sum_to_the_plays(authed_client, db):
+    user = await _user(db)
+    seen_before, fresh = await _add(db, _movie("Alien"), _movie("Aliens"))
+    await _log(db, user, seen_before, _utc_at(400, 12))
+    await _log(db, user, seen_before, _utc_at(3, 12))
+    await _log(db, user, seen_before, _utc_at(2, 12))
+    await _log(db, user, fresh, _utc_at(1, 12))
+
+    stats = await _stats(authed_client, days=7, tz="UTC")
+    rewatch = stats["rewatch"]
+    assert rewatch["plays"] == stats["watch_events"] == 3
+    assert rewatch["first_watches"] + rewatch["rewatches"] == rewatch["plays"]
+    assert (rewatch["first_watches"], rewatch["rewatches"]) == (1, 2)
+    assert rewatch["rewatch_ratio"] == round(2 / 3, 4)
+
+    per_bucket = sum(b["first"] + b["rewatch"] for b in rewatch["by_bucket"])
+    assert per_bucket == rewatch["plays"]
+
+
+async def test_the_rewatch_split_lines_up_with_the_activity_series(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Ran"))
+    await _log(db, user, item, _utc_at(400, 12))
+    await _log(db, user, item, _utc_at(2, 12))
+
+    for granularity in ("day", "week", "month"):
+        stats = await _stats(
+            authed_client, days=30, tz="UTC", granularity=granularity
+        )
+        labels = [point["label"] for point in stats["activity_by_day"]]
+        assert [b["label"] for b in stats["rewatch"]["by_bucket"]] == labels
+        for point, split in zip(
+            stats["activity_by_day"], stats["rewatch"]["by_bucket"], strict=True
+        ):
+            assert point["value"] == split["first"] + split["rewatch"]
+
+    day = _utc_at(2, 12).date().isoformat()
+    split = next(
+        b for b in (await _stats(authed_client, days=30, tz="UTC"))["rewatch"]["by_bucket"]
+        if b["label"] == day
+    )
+    assert (split["first"], split["rewatch"]) == (0, 1)
+
+
+async def test_the_rewatch_split_buckets_in_the_viewers_timezone(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Perfect Blue"))
+    await _log(db, user, item, _utc_at(400, 12))
+    when = _utc_at(2, 23, 30)
+    await _log(db, user, item, when)
+
+    ahead = (await _stats(authed_client, days=30, tz=AUCKLAND))["rewatch"]["by_bucket"]
+    local_day = when.astimezone(ZoneInfo(AUCKLAND)).date().isoformat()
+    assert next(b for b in ahead if b["label"] == local_day)["rewatch"] == 1
+    assert next(b for b in ahead if b["label"] == when.date().isoformat())["rewatch"] == 0
+
+
+async def test_the_most_rewatched_ranking_counts_the_whole_history_not_the_window(
+    authed_client, db
+):
+    """Nothing here was watched inside the window, and the ranking still knows."""
+    user = await _user(db)
+    often, once = await _add(db, _movie("The Thing"), _movie("Prince of Darkness"))
+    for days_ago in (500, 400, 300):
+        await _log(db, user, often, _utc_at(days_ago, 12))
+    await _log(db, user, once, _utc_at(450, 12))
+
+    stats = await _stats(authed_client, days=7, tz="UTC")
+    assert stats["watch_events"] == 0  # the window itself is empty
+    ranking = stats["rewatch"]["most_rewatched"]
+    assert [row["title"] for row in ranking] == ["The Thing"]  # one play is not a rewatch
+    row = ranking[0]
+    assert row["plays"] == 3
+    assert row["media_item_id"] == often.id
+    assert row["first_watched"].startswith(_utc_at(500, 12).date().isoformat())
+    assert row["last_watched"].startswith(_utc_at(300, 12).date().isoformat())
+    assert row["poster_url"] == f"/api/images/{often.id}/poster"
+    assert stats["rewatch"]["ranked_over"] == "all_time"
+
+
+async def test_the_ranking_is_ordered_by_plays_and_names_an_episodes_show(
+    authed_client, db
+):
+    user = await _user(db)
+    (show,) = await _add(
+        db, MediaItem(guid_key=f"test:{uuid4()}", media_type=MediaType.SHOW, title="Firefly")
+    )
+    film, episode = await _add(db, _movie("Serenity", year=2005), _episode(show, 4))
+    for days_ago in (30, 20):
+        await _log(db, user, film, _utc_at(days_ago, 12))
+    for days_ago in (30, 20, 10, 5):
+        await _log(db, user, episode, _utc_at(days_ago, 12))
+
+    ranking = (await _stats(authed_client, days=365, tz="UTC"))["rewatch"]["most_rewatched"]
+    assert [(row["title"], row["plays"]) for row in ranking] == [
+        ("Episode 4", 4),
+        ("Serenity", 2),
+    ]
+    assert ranking[0]["show_title"] == "Firefly"
+    assert ranking[1]["show_title"] is None
+    assert ranking[1]["year"] == 2005
+    assert ranking[1]["media_type"] == "movie"
+
+
+async def test_the_ranking_and_the_split_respect_anime_only(authed_client, db):
+    user = await _user(db)
+    anime, western = await _add(db, _movie("Akira", is_anime=True), _movie("Heat"))
+    for days_ago in (5, 4):
+        await _log(db, user, anime, _utc_at(days_ago, 12))
+        await _log(db, user, western, _utc_at(days_ago, 13))
+
+    rewatch = (await _stats(authed_client, days=7, tz="UTC", anime_only=True))["rewatch"]
+    assert [row["title"] for row in rewatch["most_rewatched"]] == ["Akira"]
+    assert (rewatch["first_watches"], rewatch["rewatches"]) == (1, 1)
+
+
+async def test_one_users_rewatches_never_appear_in_anothers(authed_client, db):
+    mine = await _user(db)
+    theirs = await _second_user(db)
+    (item,) = await _add(db, _movie("Groundhog Day"))
+    # The same item, watched once by me and three times by them.
+    await _log(db, mine, item, _utc_at(2, 12))
+    for days_ago in (5, 4, 3):
+        await _log(db, theirs, item, _utc_at(days_ago, 12))
+
+    rewatch = (await _stats(authed_client, days=7, tz="UTC"))["rewatch"]
+    assert rewatch["plays"] == 1
+    # Their three plays neither make mine a rewatch nor put the film in my
+    # ranking: the ranking is all-time, but it is still all of *my* time.
+    assert (rewatch["first_watches"], rewatch["rewatches"]) == (1, 0)
+    assert rewatch["most_rewatched"] == []
+
+
+async def test_two_plays_stamped_at_the_same_instant_are_one_first_and_one_rewatch(
+    authed_client, db
+):
+    """A tie has to break somewhere, and it must break the same way every time."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Primer"))
+    when = _utc_at(2, 12)
+    await _log(db, user, item, when)
+    await _log(db, user, item, when)
+
+    rewatch = (await _stats(authed_client, days=7, tz="UTC"))["rewatch"]
+    assert (rewatch["first_watches"], rewatch["rewatches"]) == (1, 1)
+
+
+async def test_the_time_shape_and_rewatch_fields_are_present_and_empty_when_nothing_was_watched(
+    authed_client,
+):
+    stats = await _stats(authed_client)
+    assert [bucket["plays"] for bucket in stats["by_weekday"]] == [0] * 7
+    assert [bucket["minutes"] for bucket in stats["by_hour"]] == [0] * 24
+    assert stats["punch_card"]["plays"] == [[0] * 24 for _ in range(7)]
+    assert stats["punch_card"]["max_plays"] == 0
+
+    rewatch = stats["rewatch"]
+    assert rewatch["plays"] == rewatch["first_watches"] == rewatch["rewatches"] == 0
+    assert rewatch["rewatch_ratio"] == 0.0  # not a division by zero
+    assert rewatch["most_rewatched"] == []
+    # The split still draws a full axis, like the activity series above it.
+    assert len(rewatch["by_bucket"]) == len(stats["activity_by_day"])
+    assert all(b["first"] == b["rewatch"] == 0 for b in rewatch["by_bucket"])
+
+
+# --- seasonality ----------------------------------------------------------
+
+
+async def test_seasonality_buckets_months_in_the_viewers_zone_across_all_history(
+    authed_client, db
+):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Winter Light", runtime_minutes=81))
+    # New Year's Eve in UTC is already New Year's Day in Auckland.
+    await _log(db, user, item, datetime(2024, 12, 31, 23, 30, tzinfo=UTC))
+
+    in_utc = await _seasonality(authed_client, tz="UTC")
+    assert in_utc["timezone"] == "UTC"
+    assert in_utc["plays"] == 1
+    assert in_utc["minutes"] == 81
+    assert _slot(in_utc["months"], 12) == {
+        "index": 12,
+        "label": "December",
+        "plays": 1,
+        "minutes": 81,
+    }
+    assert [year["year"] for year in in_utc["years"]] == [2024]
+    assert in_utc["years"][0]["months"] == [0] * 11 + [1]
+
+    ahead = await _seasonality(authed_client, tz=AUCKLAND)
+    assert _slot(ahead["months"], 1)["plays"] == 1
+    assert _slot(ahead["months"], 12)["plays"] == 0
+    assert [year["year"] for year in ahead["years"]] == [2025]
+    assert ahead["years"][0]["months"] == [1] + [0] * 11
+
+
+async def test_seasonality_ignores_the_stats_window_entirely(authed_client, db):
+    """It is the one number here with no window — that is why it has its own path."""
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Fanny and Alexander"))
+    await _log(db, user, item, _utc_at(900, 12))
+    await _log(db, user, item, _utc_at(2, 12))
+
+    assert (await _stats(authed_client, days=7, tz="UTC"))["watch_events"] == 1
+    profile = await _seasonality(authed_client, tz="UTC")
+    assert profile["plays"] == 2
+    assert sum(bucket["plays"] for bucket in profile["months"]) == 2
+    assert profile["first_play"].startswith(_utc_at(900, 12).date().isoformat())
+    assert profile["last_play"].startswith(_utc_at(2, 12).date().isoformat())
+
+
+async def test_seasonality_fills_the_years_that_hold_nothing(authed_client, db):
+    user = await _user(db)
+    (item,) = await _add(db, _movie("Barry Lyndon"))
+    await _log(db, user, item, datetime(2021, 3, 4, 12, tzinfo=UTC))
+    await _log(db, user, item, datetime(2024, 7, 9, 12, tzinfo=UTC))
+
+    profile = await _seasonality(authed_client, tz="UTC")
+    assert [year["year"] for year in profile["years"]] == [2021, 2022, 2023, 2024]
+    assert [year["plays"] for year in profile["years"]] == [1, 0, 0, 1]
+    assert profile["years"][0]["months"][2] == 1  # March
+    assert profile["years"][3]["months"][6] == 1  # July
+    assert all(len(year["months"]) == 12 for year in profile["years"])
+
+
+async def test_seasonality_is_empty_but_shaped_for_a_user_with_no_history(authed_client):
+    profile = await _seasonality(authed_client, tz="UTC")
+    assert profile["plays"] == 0
+    assert profile["minutes"] == 0
+    assert profile["first_play"] is None
+    assert profile["last_play"] is None
+    assert profile["years"] == []
+    assert [bucket["label"] for bucket in profile["months"]][:2] == ["January", "February"]
+    assert [bucket["plays"] for bucket in profile["months"]] == [0] * 12
+
+
+async def test_seasonality_is_per_user_and_honours_anime_only(authed_client, db):
+    mine = await _user(db)
+    theirs = await _second_user(db)
+    anime, western = await _add(
+        db, _movie("Akira", is_anime=True, runtime_minutes=124), _movie("Heat")
+    )
+    await _log(db, mine, anime, datetime(2023, 5, 1, 12, tzinfo=UTC))
+    await _log(db, mine, western, datetime(2023, 5, 2, 12, tzinfo=UTC))
+    await _log(db, theirs, western, datetime(2023, 5, 3, 12, tzinfo=UTC))
+
+    assert (await _seasonality(authed_client, tz="UTC"))["plays"] == 2
+    anime_only = await _seasonality(authed_client, tz="UTC", anime_only=True)
+    assert anime_only["plays"] == 1
+    assert anime_only["minutes"] == 124
+
+
+async def test_seasonality_falls_back_to_utc_for_an_unusable_zone(authed_client):
+    assert (await _seasonality(authed_client, tz="Mars/Base"))["timezone"] == "UTC"
