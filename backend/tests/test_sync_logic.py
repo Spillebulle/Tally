@@ -1000,6 +1000,81 @@ async def test_section_total_reads_totalsize_without_fetching_items(monkeypatch)
     assert await client.section_total("2", 4) == 0
 
 
+async def test_history_is_asked_for_guids_like_everything_else(monkeypatch):
+    """The thinnest payload Plex sends was the one call not asking for ids.
+
+    The section scan, the metadata re-fetch and the children fetch have always
+    sent `includeGuids=1`; history did not, which is backwards — a history row
+    carries less than any of them and is the one that most needs to name
+    itself. Without it the import can only fall back to a ratingKey that, for
+    an item Plex no longer holds, resolves to nothing.
+    """
+    from app.services.plex_server import PlexServerClient
+
+    client = PlexServerClient("https://plex.example:32400", "token")
+    seen: dict = {}
+
+    async def container(path, params=None):
+        seen.update(params or {})
+        return {"size": 0}
+
+    monkeypatch.setattr(client, "_container", container)
+    async for _page in client.iter_history(account_id=1):
+        break
+
+    assert seen.get("includeGuids") == 1, "history must ask Plex for its own ids"
+
+
+async def test_a_history_row_lands_on_the_row_plex_itself_matched(db, monkeypatch):
+    """Plex's own answer beats every heuristic, and it was being thrown away.
+
+    `plex://movie/5d77…` is Plex's identity for the item, and the library scan
+    already recorded it on `PlexMapping.plex_guid`. So a history snapshot whose
+    ratingKey no longer resolves — no mapping, nothing to re-fetch — can still
+    name its row exactly, with no title comparison and no year guess involved.
+
+    `ExternalIds.identifying` still excludes `plex_guid`, and must: that answers
+    "may this payload mint an identity", where a per-server key would be a
+    disaster. Recognising a row that already exists is the opposite question.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import PlexMapping, WatchEvent
+
+    user, server, item, _ = await _fixture_world(db)
+    mapping = await db.scalar(
+        select(PlexMapping).where(PlexMapping.rating_key == "42")
+    )
+    mapping.plex_guid = "plex://movie/5d7768ba96b655001fdc0408"
+    await db.commit()
+    before = await db.scalar(select(func.count(MediaItem.id)))
+
+    fake = FakeHistoryClient(
+        [
+            {
+                # No ratingKey: the item is gone from the library. All that
+                # survives is Plex's own name for what was played.
+                "historyKey": "/status/sessions/history/44",
+                "viewedAt": int(utcnow().timestamp()),
+                "guid": "plex://movie/5d7768ba96b655001fdc0408",
+                "title": "Some Stale Snapshot Title",
+                "type": "movie",
+            }
+        ]
+    )
+
+    service = SyncService(db)
+    monkeypatch.setattr(service, "client_for", lambda *_: _async(fake))
+    await service.sync_history(user, server, SyncStats())
+
+    assert await db.scalar(select(func.count(MediaItem.id))) == before
+    event = await db.scalar(select(WatchEvent))
+    assert event is not None and event.media_item_id == item.id
+    # And the stale snapshot title did not overwrite the library's own.
+    await db.refresh(item)
+    assert item.title == "The Matrix"
+
+
 async def test_on_deck_window_is_read_from_server_prefs(monkeypatch):
     """`/:/prefs` is the only place Plex publishes its Continue Watching window."""
     from app.services.plex_server import PlexServerClient

@@ -112,8 +112,29 @@ straight to `upsert_from_plex`.
 The test now gates the *mint*, not just the fetch: `existing_match_for_thin_payload`
 runs first, and only when it finds nothing is a row created. That "nothing" is
 the common answer and must stay allowed — a play of something since deleted
-from Plex is history that should outlive the file, and on a live instance ~75
-of the ~105 mapping-less rows are exactly that, correctly kept.
+from Plex is history that should outlive the file, and on a live instance 62 of
+the 96 mapping-less rows are exactly that, holding 271 real plays. Dropping the
+category to clear the two rows that are genuinely unidentifiable would be a
+terrible trade; do not.
+
+**Ask Plex what it thinks before guessing.** Two things were missing here for
+longer than they should have been, and both are the same mistake — reaching for
+a heuristic while Plex's own answer sat unused:
+
+* **`iter_history` did not send `includeGuids=1`.** Every other call does. The
+  thinnest payload Plex sends was the only one not asked to name itself, which
+  is exactly backwards.
+* **`PlexMapping.plex_guid` was written and never read.** `plex://movie/5d77…`
+  is Plex's identity for the item, the library scan records it, the column is
+  indexed — and `_existing_match` went straight to tmdb/tvdb/imdb and then to
+  title+year. It now resolves `plex_guid` against `PlexMapping` **first**, so a
+  payload that names nothing else still names its row exactly, with no title
+  comparison and no year heuristic anywhere near the decision.
+
+`ExternalIds.identifying` still excludes `plex_guid`, and that stays right: it
+answers *may this payload mint an identity*, and a per-server key must never
+become a `guid_key`. Recognising a row already held is the opposite question,
+and the same value answers it well. Keep the two apart.
 
 **A snapshot title is whatever the item was called that day, which may be the
 filename.** A file still unmatched when it was played is snapshotted as

@@ -586,7 +586,33 @@ class MediaRepository:
         judgement call, and only made when the payload gave no id at all:
         without a year it is not made, because "101 Dalmatians" is two different
         films and guessing between them is worse than a duplicate.
+
+        Before either, though, ask Plex what *it* thinks. `plex://movie/5d77…`
+        is Plex's own identity for the item, `PlexMapping.plex_guid` is where
+        the library scan already recorded it, and the column is indexed. So a
+        payload that names nothing else still names the row exactly, with no
+        title comparison and no year heuristic anywhere near the decision.
+
+        `ExternalIds.identifying` deliberately excludes `plex_guid`, and that
+        stays right: it answers "may this payload *mint* an identity", and a
+        per-server key must never become a `guid_key`. Recognising a row we
+        already hold is the opposite question, and the same value answers it
+        well — which is why this lookup exists here and not there.
         """
+        if ids.plex_guid:
+            found = await self.db.scalar(
+                select(MediaItem)
+                .join(PlexMapping, PlexMapping.media_item_id == MediaItem.id)
+                .where(
+                    MediaItem.media_type == media_type,
+                    PlexMapping.plex_guid == ids.plex_guid,
+                )
+                .order_by(MediaItem.id)
+                .limit(1)
+            )
+            if found is not None:
+                return found
+
         for column, value in (
             (MediaItem.tmdb_id, ids.tmdb_id),
             (MediaItem.tvdb_id, ids.tvdb_id),
