@@ -113,6 +113,19 @@ def user_pref(user: User, key: str, default: bool = True) -> bool:
     return bool((user.preferences or {}).get(key, default))
 
 
+def _duration_ms(value: Any) -> int | None:
+    """A play's length in milliseconds, as Plex reported it.
+
+    This is the only runtime a thin history row carries — those items have no
+    `runtime_minutes` at all — and the stats runtime total reads it first, so
+    a value Plex sent as a string must not be dropped on the floor.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class SyncService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
@@ -682,7 +695,7 @@ class SyncService:
             event.dedupe_key = dedupe_key
             event.source = WatchSource.PLEX_HISTORY
             event.watched_at = viewed_at
-            event.duration_ms = event.duration_ms or entry.get("duration")
+            event.duration_ms = event.duration_ms or _duration_ms(entry.get("duration"))
             event.server_id = event.server_id or server.id
             await self.db.flush()
             return False
@@ -695,7 +708,7 @@ class SyncService:
                 source=WatchSource.PLEX_HISTORY,
                 dedupe_key=dedupe_key,
                 completed=True,
-                duration_ms=entry.get("duration"),
+                duration_ms=_duration_ms(entry.get("duration")),
                 server_id=server.id,
                 device=entry.get("deviceID") and str(entry.get("deviceID")) or None,
             )

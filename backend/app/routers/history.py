@@ -24,6 +24,11 @@ from ..services.sync_service import SyncService
 router = APIRouter(prefix="/api/history", tags=["history"])
 
 
+def _runtime_ms(item: MediaItem) -> int | None:
+    """The item's runtime in milliseconds, the unit `WatchEvent.duration_ms` uses."""
+    return item.runtime_minutes * 60_000 if item.runtime_minutes else None
+
+
 @router.get("", response_model=HistoryPage)
 async def list_history(
     db: DbSession,
@@ -105,6 +110,10 @@ async def log_watch(
         source=WatchSource.MANUAL,
         dedupe_key=f"manual:{uuid.uuid4()}",
         completed=True,
+        # Nothing measured this play, so record the item's own runtime: the
+        # stats total reads `duration_ms` first, and a NULL here would make a
+        # manual log the one kind of play that never carries its own length.
+        duration_ms=_runtime_ms(item),
     )
     db.add(event)
     await db.flush()
@@ -164,6 +173,7 @@ async def mark_season_watched(
                 source=WatchSource.MANUAL,
                 dedupe_key=f"manual:{uuid.uuid4()}",
                 completed=True,
+                duration_ms=_runtime_ms(episode),
             )
         )
         await db.flush()
