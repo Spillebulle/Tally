@@ -1,10 +1,12 @@
 """Browsing, searching and per-item state changes."""
 from __future__ import annotations
 
+import operator
+from functools import reduce
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import and_, func, or_, select, true
+from sqlalchemy import String, and_, case, cast, func, or_, select, true
 
 from ..deps import CurrentUser, DbSession
 from ..media_filters import (
@@ -13,6 +15,7 @@ from ..media_filters import (
     SortField,
     SortOrder,
     apply_filters,
+    unwatched_condition,
 )
 from ..models import (
     MediaItem,
@@ -389,6 +392,88 @@ async def get_children(
             )
         )
     return cards
+
+
+@router.get("/{item_id}/recommendations", response_model=list[MediaCard])
+async def get_recommendations(
+    item_id: int,
+    db: DbSession,
+    user: CurrentUser,
+    limit: int = Query(12, ge=1, le=40),
+) -> list[MediaCard]:
+    """Unwatched movies and shows that share the most genres with this one.
+
+    The ordering is two-level on purpose. The number of shared genres is the
+    primary key and the community rating only breaks ties inside it; sorting by
+    rating alone over everything that shares a single genre returns the same
+    dozen acclaimed titles on every page in the library, which is no use for
+    finding something new. Measured against a real 4,500-item library, the pure
+    rating sort answered "The Godfather" with a romcom and a school drama,
+    while this ordering answers it with Breaking Bad, The Wire and GoodFellas.
+
+    An unrated candidate sorts *below* every rated one at the same overlap
+    (`nulls_last`) rather than above them — a missing rating is an unknown, and
+    the point of the tiebreak is to lead with what people liked.
+
+    Genres are all Tally stores; there are no keywords or cast to match on, so
+    two titles that share a vocabulary are as close as this can get.
+    """
+    item = await db.get(MediaItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+
+    # A season or an episode carries no genres of its own — the show holds them,
+    # and the show is what a viewer on that page is actually exploring around.
+    source = item
+    if item.show_id and item.media_type in (MediaType.SEASON, MediaType.EPISODE):
+        source = await db.get(MediaItem, item.show_id) or item
+
+    genres = [g for g in (source.genres or []) if isinstance(g, str) and g]
+    if not genres:
+        return []
+
+    # Same LIKE-on-the-JSON-text match the genre filter uses, once per genre.
+    matches = [cast(MediaItem.genres, String).ilike(f'%"{genre}"%') for genre in genres]
+    shared = reduce(operator.add, (case((match, 1), else_=0) for match in matches))
+
+    join_on = and_(
+        UserMediaState.media_item_id == MediaItem.id,
+        UserMediaState.user_id == user.id,
+    )
+    result = await db.execute(
+        select(MediaItem)
+        # LEFT JOIN, so an item with no state row at all counts as unwatched.
+        .outerjoin(UserMediaState, join_on)
+        .where(
+            MediaItem.id.not_in([item.id, source.id]),
+            # Seasons and episodes are reached through a show, never listed flat.
+            MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
+            unwatched_condition(),
+            # Bounds the sort input to rows that can score at all.
+            or_(*matches),
+            # …and half of the candidate's own genres have to be ones we matched
+            # on. Without this a title tagged with six genres matches everything:
+            # a two-genre Crime/Drama query pulled in a six-genre action-mystery
+            # anime ahead of Once Upon a Time in America. It is a filter rather
+            # than another sort key so the two levels above stay legible.
+            shared * 2 >= func.json_array_length(MediaItem.genres),
+        )
+        .order_by(
+            shared.desc(),
+            MediaItem.community_rating.desc().nulls_last(),
+            # Stable: without it, equally-rated rows shuffle between requests.
+            MediaItem.id.asc(),
+        )
+        .limit(limit)
+    )
+    items = list(result.scalars().unique())
+
+    ids = [i.id for i in items]
+    states = await states_for(db, user.id, ids)
+    listed = await watchlist_ids(db, user.id, ids)
+    return [
+        to_card(i, states.get(i.id), on_watchlist=i.id in listed) for i in items
+    ]
 
 
 # ---------------------------------------------------------------------------
