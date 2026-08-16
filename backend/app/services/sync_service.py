@@ -1320,6 +1320,12 @@ class SyncService:
                 MediaItem.anilist_id.is_(None),
                 MediaItem.poster_url.is_(None),
                 MediaItem.discover_thumb_path.is_(None),
+                # A home video has no answer waiting at any provider, so it
+                # would sit in this queue forever, costing a call a week and a
+                # slot in a batch that is bounded on purpose. `enrich_existing`
+                # is what marks the ones already stored, so each costs exactly
+                # one more pass through here and then drops out.
+                MediaItem.is_personal_media.is_(False),
                 or_(
                     MediaItem.metadata_updated_at.is_(None),
                     MediaItem.metadata_updated_at < cutoff,

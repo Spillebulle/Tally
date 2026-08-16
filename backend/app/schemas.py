@@ -106,6 +106,7 @@ class MediaItemOut(ORMModel):
     imdb_id: str | None
     mal_id: int | None
     is_anime: bool
+    is_personal_media: bool = False
     anime_format: str | None
     season_number: int | None
     episode_number: int | None
@@ -143,6 +144,7 @@ class MediaCard(ORMModel):
     year: int | None
     poster_url: str | None
     is_anime: bool
+    is_personal_media: bool = False
     season_number: int | None = None
     episode_number: int | None = None
     show_id: int | None = None

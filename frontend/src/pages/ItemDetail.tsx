@@ -240,6 +240,11 @@ export function ItemDetail() {
                   <SparkIcon className="text-[12px]" /> Anime
                 </span>
               )}
+              {item.is_personal_media && (
+                <span className="rounded-md bg-accent-soft px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-accent">
+                  Home video
+                </span>
+              )}
               <StatusBadge status={item.state?.status ?? null} />
               {!item.available_on_plex && (
                 <span className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted">

@@ -133,6 +133,27 @@ cleaned title goes **onto `item.title` only, never into `build_guid_key`**: the
 history import re-upserts the same entry on every overlapping sync, so a cleaned
 title in the key would mint a fresh duplicate on each one.
 
+**And some of those filenames hide no title at all.** `2020-03-31 19.42.27` is
+a phone recording played once through Plex; so is `IMG_4821`. It arrives typed
+`movie`, so nothing downstream could tell it from a film nobody can identify —
+and that is a row Tally retries *forever*, spending a TMDB call a week on a
+question with no answer and taking a slot from the bounded
+`METADATA_BACKFILL_BATCH` while it does. `looks_like_capture_filename`, in the
+same module, recognises a camera's own naming scheme — a full date **with a
+time on it**, or a known device prefix followed by a serial — and
+`MediaItem.is_personal_media` records the verdict, which is what lets the
+backfill's SQL drop the row rather than load it. `enrich_existing` is the only
+thing that marks a row already stored; there is deliberately no startup repair,
+because the backfill already reaches exactly these rows and one turn through it
+is the entire cost.
+
+The verdict is **re-evaluated on every import, never latched**: if Plex matches
+the file later and hands back a real title, the row is a film again — otherwise
+one misread would hide a film permanently. The gate is the mirror of the
+release-name parser's: a bare date is a plausible film title, and `9-1-1`,
+`Space 1999` and `Apollo 13` are titles, so the refusals are the tested half
+again.
+
 ### A search result must name the thing that was searched for
 
 Everything above is about not minting a row from a payload that cannot name
@@ -338,6 +359,14 @@ The query building is shared in `media_filters.py` (`MediaFilters` is a FastAPI
 dependency, so declaring it gives an endpoint the whole parameter set), and the
 UI in `components/BrowseFilters.tsx`. Add a filter to those and both pages get
 it; add it to one router and the pages silently disagree.
+
+One filter is off by default: `personal="exclude"` keeps home videos out, the
+same judgement `default_types` already makes about seasons and episodes. It is
+a *parameter* rather than a hard-coded clause on purpose — a misclassified film
+has to be recoverable without touching the database — and `Browse.tsx` sends
+`all` for search and the all-titles grid, which promise everything and are
+where a wrong guess is found. A row is never deleted for this; the watch event
+is real history.
 
 Each page still owns its own `sort`/`order`, because the valid sorts and the
 sensible default differ — the watchlist has `watchlist_added` (when *you*
@@ -556,7 +585,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 152 tests
+cd backend && .venv/bin/python -m pytest -q
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
