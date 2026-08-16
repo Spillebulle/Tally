@@ -1517,3 +1517,228 @@ async def test_writing_state_for_an_unknown_item_is_a_404(authed_client, path, p
     """
     response = await authed_client.put(path, json=payload)
     assert response.status_code == 404, response.text
+
+
+async def _recommendation_fixture(db):
+    """One source film plus a spread of candidates around it.
+
+    Genre overlap with the source, community rating and watched state are varied
+    independently so each ordering rule can be read off the result on its own.
+    """
+    from app.models import UserMediaState
+
+    user = (
+        await db.execute(select(User).where(User.username == "tester"))
+    ).scalar_one()
+
+    source = MediaItem(
+        guid_key="tmdb:movie:source",
+        media_type=MediaType.MOVIE,
+        title="Source",
+        genres=["Crime", "Drama"],
+        community_rating=8.6,
+    )
+    # Two shared genres, middling rating.
+    both = MediaItem(
+        guid_key="tmdb:show:both",
+        media_type=MediaType.SHOW,
+        title="Both Genres",
+        genres=["Crime", "Drama"],
+        community_rating=7.0,
+    )
+    # Two shared genres, worse rating — same tier as `both`, below it.
+    both_worse = MediaItem(
+        guid_key="tmdb:movie:both-worse",
+        media_type=MediaType.MOVIE,
+        title="Both Genres Lower Rated",
+        genres=["Crime", "Drama", "Mystery"],
+        community_rating=6.0,
+    )
+    # Two shared genres and no rating at all: last in its tier, not first.
+    both_unrated = MediaItem(
+        guid_key="tmdb:movie:both-unrated",
+        media_type=MediaType.MOVIE,
+        title="Both Genres Unrated",
+        genres=["Crime", "Drama"],
+        community_rating=None,
+    )
+    # One shared genre but the highest rating in the library — a pure rating
+    # sort would put this first, and it must not be.
+    one_acclaimed = MediaItem(
+        guid_key="tmdb:movie:one",
+        media_type=MediaType.MOVIE,
+        title="One Genre Acclaimed",
+        genres=["Drama", "Romance"],
+        community_rating=9.9,
+    )
+    # Both genres, top rating — but watched, so it is not a recommendation.
+    watched = MediaItem(
+        guid_key="tmdb:movie:watched",
+        media_type=MediaType.MOVIE,
+        title="Already Seen",
+        genres=["Crime", "Drama"],
+        community_rating=9.5,
+    )
+    # Both genres, top rating — but tagged with everything, so the shared pair
+    # is a minority of what it is.
+    diluted = MediaItem(
+        guid_key="tmdb:show:diluted",
+        media_type=MediaType.SHOW,
+        title="Tagged With Everything",
+        genres=["Crime", "Drama", "Action", "Comedy", "Horror", "Western"],
+        community_rating=9.4,
+    )
+    # No shared genre at all.
+    unrelated = MediaItem(
+        guid_key="tmdb:movie:unrelated",
+        media_type=MediaType.MOVIE,
+        title="Unrelated",
+        genres=["Western"],
+        community_rating=9.8,
+    )
+    items = [
+        source,
+        both,
+        both_worse,
+        both_unrated,
+        one_acclaimed,
+        watched,
+        diluted,
+        unrelated,
+    ]
+    db.add_all(items)
+    await db.flush()
+
+    # An episode of `both`, to prove children never surface flat.
+    db.add(
+        MediaItem(
+            guid_key="tmdb:show:both/s1e1",
+            media_type=MediaType.EPISODE,
+            title="Episode One",
+            genres=["Crime", "Drama"],
+            community_rating=9.7,
+            show_id=both.id,
+            season_number=1,
+            episode_number=1,
+        )
+    )
+    db.add(UserMediaState(user_id=user.id, media_item_id=watched.id, view_count=2))
+    # A state row that exists but records no play still counts as unwatched.
+    db.add(UserMediaState(user_id=user.id, media_item_id=both.id, view_count=0))
+    await db.commit()
+    return source
+
+
+async def test_recommendations_rank_by_shared_genres_then_community_rating(
+    authed_client, db
+):
+    """Overlap is the primary key; the rating only sorts inside a tier."""
+    source = await _recommendation_fixture(db)
+
+    response = await authed_client.get(f"/api/media/{source.id}/recommendations")
+    assert response.status_code == 200, response.text
+    titles = [card["title"] for card in response.json()]
+
+    assert titles == [
+        "Both Genres",
+        "Both Genres Lower Rated",
+        "Both Genres Unrated",
+        "One Genre Acclaimed",
+    ]
+
+
+async def test_recommendations_skip_what_you_have_watched(authed_client, db):
+    source = await _recommendation_fixture(db)
+
+    response = await authed_client.get(f"/api/media/{source.id}/recommendations")
+    titles = [card["title"] for card in response.json()]
+
+    # Two shared genres and the second-highest rating in the fixture, so it
+    # would lead the list if watched state were not applied.
+    assert "Already Seen" not in titles
+    # Nothing shared, and an episode, respectively.
+    assert "Unrelated" not in titles
+    assert "Episode One" not in titles
+    # The item itself is never its own recommendation.
+    assert "Source" not in titles
+
+
+async def test_recommendations_ignore_a_title_tagged_with_everything(authed_client, db):
+    """Two shared genres out of six is not a match, whatever the rating."""
+    source = await _recommendation_fixture(db)
+
+    response = await authed_client.get(f"/api/media/{source.id}/recommendations")
+    assert "Tagged With Everything" not in [c["title"] for c in response.json()]
+
+
+async def test_recommendations_for_an_episode_come_from_its_show(authed_client, db):
+    """An episode has no genres worth matching on; the show it belongs to does."""
+    from app.models import UserMediaState
+
+    user = (
+        await db.execute(select(User).where(User.username == "tester"))
+    ).scalar_one()
+
+    show = MediaItem(
+        guid_key="tmdb:show:1",
+        media_type=MediaType.SHOW,
+        title="The Show",
+        genres=["Crime", "Drama"],
+    )
+    neighbour = MediaItem(
+        guid_key="tmdb:movie:1",
+        media_type=MediaType.MOVIE,
+        title="Neighbour",
+        genres=["Crime", "Drama"],
+        community_rating=8.0,
+    )
+    db.add_all([show, neighbour])
+    await db.flush()
+    episode = MediaItem(
+        guid_key="tmdb:show:1/s1e1",
+        media_type=MediaType.EPISODE,
+        title="Pilot",
+        genres=[],
+        show_id=show.id,
+        season_number=1,
+        episode_number=1,
+    )
+    db.add(episode)
+    await db.flush()
+    db.add(UserMediaState(user_id=user.id, media_item_id=episode.id, view_count=1))
+    await db.commit()
+
+    response = await authed_client.get(f"/api/media/{episode.id}/recommendations")
+    assert response.status_code == 200, response.text
+    titles = [card["title"] for card in response.json()]
+    assert titles == ["Neighbour"]
+    # The show whose genres were borrowed is not a recommendation for its own
+    # episode.
+    assert "The Show" not in titles
+
+
+async def test_recommendations_for_an_unknown_item_are_a_404(authed_client):
+    response = await authed_client.get("/api/media/999999/recommendations")
+    assert response.status_code == 404, response.text
+
+
+async def test_recommendations_without_genres_are_empty_not_an_error(authed_client, db):
+    """Nothing to match on is an honest empty list, not a rating-sorted grab bag."""
+    item = MediaItem(guid_key="tmdb:movie:1", media_type=MediaType.MOVIE, title="Bare")
+    db.add_all(
+        [
+            item,
+            MediaItem(
+                guid_key="tmdb:movie:2",
+                media_type=MediaType.MOVIE,
+                title="Acclaimed",
+                genres=["Drama"],
+                community_rating=9.9,
+            ),
+        ]
+    )
+    await db.commit()
+
+    response = await authed_client.get(f"/api/media/{item.id}/recommendations")
+    assert response.status_code == 200, response.text
+    assert response.json() == []
