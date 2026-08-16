@@ -23,7 +23,7 @@ backend/app/
 ├── db.py              engine, session, create_all + light migrations
 ├── security.py        JWT sessions, Fernet token encryption, bcrypt
 ├── serializers.py     ORM → API payloads (bulk helpers avoid N+1)
-├── media_filters.py   browse filters + sorting, shared by grid and watchlist
+├── media_filters.py   browse filters + sorting, shared by grid, watchlist and History
 ├── merge_duplicates.py startup repair for items recorded under two identities
 ├── routers/           HTTP layer, thin
 │   ├── images.py      artwork proxy — Plex art needs a token, URLs must not
@@ -456,10 +456,9 @@ re-suppress them, hide the disclosure too.
 
 A page declares what it does not have. `FilterPage.omit` makes a filter
 *absent*, not hidden: its parameters are never read, written or sent, so a stale
-one cannot narrow a page offering no way to see it. History omits `status`
-(everything there has a play, so "unwatched" returns nothing and a status
-returns nearly everything) and sends `personal="all"` as a page default —
-a home video is not a title, but a play of one is real history.
+one cannot narrow a page offering no way to see it. History omits `status`,
+because everything there has a play: "unwatched" returns nothing and a status
+returns nearly everything.
 
 Add a filter to the table and to `MediaFilters` and every page gets it; add it
 to one router and the pages silently disagree.
