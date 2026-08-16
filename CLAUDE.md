@@ -32,6 +32,7 @@ backend/app/
     ├── plex_tv.py     plex.tv cloud: OAuth PINs, resources, Discover watchlist
     ├── plex_server.py one Plex Media Server: libraries, history, sessions, writes
     ├── guids.py       Plex GUID → external ids; also the anime agent signal
+    ├── titles.py      "is this the same title?" — one rule, providers + merge
     ├── media_repo.py  Plex metadata → canonical MediaItem rows
     ├── sync_service.py the two-way engine
     ├── webhooks.py    Plex Pass webhook ingestion
@@ -131,6 +132,68 @@ where the refusals are the more important half. And like the recovered year, the
 cleaned title goes **onto `item.title` only, never into `build_guid_key`**: the
 history import re-upserts the same entry on every overlapping sync, so a cleaned
 title in the key would mint a fresh duplicate on each one.
+
+### A search result must name the thing that was searched for
+
+Everything above is about not minting a row from a payload that cannot name
+itself. The other half is what happens *next*: for a row that has no external
+id, whatever the metadata providers answer with **becomes** its identity, and a
+wrong answer there is worse than no answer at all.
+
+TMDB and TVDB search are fuzzy and always reply. Ask for a title they do not
+have and you get the most popular thing that shares a word, and `results[0]`
+was taken on faith. Four wrong ids on a live instance, every one a *prefix*:
+
+    "Anti-Social" → "Anti-Social Limited"   (a Canadian documentary)
+    "Men"         → "Men in Black"
+    "Society"     → "Dead Poets Society"
+    "Thelma"      → "Thelma & Louise"
+
+So `services/titles.py` holds one definition of "same title" — exact once
+accents, case and punctuation are stripped, and **a prefix does not count** —
+and both halves of the rule use it: the providers refuse a search hit that does
+not match, and `merge_duplicates` refuses to fuse rows that do not.
+`mal._titles_match` stays forgiving on purpose; a MAL hit only scores the anime
+classifier, and `mal_id` merges nothing.
+
+Three things make a wrong id worse than none, and they are why this is not
+merely cosmetic:
+
+* **It is permanent.** `backfill_missing_metadata` selects rows with *no* id at
+  all, so attaching a wrong one removes the row from the only pass that would
+  ever look again.
+* **It poisons a merge group.** `merge_duplicates` pairs on the id, so the ghost
+  can no longer collapse into the real row — and, before the group was
+  partitioned by title, it also blocked pairs it had no business joining.
+* **It is silent.** No id shows as a blank tile somebody eventually notices.
+
+Only the *search* path is checked. A known id, or an id cross-referenced through
+`/find`, is exact — the caller already knew which record it wanted — and Plex
+titles legitimately differ from TMDB's ("Marvel's Daredevil"), so checking there
+would throw away good matches for no safety.
+
+The year gets the same suspicion. `search()` retries without it whenever the
+year-filtered page held nothing that *names* the title, not merely when it came
+back empty. A thin row's year can come from a release-name tag rather than from
+the film, and TMDB's `year=` is a hard filter: it does not empty the page, it
+removes the right film and leaves a wrong one behind. That is the whole
+mechanism of the "Anti-Social" match.
+
+**The rule has a cost, and it partly reverses release-name recovery.** A
+recovered filename that misspells the film by one character is now refused:
+item 52633 is the standing example, `Mars.Needs.Mom` against *Mars Needs Moms*,
+and it went from tmdb 50321 with a poster to no id and a blank tile. (Four of
+the five recovered rows still heal; that one does not.) Accepted anyway, the
+same looseness admits "Alien" against "Aliens" and "The Jungle Book 2" against
+"The Jungle Book 3" — the identical silent error, on films the library really
+holds. A missing poster is visible; a wrong id is not. Refusals log at **INFO**
+for exactly this reason: `docker logs tally | grep -i refus` is the only thing
+that explains a blank tile.
+
+Such a row then stays in `backfill_missing_metadata` forever, *because* no id
+was attached — one search a week, indefinitely. That unbounded retry is the
+intended shape, not an oversight: it is also the only way the row heals if TMDB
+later gains the alternative title.
 
 ### Every timestamp column must be `UtcDateTime`
 
@@ -493,7 +556,7 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 ## Testing and verification
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q     # 142 tests
+cd backend && .venv/bin/python -m pytest -q     # 152 tests
 cd backend && .venv/bin/ruff check app tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
