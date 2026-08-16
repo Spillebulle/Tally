@@ -18,6 +18,7 @@ from ..media_filters import (
     unwatched_condition,
 )
 from ..models import (
+    CreditKind,
     MediaItem,
     MediaType,
     PlexMapping,
@@ -26,8 +27,10 @@ from ..models import (
 )
 from ..schemas import (
     ContinueWatchingItem,
+    CreditOut,
     FavoriteRequest,
     MediaCard,
+    MediaCreditsOut,
     MediaItemDetail,
     NotesRequest,
     PaginatedMedia,
@@ -46,6 +49,7 @@ from ..serializers import (
     watchlist_ids,
 )
 from ..services import on_deck
+from ..services.credits import credits_for
 from ..services.sync_service import SyncService
 
 router = APIRouter(prefix="/api/media", tags=["media"])
@@ -100,6 +104,32 @@ async def list_genres(db: DbSession, user: CurrentUser, anime: AnimeFilter = "al
     for row in result.scalars():
         genres.update(row or [])
     return sorted(genres)
+
+
+@router.get("/content-ratings", response_model=list[str])
+async def list_content_ratings(
+    db: DbSession, user: CurrentUser, anime: AnimeFilter = "all"
+) -> list[str]:
+    """Every certificate actually present, so the filter can offer a real list.
+
+    Deliberately not a fixed set of ratings: Plex reports whatever the agent
+    wrote, which is `PG-13` on one library and `gb/15` on the next, and a
+    hard-coded list would silently drop half of them.
+    """
+    conditions = [
+        MediaItem.media_type.in_([MediaType.MOVIE, MediaType.SHOW]),
+        MediaItem.content_rating.is_not(None),
+        MediaItem.content_rating != "",
+    ]
+    if anime == "only":
+        conditions.append(MediaItem.is_anime.is_(True))
+    elif anime == "exclude":
+        conditions.append(MediaItem.is_anime.is_(False))
+
+    result = await db.execute(
+        select(MediaItem.content_rating).where(and_(*conditions)).distinct()
+    )
+    return sorted(rating for rating in result.scalars() if rating)
 
 
 @router.get("/continue-watching", response_model=list[ContinueWatchingItem])
@@ -280,6 +310,34 @@ async def get_item(item_id: int, db: DbSession, user: CurrentUser) -> MediaItemD
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     return await to_detail(db, item, user.id)
+
+
+@router.get("/{item_id}/credits", response_model=MediaCreditsOut)
+async def get_credits(item_id: int, db: DbSession, user: CurrentUser) -> MediaCreditsOut:
+    """Who is in it, and who directed it.
+
+    A GET that may write, like the artwork proxy: credits are fetched the first
+    time somebody looks at a title rather than during a library scan, because a
+    scan walks tens of thousands of rows and this would be a second full pass
+    over the library against a rate-limited provider. See `services/credits.py`.
+    """
+    item = await db.get(MediaItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+
+    payload = MediaCreditsOut()
+    for credit, person in await credits_for(db, item):
+        entry = CreditOut(
+            person_id=person.id,
+            name=person.name,
+            character=credit.character,
+            profile_url=person.profile_url,
+        )
+        if credit.kind == CreditKind.DIRECTOR:
+            payload.directors.append(entry)
+        else:
+            payload.cast.append(entry)
+    return payload
 
 
 @router.get("/{item_id}/children", response_model=list[MediaCard])

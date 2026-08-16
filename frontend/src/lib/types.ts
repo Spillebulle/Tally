@@ -95,6 +95,21 @@ export interface MediaDetail
   available_on_plex: boolean
 }
 
+/** One credited person on a title (`CreditOut` in schemas.py). */
+export interface Credit {
+  person_id: number
+  name: string
+  /** Who they played. Null for a director. */
+  character: string | null
+  /** A TMDB URL — credential-free, so the browser fetches it directly. */
+  profile_url: string | null
+}
+
+export interface MediaCredits {
+  cast: Credit[]
+  directors: Credit[]
+}
+
 export interface Paginated<T> {
   items: T[]
   total: number

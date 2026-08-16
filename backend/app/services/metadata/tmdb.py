@@ -6,13 +6,44 @@ from typing import Any
 
 from ...config import get_settings
 from ..titles import title_agrees
-from .base import MetadataResult, ProviderClient
+from .base import CreditPerson, CreditsResult, MetadataResult, ProviderClient
 
 log = logging.getLogger(__name__)
 settings = get_settings()
 
 API = "https://api.themoviedb.org/3"
 IMG = "https://image.tmdb.org/t/p"
+
+# A cast strip is something to skim, not a full billing block: TMDB will happily
+# list two hundred people on a blockbuster, most of them one-line extras.
+MAX_CAST = 30
+# Films have one or two directors; a series' crew rolls up everyone who ever
+# directed an episode, which is not a useful facet past the first few.
+MAX_DIRECTORS = 3
+
+
+def _int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _character(entry: dict[str, Any]) -> str | None:
+    """The part someone played, from either credits shape.
+
+    A film's cast row carries `character`; a series' aggregate row carries a
+    `roles` list instead, one per part across the run.
+    """
+    if character := entry.get("character"):
+        return str(character)[:255]
+    names = [
+        str(role["character"])
+        for role in entry.get("roles") or []
+        if isinstance(role, dict) and role.get("character")
+    ]
+    joined = " / ".join(dict.fromkeys(names))
+    return joined[:255] or None
 
 
 class TMDBClient(ProviderClient):
@@ -191,6 +222,101 @@ class TMDBClient(ProviderClient):
             keywords=keywords,
             source="tmdb",
         )
+
+    # -- credits ----------------------------------------------------------
+
+    async def credits(self, tmdb_id: int, *, is_show: bool) -> CreditsResult | None:
+        """Cast and directors for one title, or None if TMDB would not say.
+
+        A series has no single cast list, so `aggregate_credits` is the right
+        endpoint there: it rolls every season's up and carries the episode
+        counts that separate a regular from a one-episode guest. Its rows are
+        shaped differently from a film's — `roles`/`jobs` lists rather than a
+        single `character`/`job` — which is what `_character` and `_directors`
+        below are reconciling.
+        """
+        path = (
+            f"/tv/{tmdb_id}/aggregate_credits"
+            if is_show
+            else f"/movie/{tmdb_id}/credits"
+        )
+        data = await self._call(path)
+        if not data:
+            return None
+        return CreditsResult(
+            cast=self._cast(data.get("cast") or []),
+            directors=self._directors(data.get("crew") or []),
+        )
+
+    def _cast(self, raw: list[dict[str, Any]]) -> list[CreditPerson]:
+        # Keyed by person, not by row: TMDB lists someone twice when they play
+        # two parts, and `media_credits` holds one row per (item, person, kind).
+        # Folding the characters together keeps both, and keeps the constraint.
+        by_person: dict[int, CreditPerson] = {}
+        for position, entry in enumerate(raw):
+            person_id = _int(entry.get("id"))
+            name = entry.get("name") or entry.get("original_name")
+            if person_id is None or not name:
+                continue
+            character = _character(entry)
+            existing = by_person.get(person_id)
+            if existing is None:
+                # `or position` would be wrong here: TMDB bills the lead as
+                # order 0, which is falsy, and the top-billed actor would be
+                # sorted to wherever they happened to sit in the payload.
+                order = _int(entry.get("order"))
+                by_person[person_id] = CreditPerson(
+                    provider_id=person_id,
+                    name=str(name),
+                    profile_url=self.image(entry.get("profile_path"), "w185"),
+                    character=character,
+                    ordering=position if order is None else order,
+                )
+            elif character and character not in (existing.character or ""):
+                existing.character = (
+                    f"{existing.character} / {character}"
+                    if existing.character
+                    else character
+                )
+        ordered = sorted(by_person.values(), key=lambda person: person.ordering)
+        return ordered[:MAX_CAST]
+
+    def _directors(self, raw: list[dict[str, Any]]) -> list[CreditPerson]:
+        by_person: dict[int, CreditPerson] = {}
+        for entry in raw:
+            person_id = _int(entry.get("id"))
+            name = entry.get("name") or entry.get("original_name")
+            if person_id is None or not name or person_id in by_person:
+                continue
+
+            jobs = entry.get("jobs")
+            if jobs is None:
+                # A film: one crew row per job.
+                if entry.get("job") != "Director":
+                    continue
+                weight = 0
+            else:
+                # A series: every job that person did, with an episode count
+                # each. Rank by how much of the run they actually directed.
+                directed = [job for job in jobs if job.get("job") == "Director"]
+                if not directed:
+                    continue
+                weight = -sum(_int(job.get("episode_count")) or 0 for job in directed)
+
+            by_person[person_id] = CreditPerson(
+                provider_id=person_id,
+                name=str(name),
+                profile_url=self.image(entry.get("profile_path"), "w185"),
+                ordering=weight,
+            )
+
+        ordered = sorted(by_person.values(), key=lambda person: person.ordering)[
+            :MAX_DIRECTORS
+        ]
+        # The episode counts were only ever a ranking device; store the rank.
+        for position, person in enumerate(ordered):
+            person.ordering = position
+        return ordered
 
     async def resolve(
         self,
