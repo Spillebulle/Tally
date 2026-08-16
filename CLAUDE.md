@@ -41,8 +41,8 @@ backend/app/
     └── metadata/      TMDB, TVDB, MAL/Jikan + anime classifier
 frontend/src/
 ├── pages/             one file per screen
-├── components/        Poster/Artwork, BrowseFilters, Charts, Layout, Icons, ui
-└── lib/               api client, types, contexts, utils
+├── components/        Poster/Artwork, BrowseFilters, Pagination, Charts, Layout, Icons, ui
+└── lib/               api client, types, contexts, utils, browse-filters (the filter table)
 ```
 
 ---
@@ -421,11 +421,48 @@ different from `0` (clear it).
 
 ### The browse filters live in one place, on both sides
 
-The media grid and the watchlist browse the same rows with the same controls.
-The query building is shared in `media_filters.py` (`MediaFilters` is a FastAPI
-dependency, so declaring it gives an endpoint the whole parameter set), and the
-UI in `components/BrowseFilters.tsx`. Add a filter to those and both pages get
-it; add it to one router and the pages silently disagree.
+The media grid, the watchlist and History browse the same rows with the same
+controls. The query building is shared in `media_filters.py` (`MediaFilters` is
+a FastAPI dependency, so declaring it gives an endpoint the whole parameter
+set); on the frontend it is split in three, and the split is the point:
+
+* `lib/browse-filters.ts` — the **filter table**. One entry per filter, and
+  everything else is *derived* from it: the values read out of the URL, the
+  request payload, whether "Clear all" appears, what `clear()` removes, the
+  chips, the disclosure's count badge, which group a control lands in. "Is any
+  filter active" used to be a hand-written chain of ORs deciding both whether
+  the user is offered a way to widen the view *and* whether an empty grid says
+  "nothing matched" or "nothing here yet, run a sync" — so forgetting one
+  filter produced a narrowed grid, no way to widen it, and a message insisting
+  the library was empty. Derived state cannot fall out of step. **Adding a
+  filter is one entry**; if you are editing four places, re-read the table.
+* `components/BrowseFilters.tsx` — how a `control.kind` looks, and nothing
+  about what a filter means. There are too many filters to sit flat, so five
+  stay on the bar (status, genre, sort, order, search) and the rest live behind
+  a "Filters" disclosure grouped by *Title* / *You* / *Library*. The panel
+  pushes content down rather than floating — there is no popover primitive
+  here — and opens by itself when the URL arrives with one of its filters set,
+  or a shared link is a narrowed grid with nothing saying why.
+* `components/Pagination.tsx` — `usePageParam` and the stepper, which History
+  uses without any of the above.
+
+Chips are the **reverse** of what they were: every active filter appears in the
+chip row with its own ×, including ones a visible control also shows. Chips used
+to be suppressed in exactly that case, on the sound argument that it says the
+same thing twice — but once a control lives behind a disclosure the chip is the
+only visible statement of what is narrowing the grid, and a chip row that lists
+some filters and not others cannot be read as "this is the filter". If you
+re-suppress them, hide the disclosure too.
+
+A page declares what it does not have. `FilterPage.omit` makes a filter
+*absent*, not hidden: its parameters are never read, written or sent, so a stale
+one cannot narrow a page offering no way to see it. History omits `status`
+(everything there has a play, so "unwatched" returns nothing and a status
+returns nearly everything) and sends `personal="all"` as a page default —
+a home video is not a title, but a play of one is real history.
+
+Add a filter to the table and to `MediaFilters` and every page gets it; add it
+to one router and the pages silently disagree.
 
 One filter is off by default: `personal="exclude"` keeps home videos out, the
 same judgement `default_types` already makes about seasons and episodes. It is
@@ -679,7 +716,11 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
   Both convert via UTC, so they are off by one day (east of Greenwich) or one
   month (west) — which is exactly how the heatmap and the monthly axis were
   wrong for everyone outside UTC. Use `localDateKey()` and
-  `parseLocalDateLabel()` in `lib/utils.ts`.
+  `parseLocalDateLabel()` in `lib/utils.ts`. A **date filter** holds local days
+  in the URL and converts once, on the way to the request: start bound is local
+  midnight, end bound local **end of day**, so "14–20 Aug" contains every play
+  on the 20th. `toISOString()` on a Date *built* locally is the right call
+  there — it is deriving a day key from one that is banned.
 * **A failed request is not an empty list.** Check `isError` *before* the empty
   branch and render `ErrorState`; falling through told the user their library
   was empty and to run a sync, while hiding a 500.

@@ -5,12 +5,9 @@ import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { AnimeFilter, MediaCard, PersonalFilter } from '@/lib/types'
 import { compactNumber } from '@/lib/utils'
-import {
-  BrowseFilters,
-  Pagination,
-  SORTS,
-  useBrowseFilters,
-} from '@/components/BrowseFilters'
+import { SORTS, useBrowseFilters } from '@/lib/browse-filters'
+import { BrowseFilters } from '@/components/BrowseFilters'
+import { Pagination, usePageParam } from '@/components/Pagination'
 import { PosterGrid } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { FilmIcon, SearchIcon } from '@/components/Icons'
@@ -51,6 +48,10 @@ export function Browse({ mode }: BrowseProps) {
     sorts: SORTS,
     defaultSort: mode === 'search' || mode === 'browse' ? 'title' : 'added',
     defaults: { personal: personalDefault },
+    // `since`/`until` filter watch *events*, which /api/media knows nothing
+    // about. Omitted rather than ignored, so a stray one from a History link
+    // cannot sit in the URL looking like it does something.
+    omit: ['window'],
   })
   // Checked, not cast: `?kind=` reaches the API as `media_type`, which is a
   // literal there, so a mistyped one would answer 422 rather than "all".
@@ -58,10 +59,10 @@ export function Browse({ mode }: BrowseProps) {
   const animeKind =
     requestedKind === 'movie' || requestedKind === 'show' ? requestedKind : 'all'
 
-  // The offset lives in the URL with the filters, so a filter change and the
+  // The offset lives in the URL beside the filters, so a filter change and the
   // reset to page one are one navigation rather than a render that fires a
-  // query at the stale offset first. `update()` drops `page` for us.
-  const page = filters.page
+  // query at the stale offset first — every filter write drops `page` for us.
+  const { page, setPage } = usePageParam()
 
   const animeFilter: AnimeFilter = useMemo(() => {
     if (mode === 'anime') return 'only'
@@ -212,7 +213,7 @@ export function Browse({ mode }: BrowseProps) {
       <Pagination
         page={page}
         pageCount={pageCount}
-        onPage={filters.setPage}
+        onPage={setPage}
         ready={!isLoading}
       />
     </div>
