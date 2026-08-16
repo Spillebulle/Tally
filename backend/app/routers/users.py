@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from ..deps import AdminUser, CurrentUser, DbSession
 from ..models import User
 from ..schemas import UserOut, UserPreferences, UserUpdate
+from ..timezones import is_valid as is_valid_timezone
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -20,6 +21,10 @@ DEFAULT_PREFERENCES = {
     # Weeks before something drops off Continue Watching. None follows the Plex
     # server's own `onDeckWindow`; 0 keeps everything forever.
     "continue_watching_weeks": None,
+    # IANA name the stats pages bucket days in. None means UTC, which is what
+    # every timestamp is stored as — right for the database, wrong for "what
+    # did I watch on Tuesday?" anywhere but Greenwich.
+    "timezone": None,
 }
 
 
@@ -49,6 +54,14 @@ async def update_preferences(
     # "follow Plex" and has to survive the round trip. Omitted fields are still
     # left alone, so this stays a partial update.
     updates = payload.model_dump(exclude_unset=True)
+    # A timezone that cannot be loaded would silently fall back to UTC every
+    # time the stats are read, so refuse it here where the user can see why.
+    # None stays valid: it *means* UTC.
+    if updates.get("timezone") is not None and not is_valid_timezone(updates["timezone"]):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Unknown timezone {updates['timezone']!r}",
+        )
     # Reassign rather than mutate: SQLAlchemy won't flag an in-place JSON edit.
     user.preferences = {**DEFAULT_PREFERENCES, **(user.preferences or {}), **updates}
     await db.commit()
