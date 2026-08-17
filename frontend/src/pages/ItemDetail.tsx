@@ -42,7 +42,7 @@ const STATUS_OPTIONS: WatchStatus[] = [
 /**
  * Where a facet on this page takes you.
  *
- * `/browse`, not `/movies` or `/shows`, for the reason the genre chips already
+ * `/browse`, not `/movies` or `/shows`, for the reason the genre links already
  * give: those force `anime: 'exclude'`, so an anime title's own facet would
  * lead to a grid guaranteed not to contain it. The query key is the one
  * `useBrowseFilters` reads, so the filter bar over there shows the same filter
@@ -482,16 +482,23 @@ export function ItemDetail() {
           )}
 
           {item.genres.length > 0 && (
+            /* Buttons (§7.6), not chips. Each one opens a filtered grid, and
+               `.chip` says of itself in index.css that a chip is a read-only
+               figure which never opens anything, so a genre wearing one teaches
+               the wrong thing about every other chip in the app. `btn-outline`
+               is the quiet control, and `px-2` matches the identical row of
+               genre links on the dashboard rather than the button scale's 12px,
+               so the same thing is the same size on both pages. The hover
+               belongs to the class now instead of being repainted here. */
             <div className="mt-2 flex flex-wrap gap-1.5">
               {item.genres.slice(0, 8).map((genre) => (
                 <Link
                   key={genre}
                   // /browse, not /movies or /shows: those force
-                  // `anime: 'exclude'`, so an anime title's own genre chip led
+                  // `anime: 'exclude'`, so an anime title's own genre link led
                   // to a grid guaranteed not to contain it.
                   to={`/browse?genre=${encodeURIComponent(genre)}`}
-                  className="chip transition-colors duration-hover ease-ease
-                             hover:border-line-dashed hover:text-strong"
+                  className="btn-outline px-2"
                 >
                   {genre}
                 </Link>
