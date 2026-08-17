@@ -15,6 +15,7 @@ import type {
   PlexAuthStart,
   Rankings,
   RatingDepth,
+  ResolvedTheme,
   SavedView,
   SavedViewPage,
   Seasonality,
@@ -26,6 +27,9 @@ import type {
   StatsPreset,
   SyncRun,
   SyncStatus,
+  ThemeDetail,
+  ThemeImport,
+  ThemeSummary,
   User,
   UserState,
   WatchEvent,
@@ -452,6 +456,54 @@ export const api = {
       body: { enabled?: boolean; anime_override?: boolean | null },
     ) => patch<Library>(`/api/libraries/${id}`, body),
     scanLibrary: (id: number) => post<unknown>(`/api/libraries/${id}/scan`),
+  },
+
+  /**
+   * The user's theme library.
+   *
+   * Parsing, encoding and derivation all happen on the server - one decoder,
+   * one encoder, and no second implementation to drift - so nothing here
+   * interprets a `.umbertheme`. `resolved` is the only call the interface
+   * needs to *wear* a theme; the rest belong to the editor.
+   *
+   * Share the query keys `['themes']` and `['theme-resolved', id]` with
+   * `ThemeProvider`, which reads both. A separate key would fetch the same
+   * table twice and let the picker and the page it is on disagree.
+   */
+  themes: {
+    list: () => get<ThemeSummary[]>('/api/themes'),
+    get: (id: string) => get<ThemeDetail>(`/api/themes/${encodeURIComponent(id)}`),
+    resolved: (id: string) =>
+      get<ResolvedTheme>(`/api/themes/${encodeURIComponent(id)}/resolved`),
+    /** Copy a theme, built-in or not, under a new name. The only way to make one. */
+    create: (source_id: string, name: string) =>
+      post<ThemeSummary>('/api/themes', { source_id, name }),
+    /**
+     * Rename, or write one or more of the twenty-seven.
+     *
+     * `colours` is keyed by the **file** key, so a request says what a file
+     * would say. A built-in answers 409 with a sentence rather than a silent
+     * no-op, because a setting that cannot be changed has to say so.
+     */
+    update: (id: string, body: { name?: string; colours?: Record<string, string> }) =>
+      patch<ThemeSummary>(`/api/themes/${encodeURIComponent(id)}`, body),
+    remove: (id: string) => del<void>(`/api/themes/${encodeURIComponent(id)}`),
+    /**
+     * Upload a `.umbertheme`. The reply carries the count of lines that could
+     * not be read, which the interface has to report rather than swallow.
+     */
+    import: (file: File) => {
+      const form = new FormData()
+      form.append('file', file)
+      return request<ThemeImport>('/api/themes/import', { method: 'POST', body: form })
+    },
+    /**
+     * Where the file is. A plain link rather than a fetch: the session is an
+     * httpOnly cookie the browser sends on a navigation anyway, and a download
+     * driven from JavaScript would have to hold the whole file in memory to
+     * hand it back.
+     */
+    exportUrl: (id: string) => `/api/themes/${encodeURIComponent(id)}/export`,
   },
 
   settings: {

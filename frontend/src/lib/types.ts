@@ -778,3 +778,80 @@ export interface SavedView {
   created_at: string
   updated_at: string
 }
+
+/* ── Themes ──────────────────────────────────────────────────────────────
+ *
+ * `docs/themes.md` settles these; STYLE-GUIDE §3.2 settles the file format.
+ * The server owns parsing, encoding and derivation, so everything here is
+ * either a description of a theme or a finished table to apply.
+ */
+
+/**
+ * Which built-in fills every token a theme file does not carry.
+ *
+ * `graphite` (dark) and `paper` (light) are the family's, and every app in it
+ * ships both under exactly those ids. An app with more presets adds its own,
+ * and an id a reader does not know falls back to `graphite`, so this is a
+ * widened string rather than a closed union.
+ */
+export type ThemeBase = 'graphite' | 'paper' | (string & {})
+
+/** A row of the user's theme library. `GET /api/themes`. */
+export interface ThemeSummary {
+  /** The filename stem, and what `preferences["theme_id"]` points at. */
+  id: string
+  name: string
+  /**
+   * Which built-in fills what the file did not carry. Kept as the authored
+   * word: a theme edited into the opposite lightness must not change it.
+   */
+  base: ThemeBase
+  /** Built-ins are compiled in, never written to the library, and read-only. */
+  is_builtin: boolean
+  /**
+   * Whether the base is a dark theme. The client stamps `class="dark"` or
+   * `"light"` to match, because `tokens.css` carries values that are not among
+   * the twenty-seven and still differ by theme, the shadows most obviously.
+   *
+   * Answered by the server rather than mapped from `base` here: an app is free
+   * to add its own base ids, and a client that did the mapping itself would
+   * read every id it had not heard of as dark.
+   */
+  dark: boolean
+}
+
+/**
+ * One theme's twenty-seven stored keys, for the editor. `GET /api/themes/{id}`.
+ *
+ * Keyed by the **file** key (`border`, `warning_bg`, `link_1`), not by the CSS
+ * name: the stored word may never be reworded, and `lib/theme.ts` holds the
+ * mapping between the two.
+ */
+export interface ThemeDetail extends ThemeSummary {
+  colours: Record<string, string>
+}
+
+/**
+ * A theme resolved for applying. `GET /api/themes/{id}/resolved`.
+ *
+ * A flat table of CSS custom property names to opaque colours: the
+ * twenty-seven under their token names, plus the five values `tokens.css`
+ * states literally rather than as a `color-mix`. Everything else derives
+ * itself from these where it is used and is deliberately absent - see
+ * `docs/themes.md` and `DERIVED_VARIABLES` in `lib/theme.ts`.
+ *
+ * Colours only: which built-in it is based on, and whether that is dark, are
+ * answered by the library listing, so nothing here has to be filtered out
+ * before it is written to the root element.
+ */
+export type ResolvedTheme = Record<string, string>
+
+/** What an import cost. `POST /api/themes/import`. */
+export interface ThemeImport {
+  theme: ThemeSummary
+  /**
+   * Lines that could not be read. Each cost exactly one colour, which came
+   * from the base instead, and §3.2 requires the interface to say so.
+   */
+  skipped_lines: number
+}

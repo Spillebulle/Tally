@@ -4,12 +4,23 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from './api'
-import type { User } from './types'
+import {
+  applyTheme,
+  clearStoredCustomTheme,
+  clearTheme,
+  findTheme,
+  readStoredCustomTheme,
+  themeLightness,
+  writeStoredCustomTheme,
+  type StoredCustomTheme,
+} from './theme'
+import type { ThemeSummary, User } from './types'
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -72,14 +83,56 @@ export function useAuth(): AuthValue {
 
 export type Theme = 'light' | 'dark' | 'system'
 
+/**
+ * The theme in use, and the four ways to choose one.
+ *
+ * `theme`, `resolved` and `setTheme` mean exactly what they always did: the
+ * three-state built-in preference, what the viewer is actually looking at, and
+ * the setter. `themeId` is the fourth choice beside those three - a theme the
+ * user made, which is a *server* preference because it belongs to the account
+ * and not to the browser.
+ *
+ * Picking one of the three drops the custom one and picking a custom one
+ * overrides the three, because a theme's `base` decides whether it is dark or
+ * light. See `docs/themes.md`.
+ */
 interface ThemeValue {
+  /** The built-in preference. Unchanged: dark, light, or follow the system. */
   theme: Theme
+  /** What is on screen, custom themes included. Live while `theme` is 'system'. */
   resolved: 'light' | 'dark'
+  /** Pick a built-in. Also clears any custom theme, since there are four choices. */
   setTheme: (theme: Theme) => void
+  /** The custom theme in use, or null when one of the three built-in choices is. */
+  themeId: string | null
+  /** Its library row, once `['themes']` has answered. Null while a built-in is in use. */
+  customTheme: ThemeSummary | null
+  /** Select a custom theme, or null for the built-in named by `theme`. */
+  setThemeId: (id: string | null) => void
+  /** A custom theme is chosen and its colours have not arrived yet. */
+  themeLoading: boolean
+  /**
+   * The resolved theme could not be fetched. The built-in is what is on
+   * screen; `themeId` still names what the user asked for, so a settings page
+   * can keep it selected and say why it is not showing.
+   */
+  themeError: Error | null
 }
 
 const ThemeContext = createContext<ThemeValue | null>(null)
 const THEME_KEY = 'tally.theme'
+
+/**
+ * The query keys the theme provider reads. Share them.
+ *
+ * The provider holds the selected theme in `['preferences']` - the same cache
+ * the settings page writes - so selecting a theme moves both at once. An
+ * editor that changes a colour must invalidate `themeResolvedKey(id)`, or the
+ * page keeps wearing the table it fetched before the edit.
+ */
+export const PREFERENCES_KEY = ['preferences'] as const
+export const THEME_LIBRARY_KEY = ['themes'] as const
+export const themeResolvedKey = (id: string | null) => ['theme-resolved', id] as const
 
 function systemTheme(): 'light' | 'dark' {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -97,8 +150,21 @@ function systemTheme(): 'light' | 'dark' {
  * `resolved` is what the user is actually looking at. It is kept live while
  * the preference is "system" so a control can label itself correctly the
  * moment the operating system flips at dusk.
+ *
+ * A custom theme is the fourth choice and sits *over* all three: its `base`
+ * decides its lightness, so choosing one stamps `dark` or `light` whatever the
+ * preference says. It has to, because `tokens.css` carries values outside the
+ * twenty-seven a theme file stores - the three shadows, `color-scheme`, the
+ * `--light` flag - and those still differ by theme. A light theme left without
+ * the class wears the dark theme's shadows: wrong, and quietly so.
+ *
+ * The colours themselves are a fetch and cannot exist before first paint, so
+ * only the *lightness* is mirrored into localStorage for the pre-paint script
+ * to read. Everything else about that mirror is in `lib/theme.ts`.
  */
 export function ThemeProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient()
+
   const [theme, setThemeState] = useState<Theme>(() => {
     const stored = localStorage.getItem(THEME_KEY)
     return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'dark'
@@ -107,13 +173,119 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     theme === 'system' ? systemTheme() : theme,
   )
 
+  // What the pre-paint script stamped, read once at mount. `hint` then tracks
+  // the best answer available at any moment: the mirror at boot, the base of a
+  // theme just picked, and the confirmed base once the server has answered.
+  const [mirror] = useState(readStoredCustomTheme)
+  const [hint, setHint] = useState<StoredCustomTheme | null>(mirror)
+
+  const preferences = useQuery({
+    queryKey: PREFERENCES_KEY,
+    queryFn: async () => {
+      try {
+        return await api.settings.preferences()
+      } catch (error) {
+        // Signed out is the ordinary state on the login screen, not a failure.
+        // A custom theme belongs to an account, so there is simply not one.
+        if (error instanceof ApiError && error.status === 401) return {}
+        throw error
+      }
+    },
+    retry: false,
+    staleTime: 60_000,
+  })
+
+  /*
+   * The mirror is authority for one round trip and no longer.
+   *
+   * Once the server has answered at all - with a theme, with none, or with a
+   * failure - the answer stands. Without this, `logout()` clears the query
+   * cache and the stale mirror would put the signed-out user's own theme back
+   * on the login screen; and a preferences request that fails outright would
+   * leave the app stamping a lightness whose colours it can never fetch.
+   */
+  const [booting, setBooting] = useState(true)
+  useEffect(() => {
+    if (preferences.data !== undefined || preferences.isError) setBooting(false)
+  }, [preferences.data, preferences.isError])
+
+  const storedThemeId = preferences.data?.theme_id
+  const storedId = typeof storedThemeId === 'string' && storedThemeId ? storedThemeId : null
+  const themeId = booting ? (mirror?.id ?? null) : storedId
+
+  // Only fetched when there is a custom theme to describe. The settings page
+  // shares this key, so opening the picker fills it for everyone.
+  const library = useQuery({
+    queryKey: THEME_LIBRARY_KEY,
+    queryFn: api.themes.list,
+    enabled: themeId !== null,
+    staleTime: 60_000,
+  })
+
+  const resolvedTheme = useQuery({
+    queryKey: themeResolvedKey(themeId),
+    queryFn: () => api.themes.resolved(themeId as string),
+    enabled: themeId !== null,
+    staleTime: 60_000,
+  })
+
+  const customTheme = themeId ? findTheme(library.data, themeId) : null
+  const themeError = themeId !== null && resolvedTheme.isError ? resolvedTheme.error : null
+
+  /*
+   * The theme was deleted while it was being worn.
+   *
+   * Deleting one clears `preferences["theme_id"]` on the server, but nothing
+   * makes this browser re-read that preference, so without a check of its own
+   * the page goes on wearing a table for a theme that no longer exists - and
+   * `staleTime` means the 404 that would catch it may not be asked for until
+   * the next reload. The library is the complete list of what this account
+   * has, built-ins included, so an id absent from a *loaded* library is an id
+   * that is gone.
+   *
+   * Quiet, unlike a failed fetch. A deleted theme is something somebody did on
+   * purpose, with its own confirmation on the settings page; a fetch that fell
+   * over is not, and is the one that has to speak up.
+   */
+  const themeMissing = themeId !== null && library.isSuccess && customTheme === null
+
+  // A failed request is not an empty theme: half a table would leave some
+  // surfaces custom and the rest built-in, which looks like a rendering bug
+  // rather than a fetch that did not land.
+  const table =
+    themeError || themeMissing ? null : themeId ? (resolvedTheme.data ?? null) : null
+
+  /*
+   * The lightness of the custom theme in use, or null when a built-in is.
+   *
+   * The library row answers it: the resolved table is colours and nothing
+   * else, deliberately, so the two requests are asked for at once. Until the
+   * row lands, the hint holds whatever is already stamped, so choosing a theme
+   * or reloading the page does not flash through the other lightness on the
+   * way to the right one.
+   */
+  const customLightness: 'dark' | 'light' | null =
+    themeError || themeMissing || !themeId
+      ? null
+      : customTheme
+        ? themeLightness(customTheme)
+        : hint?.id === themeId
+          ? hint.lightness
+          : null
+
   useEffect(() => {
     const root = document.documentElement
     root.classList.remove('dark', 'light')
-    // 'system' stamps nothing at all, so prefers-color-scheme decides.
-    if (theme === 'dark' || theme === 'light') root.classList.add(theme)
 
-    if (theme !== 'system') {
+    if (customLightness) {
+      root.classList.add(customLightness)
+      setResolved(customLightness)
+      return
+    }
+
+    // 'system' stamps nothing at all, so prefers-color-scheme decides.
+    if (theme === 'dark' || theme === 'light') {
+      root.classList.add(theme)
       setResolved(theme)
       return
     }
@@ -123,14 +295,158 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     apply()
     media.addEventListener('change', apply)
     return () => media.removeEventListener('change', apply)
-  }, [theme])
+  }, [theme, customLightness])
 
-  const setTheme = useCallback((next: Theme) => {
-    localStorage.setItem(THEME_KEY, next)
-    setThemeState(next)
-  }, [])
+  // The table itself. `applyTheme` writes onto the root element's own style,
+  // which outranks every selector in tokens.css and theme-tally.css, and
+  // `clearTheme` removes exactly the names it wrote and nothing else.
+  useEffect(() => {
+    if (!table) {
+      clearTheme()
+      return
+    }
+    const { refused } = applyTheme(table)
+    if (refused.length > 0) {
+      console.warn(
+        `Theme "${themeId}": ignored ${refused.length} variable(s). A value the ` +
+          'stylesheet derives must not be sent, and a value must be a plain ' +
+          `colour: ${refused.join(', ')}`,
+      )
+    }
+  }, [table, themeId])
 
-  const value = useMemo(() => ({ theme, resolved, setTheme }), [theme, resolved, setTheme])
+  // Keep the pre-paint mirror honest: write it once the base is confirmed,
+  // and drop it the moment the account has no custom theme.
+  useEffect(() => {
+    if (themeId && customLightness) {
+      writeStoredCustomTheme(themeId, customLightness)
+      setHint((current) =>
+        current?.id === themeId && current.lightness === customLightness
+          ? current
+          : { id: themeId, lightness: customLightness },
+      )
+    } else if (themeMissing || (!themeId && !booting)) {
+      clearStoredCustomTheme()
+      setHint(null)
+    }
+  }, [themeId, customLightness, booting, themeMissing])
+
+  /*
+   * A theme that is gone: ask the server what the preference is now.
+   *
+   * Deleting one clears `theme_id` server-side, so re-reading the preference
+   * is enough to stop naming a theme that no longer exists - and it is the
+   * *server's* answer rather than a write of our own, which could race a
+   * choice made in another tab. Stopping wearing it already happened above;
+   * this only tidies up what `themeId` still says.
+   */
+  useEffect(() => {
+    if (themeMissing) void queryClient.invalidateQueries({ queryKey: PREFERENCES_KEY })
+  }, [themeMissing, queryClient])
+
+  /*
+   * Say so when the theme cannot be fetched.
+   *
+   * Nothing else on screen changes when this fails - the built-in is a
+   * complete, correct interface - so a silent failure reads as a theme that
+   * simply does not work. Reported once per (theme, message) so a refetch loop
+   * cannot stack toasts.
+   */
+  const reported = useRef<string | null>(null)
+  useEffect(() => {
+    if (!themeError || !themeId) {
+      if (!themeError) reported.current = null
+      return
+    }
+    const signature = `${themeId}:${themeError.message}`
+    if (reported.current === signature) return
+    reported.current = signature
+    notifyDetached(
+      `Your theme could not be loaded, so Tally is showing the built-in one. ${themeError.message}`,
+      'error',
+    )
+    // A theme the server no longer has must not go on stamping its lightness
+    // through the pre-paint script on every reload.
+    if (themeError instanceof ApiError && themeError.status === 404) {
+      clearStoredCustomTheme()
+      setHint(null)
+    }
+  }, [themeError, themeId])
+
+  // Read inside callbacks that must not take a dependency on either.
+  const resolvedRef = useRef(resolved)
+  resolvedRef.current = resolved
+  const themeIdRef = useRef(themeId)
+  themeIdRef.current = themeId
+
+  const setThemeId = useCallback(
+    (id: string | null) => {
+      const previous = queryClient.getQueryData<Record<string, unknown>>(PREFERENCES_KEY)
+
+      // The whole interface changes colour on this click, so it changes now
+      // rather than after a PUT and a refetch. The settings page reads the
+      // same cache, so its card moves in the same frame.
+      queryClient.setQueryData<Record<string, unknown>>(PREFERENCES_KEY, (old) => ({
+        ...(old ?? {}),
+        theme_id: id,
+      }))
+      setBooting(false)
+
+      if (id === null) {
+        clearStoredCustomTheme()
+        setHint(null)
+      } else {
+        // A theme is picked from the library, so its base is known before its
+        // colours are and the class need not flash through the other
+        // lightness. Falling back to what is already on screen is the same
+        // idea when it is not: hold still, and correct once the server answers.
+        const known = findTheme(queryClient.getQueryData<ThemeSummary[]>(THEME_LIBRARY_KEY), id)
+        const lightness = known ? themeLightness(known) : resolvedRef.current
+        setHint({ id, lightness })
+        writeStoredCustomTheme(id, lightness)
+      }
+
+      void api.settings
+        .updatePreferences({ theme_id: id })
+        .then((saved) => queryClient.setQueryData(PREFERENCES_KEY, saved))
+        .catch((error: Error) => {
+          // Put the real preference back; the optimistic one was a guess that
+          // lost. The effects above follow it and undo the mirror with it.
+          queryClient.setQueryData(PREFERENCES_KEY, previous)
+          notifyDetached(`Your theme could not be saved. ${error.message}`, 'error')
+        })
+    },
+    [queryClient],
+  )
+
+  const setTheme = useCallback(
+    (next: Theme) => {
+      localStorage.setItem(THEME_KEY, next)
+      setThemeState(next)
+      // Four choices, not three plus a modifier: picking a built-in drops the
+      // custom theme. Skipped when there is none, so the ordinary dark/light
+      // toggle still writes nothing to the server.
+      if (themeIdRef.current !== null) setThemeId(null)
+    },
+    [setThemeId],
+  )
+
+  const themeLoading =
+    themeId !== null && table === null && themeError === null && !themeMissing
+
+  const value = useMemo(
+    () => ({
+      theme,
+      resolved,
+      setTheme,
+      themeId,
+      customTheme,
+      setThemeId,
+      themeLoading,
+      themeError,
+    }),
+    [theme, resolved, setTheme, themeId, customTheme, setThemeId, themeLoading, themeError],
+  )
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
 }
 
@@ -170,6 +486,25 @@ const ToastContext = createContext<ToastValue | null>(null)
  */
 const TOAST_MS = 6000
 
+/*
+ * A way to raise a toast from outside the toast tree.
+ *
+ * `ThemeProvider` sits *above* `ToastProvider` in `main.tsx`, because the
+ * theme has to be settled before anything renders, so it cannot call
+ * `useToast`. It still has one thing to say - that a theme could not be
+ * fetched or could not be saved - and a failure nobody is told about is
+ * indistinguishable from a theme that simply does not work.
+ *
+ * Deliberately the only escape hatch of its shape, and deliberately a
+ * no-op before the provider mounts: a toast is a receipt for something that
+ * has already happened, and there is no queue here to replay one into.
+ */
+let detachedNotify: ((message: string, tone?: Toast['tone']) => void) | null = null
+
+export function notifyDetached(message: string, tone: Toast['tone'] = 'info'): void {
+  detachedNotify?.(message, tone)
+}
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([])
 
@@ -187,6 +522,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     },
     [dismiss],
   )
+
+  useEffect(() => {
+    detachedNotify = notify
+    return () => {
+      detachedNotify = null
+    }
+  }, [notify])
 
   const value = useMemo(
     () => ({ toasts, notify, dismiss, dismissAll }),

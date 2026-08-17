@@ -13,13 +13,37 @@
     <title>Tally</title>
     <script>
       // Apply the stored theme before first paint so there is no flash.
-      // Three states: dark is the 'dark' class, forced light is 'light',
-      // and following the system stamps nothing at all.
+      //
+      // Three built-in states: dark is the 'dark' class, forced light is
+      // 'light', and following the system stamps nothing at all, so
+      // prefers-color-scheme decides. ThemeProvider does exactly the same
+      // thing; the two have to agree or the first paint shows the other theme.
+      //
+      // A custom theme is the fourth choice and cannot be resolved this early:
+      // it is a per-user server preference and its colours are a fetch, and
+      // nothing may block first paint on a round trip. But its *lightness* is
+      // the only part that can flash - the colours arriving a moment later
+      // change no lightness - so ThemeProvider mirrors that one bit into
+      // localStorage whenever the theme changes, and it is read here.
+      //
+      // The mirror is a hint and never authority. It is written only once the
+      // theme's base is confirmed, and ThemeProvider drops it the moment the
+      // server says this account has no custom theme, or no longer has this
+      // one. So a stale entry costs at most one round trip of the wrong
+      // shadows and cannot strand the app in the wrong lightness.
       (function () {
         try {
-          var stored = localStorage.getItem('tally.theme') || 'dark'
           var root = document.documentElement
           root.classList.remove('dark', 'light')
+          var custom = localStorage.getItem('tally.theme.id')
+          if (custom) {
+            // A theme is dark because its base is. Anything but 'light' reads
+            // as dark, which is the format's own fallback for a base it does
+            // not know.
+            root.classList.add(localStorage.getItem('tally.theme.base') === 'light' ? 'light' : 'dark')
+            return
+          }
+          var stored = localStorage.getItem('tally.theme') || 'dark'
           // 'system' stamps nothing, so prefers-color-scheme decides.
           if (stored === 'dark' || stored === 'light') root.classList.add(stored)
         } catch (e) {}
