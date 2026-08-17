@@ -141,6 +141,17 @@ rather than a tinted edge.
 `new Date('YYYY-MM-DD')`.** Both convert via UTC and are off by a day east of
 Greenwich. `localDateKey()` and `parseLocalDateLabel()` in `lib/utils.ts`.
 
+**`pointer-events-none` on a disabled control hides the tooltip that explains
+it.** §7.6 promises a disabled control says why it is disabled, and `.btn`
+carried `disabled:pointer-events-none`, so nine explanations on the settings
+page alone could never be seen. A disabled `<button>` receives `mouseover`
+perfectly well when its pointer events are left alone, and the `disabled`
+attribute is what refuses the click, so the rule is: **never take pointer
+events off a control that has something to say.** Every button variant's hover
+is gated on `enabled:` instead, because a hoverable disabled control would
+otherwise light up as though it were live. Something that cannot take a real
+`disabled` attribute states its reason on a wrapping element.
+
 ## Copy
 
 British spelling. Sentence case labels, never Title Case, never ALL CAPS except
