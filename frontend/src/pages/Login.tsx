@@ -1,13 +1,32 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { ChevronLeft } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/app-context'
-import { cn } from '@/lib/utils'
+import { Mark, Wordmark } from '@/components/Brand'
 import { PlexIcon } from '@/components/Icons'
-import { Spinner } from '@/components/ui'
+import { Notice, Spinner } from '@/components/ui'
 
 type Mode = 'choose' | 'local'
+
+/**
+ * The one screen that wears the full logo.
+ *
+ * §17.4: the mark alone lives in the top bar, and the mark with the wordmark
+ * belongs to the splash and the about box. This is the splash.
+ */
+function Splash() {
+  return (
+    <div className="flex flex-col items-center text-center">
+      <Mark size={44} decorative />
+      <Wordmark className="mt-3 block leading-none" />
+      <p className="mt-3 text-balance text-body text-muted">
+        Every film, series and anime you have watched, kept in step with your Plex server.
+      </p>
+    </div>
+  )
+}
 
 export function Login() {
   const navigate = useNavigate()
@@ -68,7 +87,7 @@ export function Login() {
           } else if (result.status === 'expired') {
             if (pollTimer.current) window.clearInterval(pollTimer.current)
             setPlexPending(false)
-            setError('That sign-in request expired. Please try again.')
+            setError('That sign-in request expired. Start it again from this page.')
           }
         } catch (pollError) {
           if (pollTimer.current) window.clearInterval(pollTimer.current)
@@ -83,65 +102,43 @@ export function Login() {
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-canvas px-4">
-      {/* Ambient background — two soft accent washes, no imagery to load. */}
-      <div
-        className="pointer-events-none absolute -left-40 -top-40 h-[32rem] w-[32rem] rounded-full
-                   bg-accent/20 blur-[120px]"
-        aria-hidden="true"
-      />
-      <div
-        className="pointer-events-none absolute -bottom-40 -right-32 h-[28rem] w-[28rem] rounded-full
-                   bg-plex/15 blur-[120px]"
-        aria-hidden="true"
-      />
+    <div className="flex min-h-screen items-center justify-center bg-backdrop px-strip py-8">
+      <div className="w-full max-w-[360px] motion-safe:animate-rise">
+        <Splash />
 
-      <div className="relative w-full max-w-md animate-fade-up">
-        <div className="mb-8 flex flex-col items-center text-center">
-          <span
-            className="grid h-14 w-14 place-items-center rounded-2xl bg-accent text-accent-ink shadow-glow"
-            aria-hidden="true"
-          >
-            <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-              <path d="M6 6v12M10 6v12M14 6v12M18 6v12M4.5 8l15 8" />
-            </svg>
-          </span>
-          <h1 className="mt-5 text-3xl font-semibold tracking-tight text-ink">Tally</h1>
-          <p className="mt-2 text-balance text-sm text-muted">
-            Every film, series and anime you have watched — kept in step with your Plex server.
-          </p>
-        </div>
-
-        <div className="card p-6">
+        <div className="card mt-6 p-4">
           {mode === 'choose' ? (
-            <div className="space-y-4">
+            <div className="space-y-3">
+              {/* The one primary action on this view. Plex's own yellow stays
+                  on its badge and nowhere else, so the button itself is the
+                  house primary rather than a slab of another product's brand. */}
               <button
                 type="button"
                 onClick={startPlexLogin}
                 disabled={plexPending}
-                className="btn w-full gap-2.5 bg-plex py-3 text-[15px] font-semibold text-black
-                           hover:brightness-105 active:scale-[0.99]"
+                className="btn-primary w-full"
               >
                 {plexPending ? (
-                  <>
-                    <Spinner className="text-lg" />
-                    Waiting for Plex…
-                  </>
+                  <Spinner />
                 ) : (
-                  <>
-                    <PlexIcon className="text-lg" />
-                    Continue with Plex
-                  </>
+                  <span
+                    aria-hidden="true"
+                    className="grid h-4 w-4 place-items-center rounded-tight bg-plex text-plex-ink"
+                  >
+                    <PlexIcon width={10} height={10} />
+                  </span>
                 )}
+                {plexPending ? 'Waiting for Plex…' : 'Continue with Plex'}
               </button>
 
               {plexPending && (
-                <p className="text-center text-xs text-muted">
-                  Approve the request in the Plex window, then come back here.
-                  <br />
+                <div className="flex flex-col items-center gap-1">
+                  <p className="text-balance text-center text-tiny text-dim">
+                    Approve the request in the Plex window, then come back here.
+                  </p>
                   <button
                     type="button"
-                    className="mt-1 underline hover:text-ink"
+                    className="btn-ghost h-5 px-2 text-tiny"
                     onClick={() => {
                       setPlexPending(false)
                       if (pollTimer.current) window.clearInterval(pollTimer.current)
@@ -149,19 +146,19 @@ export function Login() {
                   >
                     Cancel
                   </button>
-                </p>
+                </div>
               )}
 
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
                 <span className="h-px flex-1 bg-line" />
-                <span className="text-xs uppercase tracking-wider text-muted">or</span>
+                <span className="eyebrow">or</span>
                 <span className="h-px flex-1 bg-line" />
               </div>
 
               <button
                 type="button"
                 onClick={() => setMode('local')}
-                className="btn-outline w-full py-2.5"
+                className="btn-secondary w-full"
               >
                 {status?.setup_required ? 'Create the first account' : 'Sign in with a password'}
               </button>
@@ -178,17 +175,15 @@ export function Login() {
           )}
 
           {error && (
-            <p
-              className="mt-4 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger"
-              role="alert"
-            >
-              {error}
-            </p>
+            <div role="alert">
+              <Notice className="mt-3">{error}</Notice>
+            </div>
           )}
         </div>
 
-        <p className="mt-6 text-center text-xs text-muted">
-          Tally never sees your Plex password — sign-in happens on plex.tv.
+        {/* True, and the reassurance a self-hosted user is looking for. */}
+        <p className="mt-4 text-balance text-center text-tiny text-dim">
+          Tally never sees your Plex password. Signing in happens on plex.tv.
         </p>
       </div>
     </div>
@@ -238,14 +233,14 @@ function LocalForm({
   }
 
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <form onSubmit={submit} className="space-y-3">
       <div>
-        <label htmlFor="username" className="label">
+        <label htmlFor="username" className="mb-1 block text-control text-fg">
           Username
         </label>
         <input
           id="username"
-          className="input mt-1.5"
+          className="field"
           value={username}
           onChange={(event) => setUsername(event.target.value)}
           autoComplete="username"
@@ -253,44 +248,46 @@ function LocalForm({
         />
       </div>
       <div>
-        <label htmlFor="password" className="label">
+        <label htmlFor="password" className="mb-1 block text-control text-fg">
           Password
         </label>
         <input
           id="password"
           type="password"
-          className="input mt-1.5"
+          className="field"
           value={password}
           onChange={(event) => setPassword(event.target.value)}
           autoComplete={isRegister ? 'new-password' : 'current-password'}
           minLength={isRegister ? 8 : undefined}
           required
         />
-        {isRegister && (
-          <p className="mt-1.5 text-xs text-muted">At least 8 characters.</p>
-        )}
+        {isRegister && <p className="mt-1 text-tiny text-dim">At least 8 characters.</p>}
       </div>
 
       {error && (
-        <p className="text-sm text-danger" role="alert">
-          {error}
-        </p>
+        <div role="alert">
+          <Notice>
+            {error}
+            {!isRegister && ' Check the username and password, then try again.'}
+          </Notice>
+        </div>
       )}
 
-      <button type="submit" disabled={busy} className={cn('btn-primary w-full py-2.5')}>
+      <button type="submit" disabled={busy} className="btn-primary w-full">
         {busy && <Spinner />}
         {isRegister ? 'Create account' : 'Sign in'}
       </button>
 
-      <div className="flex items-center justify-between text-xs">
-        <button type="button" onClick={onBack} className="text-muted hover:text-ink">
-          ← Back
+      <div className="flex items-center justify-between gap-2">
+        <button type="button" onClick={onBack} className="btn-ghost h-5 px-1 text-tiny">
+          <ChevronLeft size={16} aria-hidden="true" />
+          Back
         </button>
         {!setupRequired && (
           <button
             type="button"
             onClick={() => setIsRegister((value) => !value)}
-            className="text-muted hover:text-ink"
+            className="btn-ghost h-5 px-1 text-tiny"
           >
             {isRegister ? 'I already have an account' : 'Create an account'}
           </button>

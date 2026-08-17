@@ -1,6 +1,17 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  Bookmark,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ExternalLink,
+  Heart,
+  ListChecks,
+  Sparkles,
+  X,
+} from 'lucide-react'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { Credit, MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
@@ -8,16 +19,17 @@ import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/li
 import { certificateLabel } from '@/lib/certificates'
 import { Artwork, PosterRail } from '@/components/Poster'
 import { RatingBadge } from '@/components/RatingBadge'
-import {
-  BookmarkIcon,
-  CheckIcon,
-  ChevronLeftIcon,
-  HeartIcon,
-  SparkIcon,
-  XIcon,
-} from '@/components/Icons'
 import { Select } from '@/components/Dropdown'
-import { ErrorState, Spinner, StarRating, StatusBadge } from '@/components/ui'
+import {
+  EmptyState,
+  ErrorState,
+  Panel,
+  ProgressBar,
+  Skeleton,
+  Spinner,
+  StarRating,
+  StatusBadge,
+} from '@/components/ui'
 
 const STATUS_OPTIONS: WatchStatus[] = [
   'plan_to_watch',
@@ -56,7 +68,13 @@ export function ItemDetail() {
     setOpenSeason(null)
   }
 
-  const { data: item, isLoading } = useQuery({
+  const {
+    data: item,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ['item', itemId],
     queryFn: () => api.media.detail(itemId),
     enabled: Number.isFinite(itemId),
@@ -181,28 +199,52 @@ export function ItemDetail() {
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
+      <div className="-mt-strip">
         {/* Same geometry as the hero it stands in for, so the page does not
             jump sideways or shorten when the item arrives. */}
-        <div className="skeleton full-bleed -mt-6 h-[260px] sm:-mt-8 sm:h-[400px] lg:h-[460px]" />
-        <div className="skeleton h-6 w-1/3 rounded" />
-        <div className="skeleton h-24 rounded-xl" />
+        <Skeleton className="full-bleed h-[160px] rounded-none sm:h-[200px] lg:h-[240px]" />
+        <div className="relative -mt-16 flex gap-strip sm:-mt-24 sm:gap-4">
+          <Skeleton className="aspect-[2/3] w-[120px] shrink-0 rounded-card sm:w-[160px]" />
+          <div className="min-w-0 flex-1 space-y-2 pt-16 sm:pt-24">
+            <Skeleton className="h-4 w-1/3" />
+            <Skeleton className="h-3 w-1/4" />
+            <Skeleton className="h-button w-40" />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // A failed request is not a missing title: a 500 used to render as "that
+  // item could not be found", which sends the user looking for a title that is
+  // sitting right there.
+  if (isError) {
+    return (
+      <div className="card">
+        <ErrorState error={error} onRetry={() => refetch()} title="Could not load this title" />
       </div>
     )
   }
 
   if (!item) {
     return (
-      <div className="py-20 text-center">
-        <p className="text-lg font-medium text-ink">That item could not be found.</p>
-        <button type="button" onClick={() => navigate(-1)} className="btn-outline mt-4">
-          Go back
-        </button>
+      <div className="card">
+        <EmptyState
+          title="That title is not here"
+          description="It may have been removed from your library. Go back and pick another one."
+          action={
+            <button type="button" onClick={() => navigate(-1)} className="btn-secondary">
+              <ChevronLeft size={16} aria-hidden="true" />
+              Go back
+            </button>
+          }
+        />
       </div>
     )
   }
 
   const watched = (item.state?.view_count ?? 0) > 0
+  const watchPending = markWatched.isPending || markUnwatched.isPending
   const progressPercent =
     item.state?.progress_ms && item.state.duration_ms
       ? Math.round((item.state.progress_ms / item.state.duration_ms) * 100)
@@ -216,12 +258,18 @@ export function ItemDetail() {
 
   // `to` turns a fact into a way into the library: certificate, studio and
   // director are all things a whole shelf shares, and each lands on a browse
-  // view already filtered to it.
+  // view already filtered to it. `figure` marks the values that are read as
+  // numbers: every date, duration and count is monospaced (§4).
   const facts: Fact[] = [
-    item.first_aired && { term: 'Released', value: formatDate(item.first_aired) },
+    item.first_aired && {
+      term: 'Released',
+      value: formatDate(item.first_aired),
+      figure: true,
+    },
     formatRuntime(item.runtime_minutes) && {
       term: 'Runtime',
       value: formatRuntime(item.runtime_minutes)!,
+      figure: true,
     },
     item.content_rating && {
       term: 'Rated',
@@ -245,195 +293,329 @@ export function ItemDetail() {
     item.network && { term: 'Network', value: item.network },
     item.release_status && { term: 'Status', value: item.release_status },
     item.anime_format && { term: 'Format', value: item.anime_format },
-    item.state?.last_watched_at && {
-      term: 'Last watched',
-      value: relativeTime(item.state.last_watched_at),
-    },
-    (item.state?.view_count ?? 0) > 1 && {
-      term: 'Plays',
-      value: String(item.state?.view_count),
-    },
   ].filter(Boolean) as Fact[]
 
   return (
-    <div className="-mt-6 sm:-mt-8">
-      {/* Backdrop hero */}
+    <div className="-mt-strip">
+      {/* The detail hero (§10): a backdrop band, the picture flush at the left,
+          the title, the facts as a two-column key/value list, one primary
+          button. */}
       <Artwork
         src={item.backdrop_url}
         title={item.title}
         showTitle={false}
         imgClassName="object-top"
-        className="full-bleed h-[260px] sm:h-[400px] lg:h-[460px]"
+        className="full-bleed h-[160px] sm:h-[200px] lg:h-[240px]"
       >
-        {/* Scrim so the title below stays readable over any artwork, eased out
-            over the banner's whole height so the artwork does not stop at a
+        {/* Scrim so what follows stays readable over any artwork, eased out
+            over the band's whole height so the artwork does not stop at a
             line. See `.hero-scrim`. */}
         <div className="hero-scrim absolute inset-0" />
 
+        {/* A mark over user content, so it takes a derived ink (white on a dark
+            scrim) rather than a theme token (§2.6). */}
         <button
           type="button"
           onClick={() => navigate(-1)}
-          className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-xl
-                     bg-black/40 px-3 py-1.5 text-sm text-white backdrop-blur-sm
-                     transition-colors hover:bg-black/60 sm:left-6"
+          className="absolute left-strip top-strip inline-flex h-button items-center gap-1.5
+                     rounded-ctl bg-black/50 px-2.5 text-control text-white
+                     transition-colors duration-hover ease-ease hover:bg-black/70"
         >
-          <ChevronLeftIcon /> Back
+          <ChevronLeft size={16} aria-hidden="true" />
+          Back
         </button>
       </Artwork>
 
-      <div className="relative -mt-24 sm:-mt-32">
-        <div className="flex flex-col gap-6 sm:flex-row sm:gap-8">
-          {/* Poster */}
-          <div className="w-32 shrink-0 sm:w-52">
-            <Artwork
-              src={item.poster_url}
-              title={item.title}
-              className="aspect-[2/3] rounded-2xl bg-raised shadow-lift ring-1 ring-line"
-            />
+      <div className="relative -mt-16 flex gap-strip sm:-mt-24 sm:gap-4">
+        <div className="w-[120px] shrink-0 sm:w-[160px]">
+          {/* The placeholder is a layer *underneath* the artwork rather than an
+              else-branch: whether a poster exists is only known once the proxy
+              answers, and a 404 simply reveals what is already drawn. */}
+          <Artwork
+            src={item.poster_url}
+            title={item.title}
+            showTitle={false}
+            className="aspect-[2/3] rounded-card border border-line"
+          />
+        </div>
+
+        <div className="min-w-0 flex-1 pt-16 sm:pt-24">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {item.is_anime && (
+              <span className="badge gap-1">
+                <Sparkles size={11} aria-hidden="true" />
+                Anime
+              </span>
+            )}
+            {item.is_personal_media && <span className="badge">Home video</span>}
+            <StatusBadge status={item.state?.status ?? null} />
+            {!item.available_on_plex && (
+              <span
+                className="badge"
+                title="No file for this title on any Plex server you can reach."
+              >
+                Not on your server
+              </span>
+            )}
           </div>
 
-          {/* Headline block */}
-          <div className="min-w-0 flex-1 pt-2 sm:pt-16">
-            <div className="flex flex-wrap items-center gap-2">
-              {item.is_anime && (
-                <span className="inline-flex items-center gap-1 rounded-md bg-accent-soft px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-accent">
-                  <SparkIcon className="text-[12px]" /> Anime
-                </span>
-              )}
-              {item.is_personal_media && (
-                <span className="rounded-md bg-accent-soft px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-accent">
-                  Home video
-                </span>
-              )}
-              <StatusBadge status={item.state?.status ?? null} />
-              {!item.available_on_plex && (
-                <span className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted">
-                  Not on your server
-                </span>
-              )}
-            </div>
+          <h1 className="mt-1.5 text-balance text-page font-semibold text-strong">{item.title}</h1>
 
-            <h1 className="mt-2 text-balance text-3xl font-semibold tracking-tight text-ink sm:text-4xl">
-              {item.title}
-            </h1>
+          {item.media_type === 'episode' && item.show_title && (
+            <Link
+              to={`/item/${item.show_id}`}
+              className="mt-0.5 inline-flex items-center gap-1.5 text-control text-muted
+                         transition-colors duration-hover ease-ease hover:text-strong"
+            >
+              {item.show_title}
+              <span className="figure text-tiny">
+                S{item.season_number}E{item.episode_number}
+              </span>
+            </Link>
+          )}
 
-            {item.media_type === 'episode' && item.show_title && (
-              <Link
-                to={`/item/${item.show_id}`}
-                className="mt-1 inline-block text-sm text-muted hover:text-accent"
-              >
-                {item.show_title} · S{item.season_number}E{item.episode_number}
-              </Link>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-small text-muted">
+            {item.year && <span className="figure">{item.year}</span>}
+            {formatRuntime(item.runtime_minutes) && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="figure">{formatRuntime(item.runtime_minutes)}</span>
+              </>
             )}
-
-            {item.tagline && (
-              <p className="mt-2 text-balance text-sm italic text-muted">{item.tagline}</p>
+            {item.community_rating != null && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>
+                  <span className="figure">{item.community_rating.toFixed(1)}</span> community
+                </span>
+              </>
             )}
+          </div>
 
-            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted">
-              {item.year && <span>{item.year}</span>}
-              {formatRuntime(item.runtime_minutes) && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span>{formatRuntime(item.runtime_minutes)}</span>
-                </>
-              )}
-              {item.community_rating != null && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span>{item.community_rating.toFixed(1)} community</span>
-                </>
-              )}
-            </div>
+          {item.tagline && (
+            <p className="mt-1.5 max-w-[65ch] text-balance text-body italic text-dim">
+              {item.tagline}
+            </p>
+          )}
 
-            {item.genres.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {item.genres.slice(0, 8).map((genre) => (
-                  <Link
-                    key={genre}
-                    // /browse, not /movies or /shows: those force
-                    // `anime: 'exclude'`, so an anime title's own genre chip
-                    // led to a grid guaranteed not to contain it.
-                    to={`/browse?genre=${encodeURIComponent(genre)}`}
-                    className="chip"
-                  >
-                    {genre}
-                  </Link>
-                ))}
-              </div>
-            )}
-
-            {/* Actions */}
-            <div className="mt-5 flex flex-wrap items-center gap-2">
-              {item.media_type !== 'show' && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    watched ? markUnwatched.mutate(item.id) : markWatched.mutate(item.id)
-                  }
-                  disabled={markWatched.isPending || markUnwatched.isPending}
-                  className={cn(watched ? 'btn-outline' : 'btn-primary')}
+          {item.genres.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {item.genres.slice(0, 8).map((genre) => (
+                <Link
+                  key={genre}
+                  // /browse, not /movies or /shows: those force
+                  // `anime: 'exclude'`, so an anime title's own genre chip led
+                  // to a grid guaranteed not to contain it.
+                  to={`/browse?genre=${encodeURIComponent(genre)}`}
+                  className="chip transition-colors duration-hover ease-ease
+                             hover:border-line-dashed hover:text-strong"
                 >
-                  {markWatched.isPending || markUnwatched.isPending ? (
-                    <Spinner />
-                  ) : watched ? (
-                    <XIcon />
-                  ) : (
-                    <CheckIcon />
-                  )}
-                  {watched ? 'Mark unwatched' : 'Mark watched'}
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => watchlist.mutate(!item.on_watchlist)}
-                disabled={watchlist.isPending}
-                className="btn-outline"
-              >
-                {/* Adding writes through to the Plex watchlist, so this is a
-                    real round trip and needs to say so. */}
-                {watchlist.isPending ? (
-                  <Spinner />
-                ) : (
-                  <BookmarkIcon className={item.on_watchlist ? 'text-accent' : undefined} />
-                )}
-                {item.on_watchlist ? 'On watchlist' : 'Add to watchlist'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => toggleFavorite.mutate(!item.state?.is_favorite)}
-                className="btn-ghost h-10 w-10 rounded-xl p-0"
-                title={item.state?.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-                aria-label={item.state?.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
-              >
-                <HeartIcon
-                  filled={item.state?.is_favorite}
-                  className={cn('text-lg', item.state?.is_favorite && 'text-danger')}
-                />
-              </button>
+                  {genre}
+                </Link>
+              ))}
             </div>
+          )}
 
-            {/* Rating + status */}
-            <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-              <div>
-                <p className="label mb-1.5">Your rating</p>
+          {/* The one primary button on this view is the play: recording what
+              you watched is what the app is for. A show has no single play to
+              record, so it draws no primary at all rather than promoting a
+              lesser action into the slot. */}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {item.media_type !== 'show' && (
+              <button
+                type="button"
+                onClick={() =>
+                  watched ? markUnwatched.mutate(item.id) : markWatched.mutate(item.id)
+                }
+                disabled={watchPending}
+                className={cn(watched ? 'btn-secondary' : 'btn-primary')}
+                title={
+                  watched
+                    ? 'Clear every recorded play of this title.'
+                    : 'Record a play now and scrobble it to Plex.'
+                }
+              >
+                {watchPending ? (
+                  <Spinner />
+                ) : watched ? (
+                  <X size={16} aria-hidden="true" />
+                ) : (
+                  <Check size={16} aria-hidden="true" />
+                )}
+                {watched ? 'Mark unwatched' : 'Mark watched'}
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => watchlist.mutate(!item.on_watchlist)}
+              disabled={watchlist.isPending}
+              className="btn-secondary"
+            >
+              {/* Adding writes through to the Plex watchlist, so this is a real
+                  round trip and needs to say so. */}
+              {watchlist.isPending ? (
+                <Spinner />
+              ) : (
+                <Bookmark
+                  size={16}
+                  fill={item.on_watchlist ? 'currentColor' : 'none'}
+                  aria-hidden="true"
+                />
+              )}
+              {item.on_watchlist ? 'On watchlist' : 'Add to watchlist'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => toggleFavorite.mutate(!item.state?.is_favorite)}
+              className="btn-icon"
+              title={item.state?.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+              aria-label={item.state?.is_favorite ? 'Remove from favourites' : 'Add to favourites'}
+              aria-pressed={Boolean(item.state?.is_favorite)}
+            >
+              <Heart
+                size={16}
+                fill={item.state?.is_favorite ? 'currentColor' : 'none'}
+                className={item.state?.is_favorite ? 'text-strong' : undefined}
+                aria-hidden="true"
+              />
+            </button>
+          </div>
+
+          {(progressPercent != null || episodeProgress != null) && (
+            <ProgressBar
+              className="mt-3 max-w-md"
+              fraction={(episodeProgress ?? progressPercent ?? 0) / 100}
+              label={
+                episodeProgress != null ? (
+                  <span className="figure">
+                    {item.watched_episodes}/{item.total_episodes} episodes
+                  </span>
+                ) : (
+                  <span className="figure">{progressPercent}%</span>
+                )
+              }
+            />
+          )}
+
+          {facts.length > 0 && (
+            <dl
+              className="mt-4 grid max-w-[560px] grid-cols-[auto_1fr] items-baseline gap-x-3
+                         gap-y-1 sm:grid-cols-[auto_1fr_auto_1fr] sm:gap-x-4"
+            >
+              {facts.map((fact) => (
+                <Fragment key={`${fact.term}-${fact.value}`}>
+                  <dt className="text-tiny text-dim">{fact.term}</dt>
+                  <dd className="flex min-w-0 items-center gap-1.5 text-control text-fg">
+                    {fact.mark && (
+                      <RatingBadge
+                        raw={fact.mark}
+                        label={fact.value}
+                        // The label is printed next to it, so an unrecognised
+                        // certificate draws nothing here rather than boxing the
+                        // same word twice.
+                        fallback="none"
+                      />
+                    )}
+                    {fact.to ? (
+                      // Underlined at rest, not on hover: touch has no hover,
+                      // so a hover-only cue leaves half the users with no way
+                      // of knowing this row goes anywhere.
+                      <Link
+                        to={fact.to}
+                        className={cn(
+                          'truncate underline decoration-line decoration-dotted underline-offset-4',
+                          'transition-colors duration-hover ease-ease hover:text-strong',
+                          fact.figure && 'figure',
+                        )}
+                      >
+                        {fact.value}
+                      </Link>
+                    ) : (
+                      <span className={cn('truncate', fact.figure && 'figure')}>{fact.value}</span>
+                    )}
+                  </dd>
+                </Fragment>
+              ))}
+            </dl>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_264px]">
+        {/* `min-w-0`, or a wide child cannot scroll inside its own box. A grid
+            track sizes to its content by default (`min-width: auto`), so the
+            child's full intrinsic width pushed this column — and the whole
+            page — wider than the viewport instead of scrolling. */}
+        <div className="min-w-0 space-y-3">
+          {item.overview && (
+            <Panel title="Overview">
+              <p className="max-w-[65ch] text-balance text-body text-fg">{item.overview}</p>
+            </Panel>
+          )}
+
+          {item.media_type === 'show' && (
+            <SeasonsPanel
+              seasons={seasons.data ?? []}
+              loading={seasons.isLoading}
+              isError={seasons.isError}
+              error={seasons.error}
+              onRetry={() => void seasons.refetch()}
+              openSeason={openSeason}
+              onOpenSeason={setOpenSeason}
+              episodes={episodes.data ?? []}
+              episodesLoading={episodes.isLoading}
+              episodesError={episodes.isError}
+              episodesErrorValue={episodes.error}
+              onRetryEpisodes={() => void episodes.refetch()}
+              onMarkSeason={(season) => markSeason.mutate(season)}
+              markSeasonPending={markSeason.isPending ? markSeason.variables ?? null : null}
+              onToggleEpisode={(target, isWatched) =>
+                isWatched ? markUnwatched.mutate(target) : markWatched.mutate(target)
+              }
+              pendingEpisode={
+                markWatched.isPending
+                  ? markWatched.variables ?? null
+                  : markUnwatched.isPending
+                    ? markUnwatched.variables ?? null
+                    : null
+              }
+            />
+          )}
+
+          {(item.media_type === 'movie' || item.media_type === 'show') && (
+            <CastPanel
+              cast={credits.data?.cast ?? []}
+              loading={credits.isLoading}
+              isError={credits.isError}
+              error={credits.error}
+              onRetry={() => void credits.refetch()}
+            />
+          )}
+        </div>
+
+        <aside className="space-y-3">
+          <Panel title="Your record">
+            <div className="space-y-0.5">
+              {/* Stacked rather than label-left: ten stars, the figure and
+                  Clear do not fit beside a label in a 264px column, and the
+                  panel clips what overflows. */}
+              <div className="pb-1">
+                <span className="mb-1 block text-control text-fg">Rating</span>
                 <StarRating
                   rating={item.state?.rating ?? null}
                   onChange={(rating) => rate.mutate(rating)}
                 />
               </div>
-              <div>
-                <span className="label mb-1.5 block">Status</span>
-                {/* The same dropdown the browse filters use, so a select looks
+              <div className="flex min-h-row items-center justify-between gap-3">
+                <span className="text-control text-fg">Status</span>
+                {/* The same dropdown the browse filters use, so a picker looks
                     and behaves the same wherever it is met. */}
                 <Select
                   label="Status"
                   value={item.state?.status ?? ''}
-                  onChange={(next) =>
-                    setStatus.mutate((next || null) as WatchStatus | null)
-                  }
+                  onChange={(next) => setStatus.mutate((next || null) as WatchStatus | null)}
                   options={[
                     { value: '', label: 'Not set' },
                     ...STATUS_OPTIONS.map((status) => ({
@@ -443,210 +625,34 @@ export function ItemDetail() {
                   ]}
                 />
               </div>
+              <div className="flex min-h-row items-center justify-between gap-3">
+                <span className="text-control text-fg">Plays</span>
+                <span className="figure text-tiny text-dim">{item.state?.view_count ?? 0}</span>
+              </div>
+              <div className="flex min-h-row items-center justify-between gap-3">
+                <span className="text-control text-fg">Last watched</span>
+                <span className="figure text-tiny text-dim">
+                  {relativeTime(item.state?.last_watched_at)}
+                </span>
+              </div>
             </div>
+          </Panel>
 
-            {(progressPercent != null || episodeProgress != null) && (
-              <div className="mt-5 max-w-md">
-                <div className="flex items-center justify-between text-xs text-muted">
-                  <span>
-                    {episodeProgress != null
-                      ? `${item.watched_episodes} of ${item.total_episodes} episodes`
-                      : `${progressPercent}% watched`}
-                  </span>
-                  <span>{relativeTime(item.state?.last_watched_at)}</span>
-                </div>
-                <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-line">
-                  <div
-                    className="h-full rounded-full bg-accent transition-[width] duration-700 ease-spring"
-                    style={{ width: `${episodeProgress ?? progressPercent ?? 0}%` }}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
+          <NotesPanel itemId={item.id} notes={item.state?.notes ?? null} />
 
-        {/* Overview + facts */}
-        <div className="mt-10 grid gap-8 lg:grid-cols-[1fr_18rem]">
-          {/* `min-w-0`, or the cast strip cannot scroll. A grid track sizes to
-              its content by default (`min-width: auto`), so the strip's full
-              intrinsic width pushed this column — and the whole page — wider
-              than the viewport instead of scrolling inside its own box. */}
-          <div className="min-w-0 space-y-8">
-            {item.overview && (
-              <section>
-                <h2 className="text-lg font-semibold tracking-tight text-ink">Overview</h2>
-                <p className="mt-2 max-w-prose text-balance leading-relaxed text-subtle">
-                  {item.overview}
-                </p>
-              </section>
-            )}
-
-            {(item.media_type === 'movie' || item.media_type === 'show') && (
-              <CastStrip
-                cast={credits.data?.cast ?? []}
-                loading={credits.isLoading}
-                isError={credits.isError}
-                error={credits.error}
-                onRetry={() => void credits.refetch()}
-              />
-            )}
-
-            {item.media_type === 'show' && (
-              <section>
-                <h2 className="text-lg font-semibold tracking-tight text-ink">Seasons</h2>
-                {seasons.isLoading ? (
-                  <div className="mt-3 space-y-2">
-                    {Array.from({ length: 3 }, (_, index) => (
-                      <div key={index} className="skeleton h-14 rounded-xl" />
-                    ))}
-                  </div>
-                ) : (seasons.data?.length ?? 0) === 0 ? (
-                  <p className="mt-2 text-sm text-muted">
-                    No seasons imported yet. Run a library scan from Settings.
-                  </p>
-                ) : (
-                  <ul className="mt-3 space-y-2">
-                    {seasons.data?.map((season) => {
-                      const number = season.season_number ?? 0
-                      const isOpen = openSeason === number
-                      const done =
-                        season.watched_episodes != null &&
-                        season.total_episodes != null &&
-                        season.total_episodes > 0 &&
-                        season.watched_episodes >= season.total_episodes
-                      return (
-                        <li key={`${season.id}-${number}`} className="card overflow-hidden">
-                          <div className="flex items-center gap-3 p-3">
-                            <button
-                              type="button"
-                              onClick={() => setOpenSeason(isOpen ? null : number)}
-                              className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                              aria-expanded={isOpen}
-                            >
-                              <span
-                                className={cn(
-                                  'grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-semibold',
-                                  done ? 'bg-good/15 text-good' : 'bg-raised text-subtle',
-                                )}
-                              >
-                                {done ? <CheckIcon /> : number}
-                              </span>
-                              <span className="min-w-0">
-                                <span className="block truncate text-sm font-medium text-ink">
-                                  {number === 0 ? 'Specials' : `Season ${number}`}
-                                </span>
-                                {season.total_episodes != null && (
-                                  <span className="text-xs text-muted">
-                                    {season.watched_episodes ?? 0} of {season.total_episodes} watched
-                                  </span>
-                                )}
-                              </span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => markSeason.mutate(number)}
-                              disabled={markSeason.isPending}
-                              className="btn-ghost h-8 px-2.5 text-xs"
-                            >
-                              Mark all watched
-                            </button>
-                          </div>
-
-                          {isOpen && (
-                            <div className="border-t border-line bg-raised/40">
-                              {episodes.isLoading ? (
-                                <p className="p-3 text-sm text-muted">Loading episodes…</p>
-                              ) : (
-                                <ul className="divide-y divide-line">
-                                  {episodes.data?.map((episode) => (
-                                    <EpisodeRow
-                                      key={episode.id}
-                                      episode={episode}
-                                      onToggle={(target, isWatched) =>
-                                        isWatched
-                                          ? markUnwatched.mutate(target)
-                                          : markWatched.mutate(target)
-                                      }
-                                      pending={
-                                        (markWatched.isPending &&
-                                          markWatched.variables === episode.id) ||
-                                        (markUnwatched.isPending &&
-                                          markUnwatched.variables === episode.id)
-                                      }
-                                    />
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-                          )}
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </section>
-            )}
-          </div>
-
-          <aside className="space-y-6">
-            {facts.length > 0 && (
-              <div className="card p-4">
-                <h3 className="label">Details</h3>
-                <dl className="mt-3 space-y-2.5 text-sm">
-                  {facts.map((fact) => (
-                    <div
-                      key={`${fact.term}-${fact.value}`}
-                      className="flex justify-between gap-4"
-                    >
-                      <dt className="text-muted">{fact.term}</dt>
-                      <dd className="flex min-w-0 items-center justify-end gap-2 text-right capitalize text-ink">
-                        {fact.mark && (
-                          <RatingBadge
-                            raw={fact.mark}
-                            label={fact.value}
-                            // The label is printed next to it, so an
-                            // unrecognised certificate draws nothing here
-                            // rather than boxing the same word twice.
-                            fallback="none"
-                          />
-                        )}
-                        {fact.to ? (
-                          // Underlined at rest, not on hover: touch has no
-                          // hover, so a hover-only cue leaves half the users
-                          // with no way of knowing this row goes anywhere.
-                          <Link
-                            to={fact.to}
-                            className="truncate underline decoration-muted decoration-dotted
-                                       underline-offset-4 hover:text-accent
-                                       hover:decoration-accent"
-                          >
-                            {fact.value}
-                          </Link>
-                        ) : (
-                          <span className="truncate">{fact.value}</span>
-                        )}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              </div>
-            )}
-
-            <ExternalLinks
-              tmdbId={item.tmdb_id}
-              tvdbId={item.tvdb_id}
-              imdbId={item.imdb_id}
-              malId={item.mal_id}
-              isShow={item.media_type === 'show'}
-            />
-          </aside>
-        </div>
-
-        {(item.media_type === 'movie' || item.media_type === 'show') && (
-          <Recommendations itemId={item.id} />
-        )}
+          <ExternalLinks
+            tmdbId={item.tmdb_id}
+            tvdbId={item.tvdb_id}
+            imdbId={item.imdb_id}
+            malId={item.mal_id}
+            isShow={item.media_type === 'show'}
+          />
+        </aside>
       </div>
+
+      {(item.media_type === 'movie' || item.media_type === 'show') && (
+        <Recommendations itemId={item.id} />
+      )}
     </div>
   )
 }
@@ -667,40 +673,40 @@ function Recommendations({ itemId }: { itemId: number }) {
 
   if (isError) {
     return (
-      <section className="mt-12">
-        <h2 className="mb-3 text-lg font-semibold tracking-tight text-ink">More like this</h2>
+      <Panel title="More like this" className="mt-3">
         <ErrorState
           error={error}
           onRetry={() => refetch()}
           title="Could not load recommendations"
         />
-      </section>
+      </Panel>
     )
   }
 
   if (!isLoading && (data?.length ?? 0) === 0) {
     return (
-      <section className="mt-12">
-        <h2 className="text-lg font-semibold tracking-tight text-ink">More like this</h2>
-        <p className="mt-2 text-sm text-muted">
+      <Panel title="More like this" className="mt-3">
+        <p className="text-body text-dim">
           Nothing unwatched shares enough genres with this one yet.
         </p>
-      </section>
+      </Panel>
     )
   }
 
   return (
-    <div className="mt-12">
+    <div className="mt-4">
       <PosterRail title="More like this" cards={data ?? []} loading={isLoading} />
     </div>
   )
 }
 
-/** One row of the details card. `to` makes it a way into a filtered library. */
+/** One pair in the hero's key/value list. `to` makes it a way into the library. */
 interface Fact {
   term: string
   value: string
   to?: string
+  /** A value read as a number: a date, a duration, a count. Drawn monospaced. */
+  figure?: boolean
   /**
    * A raw certificate to draw the board's mark for, beside the value.
    *
@@ -713,14 +719,14 @@ interface Fact {
 }
 
 /**
- * The cast, as a strip you scroll through.
+ * The cast, as rows (§7.16): a 20px portrait, the name, the part at the right.
  *
- * Scrolling is the only affordance here, so it is not hidden behind hover: the
- * scrollbar stays visible on a pointer device and the strip drags on touch.
- * Nothing is revealed on hover at all, so there is nothing a touch user cannot
- * reach.
+ * A list rather than the poster strip it used to be. The strip spent a whole
+ * poster's height on each face and hid the rest behind a horizontal scroll;
+ * a dozen rows fit in less space and read top to bottom like the rest of the
+ * page.
  */
-function CastStrip({
+function CastPanel({
   cast,
   loading,
   isError,
@@ -737,52 +743,232 @@ function CastStrip({
   // a 500 would render as "this film has nobody in it".
   if (isError) {
     return (
-      <section>
-        <h2 className="text-lg font-semibold tracking-tight text-ink">Cast</h2>
-        <div className="mt-3">
-          <ErrorState error={error} onRetry={onRetry} title="Could not load the cast" />
-        </div>
-      </section>
+      <Panel title="Cast">
+        <ErrorState error={error} onRetry={onRetry} title="Could not load the cast" />
+      </Panel>
     )
   }
 
   // Nothing to show and nothing pending: TMDB had no credits for this title, or
-  // no TMDB key is configured. Neither is worth a heading over an empty rail.
+  // no TMDB key is configured. Neither is worth a panel over an empty list.
   if (!loading && cast.length === 0) return null
 
   return (
-    <section>
-      <h2 className="text-lg font-semibold tracking-tight text-ink">Cast</h2>
-      <ul className="scroll-x scrollbar-thin -mx-1 mt-3 flex gap-4 px-1 pb-3">
-        {loading
-          ? Array.from({ length: 8 }, (_, index) => (
-              <li key={index} className="w-[104px] shrink-0">
-                <div className="skeleton aspect-[2/3] w-full rounded-xl" />
-                <div className="skeleton mt-2 h-3.5 w-3/4 rounded" />
-                <div className="skeleton mt-1.5 h-3 w-1/2 rounded" />
-              </li>
-            ))
-          : cast.map((person) => (
-              <li key={person.person_id} className="w-[104px] shrink-0">
-                <Artwork
-                  src={person.profile_url}
-                  title={person.name}
-                  showTitle={false}
-                  imgClassName="object-top"
-                  className="aspect-[2/3] rounded-xl bg-raised ring-1 ring-line"
-                />
-                <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-ink">
-                  {person.name}
-                </p>
-                {person.character && (
-                  <p className="mt-0.5 line-clamp-2 text-xs leading-snug text-muted">
-                    {person.character}
-                  </p>
+    <Panel title="Cast" count={loading ? undefined : cast.length} bodyClassName="p-0">
+      {loading ? (
+        <ul className="p-strip">
+          {Array.from({ length: 6 }, (_, index) => (
+            <li key={index} className="flex h-row items-center gap-2">
+              <Skeleton className="h-5 w-5 rounded-full" />
+              <Skeleton className="h-2.5 w-40" />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <ul className="max-h-[286px] overflow-y-auto">
+          {cast.map((person) => (
+            <li
+              key={person.person_id}
+              className="flex h-row items-center gap-2 border-b border-line-soft px-strip
+                         last:border-b-0"
+            >
+              <Artwork
+                src={person.profile_url}
+                title={person.name}
+                showTitle={false}
+                imgClassName="object-top"
+                className="h-5 w-5 shrink-0 rounded-full"
+              />
+              <span className="min-w-0 flex-1 truncate text-control text-fg">{person.name}</span>
+              {person.character && (
+                <span className="min-w-0 max-w-[45%] truncate text-tiny text-dim">
+                  {person.character}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  )
+}
+
+/**
+ * The seasons, and the episodes of whichever one is open.
+ *
+ * One season is open at a time and its episodes are their own request, so a
+ * show with forty seasons does not fetch every episode just to draw the list
+ * of headings.
+ */
+function SeasonsPanel({
+  seasons,
+  loading,
+  isError,
+  error,
+  onRetry,
+  openSeason,
+  onOpenSeason,
+  episodes,
+  episodesLoading,
+  episodesError,
+  episodesErrorValue,
+  onRetryEpisodes,
+  onMarkSeason,
+  markSeasonPending,
+  onToggleEpisode,
+  pendingEpisode,
+}: {
+  seasons: MediaCard[]
+  loading: boolean
+  isError: boolean
+  error: unknown
+  onRetry: () => void
+  openSeason: number | null
+  onOpenSeason: (season: number | null) => void
+  episodes: MediaCard[]
+  episodesLoading: boolean
+  episodesError: boolean
+  episodesErrorValue: unknown
+  onRetryEpisodes: () => void
+  onMarkSeason: (season: number) => void
+  /** The season whose "mark all watched" is in flight, if any. */
+  markSeasonPending: number | null
+  onToggleEpisode: (id: number, watched: boolean) => void
+  /** The episode whose own write is in flight, if any. */
+  pendingEpisode: number | null
+}) {
+  if (isError) {
+    return (
+      <Panel title="Seasons">
+        <ErrorState error={error} onRetry={onRetry} title="Could not load the seasons" />
+      </Panel>
+    )
+  }
+
+  return (
+    <Panel title="Seasons" count={loading ? undefined : seasons.length} bodyClassName="p-0">
+      {loading ? (
+        <div className="space-y-1 p-strip">
+          {Array.from({ length: 3 }, (_, index) => (
+            <Skeleton key={index} className="h-row w-full" />
+          ))}
+        </div>
+      ) : seasons.length === 0 ? (
+        <EmptyState
+          icon={<ListChecks size={24} aria-hidden="true" />}
+          title="No seasons yet"
+          description="Nothing has been imported for this show. Run a library scan from Settings."
+        />
+      ) : (
+        <ul>
+          {seasons.map((season) => {
+            const number = season.season_number ?? 0
+            const isOpen = openSeason === number
+            const done =
+              season.watched_episodes != null &&
+              season.total_episodes != null &&
+              season.total_episodes > 0 &&
+              season.watched_episodes >= season.total_episodes
+            return (
+              <li
+                key={`${season.id}-${number}`}
+                className="border-b border-line-soft last:border-b-0"
+              >
+                {/* Open is a selection, so it is a neutral `control` fill and
+                    strong text, never an accent wash (§2.4). */}
+                <div
+                  className={cn(
+                    'flex h-row items-center gap-2 px-strip transition-colors duration-hover',
+                    'ease-ease',
+                    isOpen ? 'bg-control' : 'hover:bg-control-hover',
+                  )}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onOpenSeason(isOpen ? null : number)}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    aria-expanded={isOpen}
+                  >
+                    <ChevronDown
+                      size={16}
+                      aria-hidden="true"
+                      className={cn(
+                        'shrink-0 transition-transform duration-hover ease-ease',
+                        isOpen ? 'text-strong' : '-rotate-90 text-muted',
+                      )}
+                    />
+                    <span className={cn('truncate text-control', isOpen ? 'text-strong' : 'text-fg')}>
+                      {number === 0 ? (
+                        'Specials'
+                      ) : (
+                        <>
+                          Season <span className="figure">{number}</span>
+                        </>
+                      )}
+                    </span>
+                    {done && (
+                      <Check size={16} className="shrink-0 text-good" aria-label="Fully watched" />
+                    )}
+                  </button>
+                  {season.total_episodes != null && (
+                    <span className="figure shrink-0 text-tiny text-dim">
+                      {season.watched_episodes ?? 0}/{season.total_episodes}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onMarkSeason(number)}
+                    disabled={markSeasonPending != null}
+                    className="btn-icon h-5 w-5 shrink-0"
+                    title={
+                      markSeasonPending != null
+                        ? 'A season is already being marked. Wait for it to finish.'
+                        : 'Mark every episode in this season as watched'
+                    }
+                    aria-label={`Mark every episode in season ${number} as watched`}
+                  >
+                    {markSeasonPending === number ? (
+                      <Spinner className="text-tiny" />
+                    ) : (
+                      <ListChecks size={16} aria-hidden="true" />
+                    )}
+                  </button>
+                </div>
+
+                {isOpen && (
+                  <div className="well m-strip mt-0">
+                    {episodesError ? (
+                      <ErrorState
+                        error={episodesErrorValue}
+                        onRetry={onRetryEpisodes}
+                        title="Could not load the episodes"
+                      />
+                    ) : episodesLoading ? (
+                      <div className="space-y-1 p-2">
+                        {Array.from({ length: 4 }, (_, index) => (
+                          <Skeleton key={index} className="h-row-plain w-full" />
+                        ))}
+                      </div>
+                    ) : (
+                      <ul>
+                        {episodes.map((episode) => (
+                          <EpisodeRow
+                            key={episode.id}
+                            episode={episode}
+                            onToggle={onToggleEpisode}
+                            pending={pendingEpisode === episode.id}
+                          />
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 )}
               </li>
-            ))}
-      </ul>
-    </section>
+            )
+          })}
+        </ul>
+      )}
+    </Panel>
   )
 }
 
@@ -798,7 +984,7 @@ function EpisodeRow({
 }) {
   const watched = episode.status === 'completed'
   return (
-    <li className="flex items-center gap-3 px-3 py-2.5">
+    <li className="flex h-row items-center gap-2 border-b border-line-soft px-2 last:border-b-0">
       <button
         type="button"
         onClick={() => onToggle(episode.id, watched)}
@@ -808,30 +994,32 @@ function EpisodeRow({
         // duplicate play. Every other write on this page already showed one.
         disabled={pending}
         className={cn(
-          'grid h-6 w-6 shrink-0 place-items-center rounded-md border transition-colors',
+          'grid h-4 w-4 shrink-0 place-items-center rounded-tight border',
+          'transition-colors duration-hover ease-ease',
           watched
-            ? 'border-good bg-good text-white'
-            : 'border-line text-transparent hover:border-accent',
-          pending && 'opacity-60',
+            ? 'border-accent bg-accent text-accent-ink'
+            : 'border-line bg-field text-transparent hover:border-accent',
+          pending && 'opacity-45',
         )}
+        title={watched ? 'Mark unwatched' : 'Mark watched'}
         aria-label={watched ? `Mark ${episode.title} unwatched` : `Mark ${episode.title} watched`}
         aria-pressed={watched}
         aria-busy={pending}
       >
         {pending ? (
-          <Spinner className="text-[10px] text-muted" />
+          <Spinner className="text-tiny text-muted" />
         ) : (
-          <CheckIcon className="text-xs" />
+          <Check size={12} strokeWidth={3} aria-hidden="true" />
         )}
       </button>
-      <span className="w-10 shrink-0 text-xs tabular-nums text-muted">
+      <span className="figure w-7 shrink-0 text-tiny text-dim">
         E{String(episode.episode_number ?? 0).padStart(2, '0')}
       </span>
       <Link
         to={`/item/${episode.id}`}
         className={cn(
-          'min-w-0 flex-1 truncate text-sm hover:text-accent',
-          watched ? 'text-muted' : 'text-ink',
+          'min-w-0 flex-1 truncate text-control transition-colors duration-hover ease-ease',
+          watched ? 'text-muted hover:text-fg' : 'text-fg hover:text-strong',
         )}
       >
         {episode.title}
@@ -839,11 +1027,74 @@ function EpisodeRow({
       {episode.progress_percent != null &&
         episode.progress_percent > 0 &&
         episode.progress_percent < 100 && (
-          <span className="shrink-0 text-[11px] text-accent">
+          <span className="figure shrink-0 text-tiny text-dim">
             {Math.round(episode.progress_percent)}%
           </span>
         )}
     </li>
+  )
+}
+
+/**
+ * A private note on a title.
+ *
+ * Saved on a button rather than as you type. The write pushes nothing to Plex,
+ * but it is still a round trip, and a field that saves on every keystroke has
+ * no honest moment at which to say "saved". The button is disabled while the
+ * text is unchanged, and says why.
+ */
+function NotesPanel({ itemId, notes }: { itemId: number; notes: string | null }) {
+  const queryClient = useQueryClient()
+  const { notify } = useToast()
+  const stored = notes ?? ''
+  const [draft, setDraft] = useState(stored)
+  // The saved note arrives with the item and can change underneath us: a
+  // refetch after a save, or a different title on this same mounted component.
+  // Follow it, the way the season list follows the id.
+  const [seeded, setSeeded] = useState(stored)
+  if (seeded !== stored) {
+    setSeeded(stored)
+    setDraft(stored)
+  }
+
+  const save = useMutation({
+    mutationFn: (value: string) =>
+      api.media.setNotes(itemId, value.trim() === '' ? null : value.trim()),
+    onSuccess: (_data, value) => {
+      notify(value.trim() === '' ? 'Note cleared' : 'Note saved', 'success')
+      queryClient.invalidateQueries({ queryKey: ['item', itemId] })
+      // `has_notes` is a browse filter, so any grid narrowed by it is now out
+      // of date.
+      queryClient.invalidateQueries({ queryKey: ['media'] })
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const dirty = draft !== stored
+
+  return (
+    <Panel title="Notes">
+      <textarea
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        rows={4}
+        placeholder="Only you can see this."
+        aria-label="Your note on this title"
+        className="field h-auto resize-y py-1.5 leading-normal"
+      />
+      <div className="mt-2 flex justify-end">
+        <button
+          type="button"
+          onClick={() => save.mutate(draft)}
+          disabled={!dirty || save.isPending}
+          className="btn-secondary"
+          title={dirty ? 'Save this note.' : 'The note is unchanged, so there is nothing to save.'}
+        >
+          {save.isPending && <Spinner />}
+          Save note
+        </button>
+      </div>
+    </Panel>
   )
 }
 
@@ -873,22 +1124,24 @@ function ExternalLinks({
   if (links.length === 0) return null
 
   return (
-    <div className="card p-4">
-      <h3 className="label">Elsewhere</h3>
-      <ul className="mt-3 space-y-1.5">
+    <Panel title="Elsewhere" bodyClassName="p-0">
+      <ul>
         {links.map((link) => (
-          <li key={link.label}>
+          <li key={link.label} className="border-b border-line-soft last:border-b-0">
             <a
               href={link.href}
               target="_blank"
               rel="noreferrer noopener"
-              className="text-sm text-subtle underline-offset-2 hover:text-accent hover:underline"
+              className="flex h-row items-center gap-2 px-strip text-control text-fg
+                         transition-colors duration-hover ease-ease hover:bg-control-hover
+                         hover:text-strong"
             >
-              {link.label} ↗
+              <span className="min-w-0 flex-1 truncate">{link.label}</span>
+              <ExternalLink size={16} className="shrink-0 text-muted" aria-hidden="true" />
             </a>
           </li>
         ))}
       </ul>
-    </div>
+    </Panel>
   )
 }
