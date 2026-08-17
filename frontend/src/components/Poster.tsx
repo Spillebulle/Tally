@@ -278,9 +278,16 @@ export function PosterGrid({
   quickWatchPendingId = null,
 }: PosterGridProps) {
   return (
+    // Reflow, not fixed breakpoints: a wide screen gets *more* columns, never
+    // bigger cards (STYLE-GUIDE 6.4). The old ladder did the opposite past the
+    // 1200px content cap, where six columns of a 1440px window meant 186px
+    // cards, narrower than the same grid at 1024. Two floors, because one
+    // cannot serve both ends: 220px is the guide's reflow minimum, but on a
+    // 390px phone it yields a single column, which is a poster the width of the
+    // window and exactly the "bigger component" the rule forbids.
     <div
-      className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4
-                 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7"
+      className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3
+                 sm:grid-cols-[repeat(auto-fill,minmax(220px,1fr))]"
     >
       {loading
         ? Array.from({ length: skeletonCount }, (_, index) => (
