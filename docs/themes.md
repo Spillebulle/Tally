@@ -99,6 +99,14 @@ save one swatch without shipping the other twenty-six back;
 `POST /api/themes/import` takes the file as multipart `file` and answers
 `{theme, skipped_lines}`.
 
+**A name already in the library gets a number**, per §3.2, so `POST` and a
+`PATCH` that carries a name may answer with a name other than the one they were
+sent — "Night Owl 2", or "Graphite 2" for a copy named after the built-in. The
+interface has to show the name in the response rather than the one it typed.
+The id is numbered separately and by the other rule, so the two can differ:
+importing "Night Owl" twice gives `night-owl` / "Night Owl" and `night-owl-2` /
+"Night Owl 2", but renaming never moves the file.
+
 The selected theme is a user preference like any other:
 `User.preferences["theme_id"]`, absent meaning a built-in and the existing
 dark / light / system preference deciding which. Setting it to an id this
