@@ -617,7 +617,7 @@ export function Layout() {
           <button
             type="button"
             onClick={() => setDrawerOpen(false)}
-            className="absolute inset-0 bg-backdrop opacity-60"
+            className="dialog-backdrop absolute inset-0"
             aria-label="Close navigation"
           />
           <aside className="floating absolute inset-y-2 left-2 flex w-sidebar animate-rise flex-col overflow-hidden">
