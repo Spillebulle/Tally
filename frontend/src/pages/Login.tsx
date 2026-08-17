@@ -2,13 +2,39 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronLeft } from 'lucide-react'
-import { api } from '@/lib/api'
+import { ApiError, api } from '@/lib/api'
 import { useAuth } from '@/lib/app-context'
 import { Mark, Wordmark } from '@/components/Brand'
 import { PlexIcon } from '@/components/Icons'
 import { Notice, Spinner } from '@/components/ui'
 
 type Mode = 'choose' | 'local'
+
+/**
+ * The API writes its `detail` without terminal punctuation ("Incorrect username
+ * or password"), and §12 wants sentences with full stops. Adding one is only
+ * safe if there is not one already, so this checks rather than concatenating.
+ */
+function asSentence(message: string): string {
+  const trimmed = message.trim()
+  if (trimmed === '') return trimmed
+  return /[.!?…:]$/.test(trimmed) ? trimmed : `${trimmed}.`
+}
+
+/**
+ * What to put in front of the user for a failed request.
+ *
+ * `fetch` rejects with a bare `TypeError: Failed to fetch` when the request
+ * never reached a server at all — Tally stopped, the wrong host, no network —
+ * and that string was rendered verbatim: no full stop, nothing but jargon, and
+ * no hint of what to do about it. Anything the API itself answered arrives as
+ * an `ApiError` carrying a sentence written for a person, so the two are told
+ * apart by type rather than by reading the message.
+ */
+function errorMessage(error: unknown): string {
+  if (error instanceof ApiError) return asSentence(error.message)
+  return 'Could not reach Tally. Check that the server is running, then try again.'
+}
 
 /**
  * The one screen that wears the full logo.
@@ -92,12 +118,12 @@ export function Login() {
         } catch (pollError) {
           if (pollTimer.current) window.clearInterval(pollTimer.current)
           setPlexPending(false)
-          setError((pollError as Error).message)
+          setError(errorMessage(pollError))
         }
       }, 2000)
     } catch (startError) {
       setPlexPending(false)
-      setError((startError as Error).message)
+      setError(errorMessage(startError))
     }
   }
 
@@ -117,6 +143,11 @@ export function Login() {
                 onClick={startPlexLogin}
                 disabled={plexPending}
                 className="btn-primary w-full"
+                title={
+                  plexPending
+                    ? 'A sign-in request is already open. Approve it in the Plex window, or cancel it below.'
+                    : 'Sign in on plex.tv in a new window.'
+                }
               >
                 {plexPending ? (
                   <Spinner />
@@ -157,7 +188,14 @@ export function Login() {
 
               <button
                 type="button"
-                onClick={() => setMode('local')}
+                // The error belongs to the Plex flow, which is no longer on
+                // screen. Left standing, it sat *below* the password form
+                // saying the same thing the form's own notice said, so an
+                // unreachable server was reported twice on one card.
+                onClick={() => {
+                  setError(null)
+                  setMode('local')
+                }}
                 className="btn-secondary w-full"
               >
                 {status?.setup_required ? 'Create the first account' : 'Sign in with a password'}
@@ -166,7 +204,10 @@ export function Login() {
           ) : (
             <LocalForm
               setupRequired={Boolean(status?.setup_required)}
-              onBack={() => setMode('choose')}
+              onBack={() => {
+                setError(null)
+                setMode('choose')
+              }}
               onDone={async () => {
                 await refresh()
                 navigate('/', { replace: true })
@@ -212,7 +253,9 @@ function LocalForm({
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // The error itself, not its message: whether to offer "check the username and
+  // password" depends on the *status*, and only the error object carries it.
+  const [error, setError] = useState<unknown>(null)
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -226,11 +269,16 @@ function LocalForm({
       }
       await onDone()
     } catch (submitError) {
-      setError((submitError as Error).message)
+      setError(submitError)
     } finally {
       setBusy(false)
     }
   }
+
+  // Only a 401 means the credentials were wrong. The advice used to go out with
+  // every non-register failure, including a server that could not be reached,
+  // where checking the password is the wrong thing to do next.
+  const wrongCredentials = error instanceof ApiError && error.status === 401
 
   return (
     <form onSubmit={submit} className="space-y-3">
@@ -264,16 +312,32 @@ function LocalForm({
         {isRegister && <p className="mt-1 text-tiny text-dim">At least 8 characters.</p>}
       </div>
 
-      {error && (
+      {error != null && (
         <div role="alert">
           <Notice>
-            {error}
-            {!isRegister && ' Check the username and password, then try again.'}
+            {/* Two sentences, two elements. Run together in one string they came
+                out as "Incorrect username or password Check the username and
+                password, then try again." */}
+            <p>{errorMessage(error)}</p>
+            {wrongCredentials && (
+              <p className="mt-1">Check the username and password, then try again.</p>
+            )}
           </Notice>
         </div>
       )}
 
-      <button type="submit" disabled={busy} className="btn-primary w-full">
+      <button
+        type="submit"
+        disabled={busy}
+        className="btn-primary w-full"
+        title={
+          busy
+            ? 'Waiting for the server to answer.'
+            : isRegister
+              ? 'Create this account and sign in.'
+              : 'Sign in with this username and password.'
+        }
+      >
         {busy && <Spinner />}
         {isRegister ? 'Create account' : 'Sign in'}
       </button>

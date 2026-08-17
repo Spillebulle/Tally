@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import type { Credit, MediaCard, MediaDetail, WatchStatus } from '@/lib/types'
+import type { Credit, MediaCard, MediaDetail, UserState, WatchStatus } from '@/lib/types'
 import { cn, formatDate, formatRuntime, relativeTime, STATUS_LABELS } from '@/lib/utils'
 import { certificateLabel } from '@/lib/certificates'
 import { Artwork, PosterRail } from '@/components/Poster'
@@ -50,6 +50,34 @@ const STATUS_OPTIONS: WatchStatus[] = [
  */
 const facetLink = (key: string, value: string) =>
   `/browse?${key}=${encodeURIComponent(value)}`
+
+/**
+ * "returning series" → "Returning series".
+ *
+ * Not the `capitalize` utility, which capitalises *every* word and would print
+ * "Returning Series" — Title Case, which §12 rules out everywhere but a proper
+ * noun. Providers store this value lower-cased (`tmdb.py`, `tvdb.py`, `mal.py`
+ * all `.lower()` it), so the first letter is the only one to fix.
+ */
+const sentenceCase = (value: string) => value.charAt(0).toUpperCase() + value.slice(1)
+
+/**
+ * The row the server inserts the first time you touch a title.
+ *
+ * `state` is null until a `UserMediaState` exists, so an optimistic write has
+ * to stand one up rather than skip the update. Every field is the column
+ * default in `models.py`.
+ */
+const EMPTY_STATE: UserState = {
+  status: null,
+  rating: null,
+  view_count: 0,
+  last_watched_at: null,
+  progress_ms: null,
+  duration_ms: null,
+  is_favorite: false,
+  notes: null,
+}
 
 export function ItemDetail() {
   const { id } = useParams<{ id: string }>()
@@ -133,6 +161,13 @@ export function ItemDetail() {
     // Fill the heart on click rather than on the round trip. It is one small
     // boolean and the button has no other pending affordance, so without this
     // the click looked like it had missed. Rolled back if the write fails.
+    //
+    // A title nobody has rated, watched or annotated has **no**
+    // `UserMediaState` row and arrives with `state: null`, and favouriting is
+    // the commonest way one gets created. Leaving null alone left exactly those
+    // titles with no reaction at all — the case this exists for. So the write
+    // synthesises the row the server is about to insert, which is the empty
+    // state plus the flag just set.
     onMutate: async (value: boolean) => {
       await queryClient.cancelQueries({ queryKey: ['item', itemId] })
       const previous = queryClient.getQueryData<MediaDetail>(['item', itemId])
@@ -142,7 +177,7 @@ export function ItemDetail() {
               ...old,
               state: old.state
                 ? { ...old.state, is_favorite: value }
-                : old.state,
+                : { ...EMPTY_STATE, is_favorite: value },
             }
           : old,
       )
@@ -202,10 +237,10 @@ export function ItemDetail() {
       <div className="-mt-strip">
         {/* Same geometry as the hero it stands in for, so the page does not
             jump sideways or shorten when the item arrives. */}
-        <Skeleton className="full-bleed h-[160px] rounded-none sm:h-[200px] lg:h-[240px]" />
+        <Skeleton className="full-bleed h-[140px] rounded-none sm:h-[170px] lg:h-[200px]" />
         <div className="relative -mt-16 flex gap-strip sm:-mt-24 sm:gap-4">
           <Skeleton className="aspect-[2/3] w-[120px] shrink-0 rounded-card sm:w-[160px]" />
-          <div className="min-w-0 flex-1 space-y-2 pt-16 sm:pt-24">
+          <div className="min-w-0 flex-1 space-y-2 pt-5 sm:pt-12">
             <Skeleton className="h-4 w-1/3" />
             <Skeleton className="h-3 w-1/4" />
             <Skeleton className="h-button w-40" />
@@ -256,6 +291,35 @@ export function ItemDetail() {
 
   const directors = credits.data?.directors ?? []
 
+  /**
+   * Whether there is a *list* to put in the wide column: the seasons, or the
+   * cast. Those are the only two panels tall enough to stand beside the record
+   * column, which runs to roughly 360px.
+   *
+   * `CastPanel` renders nothing at all when there are no credits and none are
+   * pending, and TMDB credits need an API key most installs do not have. So on
+   * the common install a film's wide column was one short Overview panel over
+   * about 285px of void, and an episode's — no cast, no seasons, often no
+   * overview either — was 380px of nothing. Overview alone does not earn a
+   * column: it is one paragraph, and it reads better full width with the record
+   * panels spread in a row beneath it. The grid is what has to know, so the
+   * question is asked out here rather than inside each panel.
+   */
+  const hasCredits = credits.isLoading || credits.isError || (credits.data?.cast.length ?? 0) > 0
+  const hasWideColumn = item.media_type === 'show' || (item.media_type === 'movie' && hasCredits)
+
+  // "Elsewhere" draws nothing without an external id, so the row of record
+  // panels is two wide or three. Told to make three columns for two panels, the
+  // grid would leave the last one empty.
+  const recordPanels =
+    item.tmdb_id || item.tvdb_id || item.imdb_id || item.mal_id ? 3 : 2
+
+  const overviewPanel = item.overview ? (
+    <Panel title="Overview">
+      <p className="max-w-[65ch] text-balance text-body text-fg">{item.overview}</p>
+    </Panel>
+  ) : null
+
   // `to` turns a fact into a way into the library: certificate, studio and
   // director are all things a whole shelf shares, and each lands on a browse
   // view already filtered to it. `figure` marks the values that are read as
@@ -263,36 +327,50 @@ export function ItemDetail() {
   const facts: Fact[] = [
     item.first_aired && {
       term: 'Released',
-      value: formatDate(item.first_aired),
+      values: [{ label: formatDate(item.first_aired) }],
       figure: true,
     },
     formatRuntime(item.runtime_minutes) && {
       term: 'Runtime',
-      value: formatRuntime(item.runtime_minutes)!,
+      values: [{ label: formatRuntime(item.runtime_minutes)! }],
       figure: true,
     },
     item.content_rating && {
       term: 'Rated',
       // Written the way the board writes it; the *link* still carries the raw
       // value, which is the only thing `?content_rating=` matches.
-      value: certificateLabel(item.content_rating),
+      values: [
+        {
+          label: certificateLabel(item.content_rating),
+          to: facetLink('content_rating', item.content_rating),
+        },
+      ],
       mark: item.content_rating,
-      to: facetLink('content_rating', item.content_rating),
     },
-    ...directors.map((person, index) => ({
-      // Two directors are a pair, not a list with a heading each.
-      term: index === 0 ? (directors.length > 1 ? 'Directors' : 'Director') : '',
-      value: person.name,
-      to: facetLink('director', person.name),
-    })),
+    directors.length > 0 && {
+      // One key, every name under it. Emitted as one pair per director with
+      // the second key left blank, the list came apart at the width where it
+      // runs two pairs to a line: the blank key sat beside an unrelated value
+      // and the second director appeared under the key before it.
+      term: directors.length > 1 ? 'Directors' : 'Director',
+      values: directors.map((person) => ({
+        label: person.name,
+        to: facetLink('director', person.name),
+      })),
+    },
     item.studio && {
       term: 'Studio',
-      value: item.studio,
-      to: facetLink('studio', item.studio),
+      values: [{ label: item.studio, to: facetLink('studio', item.studio) }],
     },
-    item.network && { term: 'Network', value: item.network },
-    item.release_status && { term: 'Status', value: item.release_status },
-    item.anime_format && { term: 'Format', value: item.anime_format },
+    item.network && { term: 'Network', values: [{ label: item.network }] },
+    // "Release", not "Status": the record panel a column away has a Status row
+    // of its own, and the two mean different things — whether the title is
+    // finished, and whether you have watched it.
+    item.release_status && {
+      term: 'Release',
+      values: [{ label: sentenceCase(item.release_status) }],
+    },
+    item.anime_format && { term: 'Format', values: [{ label: item.anime_format }] },
   ].filter(Boolean) as Fact[]
 
   return (
@@ -305,11 +383,13 @@ export function ItemDetail() {
         title={item.title}
         showTitle={false}
         imgClassName="object-top"
-        className="full-bleed h-[160px] sm:h-[200px] lg:h-[240px]"
+        className="full-bleed h-[140px] sm:h-[170px] lg:h-[200px]"
       >
         {/* Scrim so what follows stays readable over any artwork, eased out
             over the band's whole height so the artwork does not stop at a
-            line. See `.hero-scrim`. */}
+            line. See `.hero-scrim`. The badges and the title sit in its lower
+            reaches, which is what all those stops are for; the band was 240px
+            of pure decoration while everything began at its bottom edge. */}
         <div className="hero-scrim absolute inset-0" />
 
         {/* A mark over user content, so it takes a derived ink (white on a dark
@@ -339,7 +419,10 @@ export function ItemDetail() {
           />
         </div>
 
-        <div className="min-w-0 flex-1 pt-16 sm:pt-24">
+        {/* The padding is the pull-up less the height of the badge row and the
+            title, so those two land inside the band and the title's baseline
+            sits just above its bottom edge, where the scrim is solid. */}
+        <div className="min-w-0 flex-1 pt-5 sm:pt-12">
           <div className="flex flex-wrap items-center gap-1.5">
             {item.is_anime && (
               <span className="badge gap-1">
@@ -451,6 +534,13 @@ export function ItemDetail() {
               onClick={() => watchlist.mutate(!item.on_watchlist)}
               disabled={watchlist.isPending}
               className="btn-secondary"
+              title={
+                watchlist.isPending
+                  ? 'Your Plex watchlist is being updated. Wait for it to finish.'
+                  : item.on_watchlist
+                    ? 'Remove this title from your Plex watchlist.'
+                    : 'Add this title to your Plex watchlist.'
+              }
             >
               {/* Adding writes through to the Plex watchlist, so this is a real
                   round trip and needs to say so. */}
@@ -505,36 +595,49 @@ export function ItemDetail() {
                          gap-y-1 sm:grid-cols-[auto_1fr_auto_1fr] sm:gap-x-4"
             >
               {facts.map((fact) => (
-                <Fragment key={`${fact.term}-${fact.value}`}>
+                <Fragment key={fact.term}>
                   <dt className="text-tiny text-dim">{fact.term}</dt>
-                  <dd className="flex min-w-0 items-center gap-1.5 text-control text-fg">
+                  <dd
+                    className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-control
+                               text-fg"
+                  >
                     {fact.mark && (
                       <RatingBadge
                         raw={fact.mark}
-                        label={fact.value}
+                        label={fact.values[0]?.label ?? ''}
                         // The label is printed next to it, so an unrecognised
                         // certificate draws nothing here rather than boxing the
                         // same word twice.
                         fallback="none"
                       />
                     )}
-                    {fact.to ? (
-                      // Underlined at rest, not on hover: touch has no hover,
-                      // so a hover-only cue leaves half the users with no way
-                      // of knowing this row goes anywhere.
-                      <Link
-                        to={fact.to}
-                        className={cn(
-                          'truncate underline decoration-line decoration-dotted underline-offset-4',
-                          'transition-colors duration-hover ease-ease hover:text-strong',
-                          fact.figure && 'figure',
+                    {fact.values.map((value, index) => (
+                      <Fragment key={value.label}>
+                        {/* The same separator the year/runtime line above uses,
+                            so two values under one key read as one fact. */}
+                        {index > 0 && <span aria-hidden="true" className="text-dim">·</span>}
+                        {value.to ? (
+                          // Underlined at rest, not on hover: touch has no
+                          // hover, so a hover-only cue leaves half the users
+                          // with no way of knowing this goes anywhere.
+                          <Link
+                            to={value.to}
+                            className={cn(
+                              'truncate underline decoration-line decoration-dotted',
+                              'underline-offset-4 transition-colors duration-hover ease-ease',
+                              'hover:text-strong',
+                              fact.figure && 'figure',
+                            )}
+                          >
+                            {value.label}
+                          </Link>
+                        ) : (
+                          <span className={cn('truncate', fact.figure && 'figure')}>
+                            {value.label}
+                          </span>
                         )}
-                      >
-                        {fact.value}
-                      </Link>
-                    ) : (
-                      <span className={cn('truncate', fact.figure && 'figure')}>{fact.value}</span>
-                    )}
+                      </Fragment>
+                    ))}
                   </dd>
                 </Fragment>
               ))}
@@ -543,17 +646,18 @@ export function ItemDetail() {
         </div>
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_264px]">
+      <div className={cn('mt-4 grid gap-3', hasWideColumn && 'lg:grid-cols-[1fr_264px]')}>
+        {/* Collapsed, the overview is the grid's own first row and the record
+            panels its second, so the two are one gap apart rather than two. */}
+        {!hasWideColumn && overviewPanel}
+
         {/* `min-w-0`, or a wide child cannot scroll inside its own box. A grid
             track sizes to its content by default (`min-width: auto`), so the
             child's full intrinsic width pushed this column — and the whole
             page — wider than the viewport instead of scrolling. */}
+        {hasWideColumn && (
         <div className="min-w-0 space-y-3">
-          {item.overview && (
-            <Panel title="Overview">
-              <p className="max-w-[65ch] text-balance text-body text-fg">{item.overview}</p>
-            </Panel>
-          )}
+          {overviewPanel}
 
           {item.media_type === 'show' && (
             <SeasonsPanel
@@ -594,16 +698,32 @@ export function ItemDetail() {
             />
           )}
         </div>
+        )}
 
-        <aside className="space-y-3">
+        {/* With no list to stand beside them, the record panels spread across
+            the width instead of holding a 264px column against an empty half
+            page. `items-start` so a short panel does not stretch to the height
+            of the tallest one. */}
+        <aside
+          className={cn(
+            hasWideColumn
+              ? 'space-y-3'
+              : 'grid items-start gap-3 sm:grid-cols-2',
+            !hasWideColumn && recordPanels === 3 && 'lg:grid-cols-3',
+          )}
+        >
           <Panel title="Your record">
             <div className="space-y-0.5">
-              {/* Stacked rather than label-left: ten stars, the figure and
-                  Clear do not fit beside a label in a 264px column, and the
-                  panel clips what overflows. */}
-              <div className="pb-1">
-                <span className="mb-1 block text-control text-fg">Rating</span>
+              {/* Label-left like the three rows under it. At `md` the ten
+                  stars, the figure and Clear came to about 280px against a
+                  240px body and `.panel` clipped the overflow; `sm` is 12px a
+                  star, which brings the whole row to about 235px and fits.
+                  Stacking it broke the panel's row rhythm to solve a problem
+                  the size prop already solves. */}
+              <div className="flex min-h-row items-center justify-between gap-2">
+                <span className="text-control text-fg">Rating</span>
                 <StarRating
+                  size="sm"
                   rating={item.state?.rating ?? null}
                   onChange={(rating) => rate.mutate(rating)}
                 />
@@ -700,11 +820,24 @@ function Recommendations({ itemId }: { itemId: number }) {
   )
 }
 
-/** One pair in the hero's key/value list. `to` makes it a way into the library. */
+/** One value inside a fact. `to` makes it a way into the library. */
+interface FactValue {
+  label: string
+  to?: string
+}
+
+/**
+ * One pair in the hero's key/value list.
+ *
+ * `values` is a list rather than a string because a fact can hold more than one
+ * — two directors — and every one of them has to stay inside the same `<dd>`.
+ * The list is a grid that runs two pairs to a line on a wide screen, so a
+ * second value emitted as its own pair with an empty key does not sit under the
+ * key it belongs to; it lands beside whatever pair shares that line.
+ */
 interface Fact {
   term: string
-  value: string
-  to?: string
+  values: FactValue[]
   /** A value read as a number: a date, a duration, a count. Drawn monospaced. */
   figure?: boolean
   /**
@@ -712,8 +845,8 @@ interface Fact {
    *
    * The raw string rather than the label, because which mark stands for a
    * certificate is decided by the board that issued it, and only the raw value
-   * names that. `value` stays the text — the mark is recognised at a glance
-   * but not always read at 20px, and the row has room for both.
+   * names that. The label stays printed beside it — the mark is recognised at a
+   * glance but not always read at 20px, and the row has room for both.
    */
   mark?: string
 }
@@ -998,7 +1131,11 @@ function EpisodeRow({
           'transition-colors duration-hover ease-ease',
           watched
             ? 'border-accent bg-accent text-accent-ink'
-            : 'border-line bg-field text-transparent hover:border-accent',
+            // Unchecked is a `line` edge on `field` (§7.12). The hover was an
+            // accent edge, which is not on §2.4's list: an empty box is not
+            // selected, in hand or primary. Dashed is the house hover for an
+            // outlined control (§7.6).
+            : 'border-line bg-field text-transparent hover:border-line-dashed',
           pending && 'opacity-45',
         )}
         title={watched ? 'Mark unwatched' : 'Mark watched'}
