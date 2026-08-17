@@ -43,6 +43,66 @@ export default {
       modal: 'var(--shadow-modal)',
       knob: 'var(--shadow-knob)',
     },
+
+    /*
+     * The colours text is allowed to be, stated rather than inherited.
+     *
+     * By default Tailwind builds `text-*` colours from the whole palette, and
+     * `text-` is also the prefix of the type scale - so `control` being both a
+     * size (11.5px) and a surface (the resting control fill) made
+     * `.text-control` emit **both**, with the colour last. Forty-five call
+     * sites meant the size; the label on the "New theme" card was painted the
+     * control grey on a chrome card and was invisible until somebody read the
+     * pixels rather than the markup.
+     *
+     * So the set is closed here, and it closes honestly: the four ranks of ink,
+     * the hint, the accent, the semantic three, the two brand inks, the series
+     * for a chart label, and `line-dashed`, which §7.19 puts on an empty
+     * state's icon. A surface is not a colour text may be, which is why
+     * removing them costs nothing and why nothing in `src` used one.
+     *
+     * The rule this leaves behind: **a name may be in the type scale or in the
+     * text palette, never in both.** Adding `heading` or `body` as a colour
+     * would break the same way.
+     */
+    textColor: {
+      inherit: 'inherit',
+      current: 'currentColor',
+      transparent: 'transparent',
+      white: '#ffffff',
+      black: '#000000',
+
+      strong: 'var(--text-strong)',
+      fg: 'var(--text)',
+      muted: 'var(--text-muted)',
+      dim: 'var(--text-dim)',
+      placeholder: 'var(--placeholder)',
+
+      accent: {
+        DEFAULT: 'var(--accent)',
+        dim: 'var(--accent-dim)',
+        ink: 'var(--accent-ink)',
+      },
+
+      caution: 'var(--caution)',
+      good: 'var(--good)',
+      critical: 'var(--critical)',
+
+      plex: { DEFAULT: 'var(--plex)', ink: 'var(--plex-ink)' },
+      'brand-ink': 'var(--brand-ink)',
+
+      series: {
+        1: 'var(--series-1)',
+        2: 'var(--series-2)',
+        3: 'var(--series-3)',
+        4: 'var(--series-4)',
+        5: 'var(--series-5)',
+        6: 'var(--series-6)',
+      },
+
+      // The dashed mark's colour, for the 24px icon on an empty state.
+      'line-dashed': 'var(--line-dashed)',
+    },
     extend: {
       colors: {
         // Surfaces, darkest behind the work to lightest floating on top.

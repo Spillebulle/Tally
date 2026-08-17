@@ -141,6 +141,16 @@ rather than a tinted edge.
 `new Date('YYYY-MM-DD')`.** Both convert via UTC and are off by a day east of
 Greenwich. `localDateKey()` and `parseLocalDateLabel()` in `lib/utils.ts`.
 
+**A name may be in the type scale or in the text palette, never in both.**
+`control` was in each - 11.5 px in `fontSize`, the resting control fill in
+`colors` - so `text-control` emitted a size *and* a colour, colour last. All
+forty-five call sites meant the size, and the label it painted the control grey
+on a chrome card was invisible until somebody read the pixels rather than the
+markup. `tailwind.config.js` now states `textColor` as a closed set: the four
+ranks of ink, the hint, the accent, the semantic three, the brand inks, the
+series, and `line-dashed` for an empty state's icon. A surface is not a colour
+text may be.
+
 **`pointer-events-none` on a disabled control hides the tooltip that explains
 it.** §7.6 promises a disabled control says why it is disabled, and `.btn`
 carried `disabled:pointer-events-none`, so nine explanations on the settings
