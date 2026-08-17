@@ -6,6 +6,17 @@ Umber opens in Tally unchanged and one made here opens in Umber, so wherever
 fidelity and convenience disagreed, fidelity won — see the notes on each rule
 below, which record the places that was a real choice.
 
+**§3.2 is a transcription of `themelib.rs`, and where the prose is ambiguous
+that file is the tie-break.** It lives at
+`../Umber/crates/umber-app/src/themelib.rs`, and reading it settled four things
+this module had guessed at: keys and `base` values are compared
+case-sensitively (only the header is not), `str::lines()` does not break on
+U+2028, `char::is_control` is Unicode category Cc and nothing wider, and "a
+name already in the library gets a number" is about the *display name*, which
+is `theme_library.free_name`. Each of those is marked where it is implemented.
+Two deliberate divergences are marked the same way, in `slugify` and
+`parse_colour`.
+
 Nothing here knows about HTTP or about the filesystem. It is handed text and it
 answers with a theme; `theme_library` owns where the text came from and what it
 is called, and `routers/themes.py` owns the wire. One decoder and one encoder,
@@ -21,6 +32,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 # --- the format -----------------------------------------------------------
@@ -112,6 +124,11 @@ CSS_NAMES: dict[str, str] = {
 #: is not decoration. §3.2 sets it at 64 characters, in both directions.
 NAME_MAX = 64
 
+#: Room left under `NAME_MAX` for the number `unique_name` appends. A desired
+#: name is clipped to this before it is made unique, so the suffix can never be
+#: the part the cap cuts off — which would put two themes back on one name.
+SUFFIX_ROOM = 8
+
 #: The filename stem, and therefore the id, is cut to this.
 SLUG_MAX = 48
 
@@ -128,6 +145,22 @@ class ThemeFormatError(ValueError):
 
 # --- colour ---------------------------------------------------------------
 
+#: Where a line ends: a CRLF or a bare LF, and deliberately nothing else.
+#:
+#: `str.splitlines()` was here first and is wrong for this format. It also
+#: breaks on U+2028, U+2029 and U+0085, which Rust's `str::lines()` does not,
+#: and a name containing one of those is legal in a file Umber wrote — none of
+#: them is a control character, so `clean_name` keeps them. Tally read the
+#: remainder of such a name as a *setting*: a name of `A<U+2028>accent =
+#: #FF0000` came back as the name `A` and a red accent, with nothing counted as
+#: skipped.
+#:
+#: A lone CR is left out of the alternation for the same reason: `str::lines()`
+#: does not treat one as a break either, and a line ending one app sees and the
+#: other does not is exactly the failure this pattern exists to remove. Every
+#: line is stripped before it is read, so a CR left inside one is whitespace.
+_LINE_BREAK = re.compile(r"\r\n|\n")
+
 _HEX6 = re.compile(r"#?([0-9a-fA-F]{6})\Z")
 _HEX3 = re.compile(r"#([0-9a-fA-F]{3})\Z")
 
@@ -142,6 +175,16 @@ def parse_colour(raw: str) -> str | None:
     anything else is refused rather than guessed, since a theme that quietly
     took black for a misread line would be a theme with an invisible interface
     in it.
+
+    **This is stricter than the reference, in two cases nobody writes.**
+    `themelib.rs::parse_hex` strips *every* leading `#` and then accepts three
+    or six digits, so it reads a bare `abc` and a `##abc` that §3.2's list does
+    not name. Umber's own encoder never writes either, so the divergence can
+    only be reached through a hand-edited file — where it would cost one colour
+    here and none there, and one line of difference in the count the two apps
+    report. §3.2's list is followed rather than the reference because the list
+    is explicit and the tolerance is not; if that is ever judged the wrong way
+    round, this is the one function to change.
     """
     value = raw.strip()
     if not value:
@@ -204,11 +247,13 @@ def mix(start: str, end: str, fraction: float) -> str:
       OKLCH. A derivation done in a different space is a colour nobody chose,
       and would put the value Tally computes for a custom theme in a different
       place from the value the browser computes for the shipped one.
-    * It lands closer to the authored built-ins. Deriving `--line-soft`,
-      `--line-dashed` and `--placeholder` from Graphite's and Paper's own
-      twenty-seven reproduces the hand-picked values in `tokens.css` to within
-      a couple of steps per channel in Oklab, and consistently further out in
-      sRGB (`#404246` against the authored `#3A3D42`, versus sRGB's `#424448`).
+    * It lands closer to the authored built-ins, where the two differ at all.
+      On Graphite's `--line-dashed` and `--placeholder` Oklab is nearer by two
+      to four steps per channel (`#404246` against the authored `#3A3D42`,
+      where sRGB gives `#424448`). On `--line-soft` the two are a tie, and
+      across Paper they are within a step of each other throughout — so this is
+      a tie-break in Oklab's favour rather than the whole argument, and the
+      first reason above is the one that would stand on its own.
 
     Hue interpolation is not a question here: every mix in §3.2's table is
     between two near-neutrals, and Oklab's rectangular form cannot take the
@@ -222,30 +267,83 @@ def mix(start: str, end: str, fraction: float) -> str:
 # --- names and ids --------------------------------------------------------
 
 
+def _clean_name(raw: str) -> str:
+    """`themelib.rs::clean_name`, transcribed.
+
+    Control characters become spaces, the result is cut to 64 and trimmed. Both
+    directions go through it — the encoder on the way out and the decoder on the
+    way in — so a file somebody hand-edited is held to the same bound as a name
+    typed into the editor.
+
+    **Control character means Unicode category `Cc`**, which is what Rust's
+    `char::is_control` answers and nothing more. An earlier version here asked
+    `str.isprintable()` instead, which is also false for a non-breaking space, a
+    zero-width space and the directional marks — so a name Umber keeps came back
+    from Tally with those turned into spaces, and a round trip through the two
+    apps changed the name. A name is somebody's text; the format's business with
+    it is only that it cannot break the line.
+
+    The cut comes **before** the trim, again matching the reference. §3.2's
+    sentence reads the other way round and both are legal — they differ only for
+    a name whose leading whitespace runs past the bound — but agreeing with the
+    implementation the format is transcribed from costs nothing here, and
+    trimming last is what keeps the round trip exact either way.
+    """
+    cut = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in raw)
+    return cut[:NAME_MAX].strip()
+
+
 def bound_name(raw: str | None, *, stem: str | None = None) -> str:
     """A theme name, held to §3.2's bound.
 
-    Control characters become spaces, the result is trimmed and cut to 64. A
-    blank or absent name falls back to the file's own stem, and then to
-    `Untitled theme`.
-
-    The trim is repeated after the cut, which §3.2 does not spell out: without
-    it a 65-character name whose 64th character is a space would encode with a
-    trailing space and decode a character shorter, and a format whose own
-    output does not round-trip is not an interchange format.
+    A blank or absent name falls back to the file's own stem — cleaned the same
+    way, because a filename is up to 255 characters of somebody else's choosing
+    — and then to `Untitled theme`.
     """
-    cleaned = ""
-    if raw:
-        cleaned = "".join(ch if ch.isprintable() else " " for ch in raw)
-        cleaned = cleaned.strip()[:NAME_MAX].strip()
+    cleaned = _clean_name(raw) if raw else ""
     if cleaned:
         return cleaned
     if stem:
-        from_stem = "".join(ch if ch.isprintable() else " " for ch in stem)
-        from_stem = from_stem.strip()[:NAME_MAX].strip()
+        from_stem = _clean_name(stem)
         if from_stem:
             return from_stem
     return FALLBACK_NAME
+
+
+def unique_name(desired: str, taken: Iterable[str]) -> str:
+    """A display name nothing else in the library is called.
+
+    §3.2: "A name already in the library **gets a number** rather than replacing
+    a theme somebody built." That bullet is about the name a person reads, not
+    about the id — the id is the bullet before it — and `themelib.rs` reads it
+    the same way: `free_name` numbers the display name and is called from
+    duplicate, import *and* rename, comparing against the built-in labels too.
+    Its reason is the one worth keeping: two cards both called Graphite are two
+    cards you can only tell apart by which one has a Delete on it.
+
+    Numbered from 2 with a space — "Night Owl 2" — because that is how
+    everything else in an interface counts. Compared case-insensitively and
+    trimmed, so "night owl" does not slip past "Night Owl".
+
+    The desired name is clipped to leave room for the suffix *before* the
+    comparison, so the number can never be the part the 64-character bound cuts
+    off — which would put two themes back on one name, the thing this exists to
+    prevent.
+    """
+    candidate = _clean_name(desired)[: NAME_MAX - SUFFIX_ROOM].rstrip() or FALLBACK_NAME
+    seen = {_fold(name) for name in taken}
+    if _fold(candidate) not in seen:
+        return candidate
+    n = 2
+    while True:
+        numbered = f"{candidate} {n}"
+        if _fold(numbered) not in seen:
+            return numbered
+        n += 1
+
+
+def _fold(name: str) -> str:
+    return name.strip().lower()
 
 
 def slugify(name: str) -> str:
@@ -254,12 +352,18 @@ def slugify(name: str) -> str:
     Lower-cased, runs of non-alphanumerics collapsed to `-`, trimmed, cut to 48,
     `theme` if nothing survives.
 
-    "Alphanumeric" is read as ASCII alphanumeric, after stripping accents: a
-    stem is a filename, and macOS stores one decomposed while Linux stores it
-    as written, so a non-ASCII id would compare equal on one machine and not on
-    another — and the id is what the preferences file points at. "Café noir"
-    becomes `cafe-noir` rather than `caf-noir`, which is what makes the
-    restriction cost nothing.
+    "Alphanumeric" is read as ASCII alphanumeric: a stem is a filename, and
+    macOS stores one decomposed while Linux stores it as written, so a
+    non-ASCII id would compare equal on one machine and not on another — and
+    the id is what the preferences file points at.
+
+    **The accent-folding first is a deliberate deviation from the reference**,
+    not a reading of §3.2. `themelib.rs::slug` drops a non-ASCII character
+    outright, so "Café noir" is `caf-noir` there and `cafe-noir` here. Kept
+    because it is plainly better and because it cannot cross apps: an id is
+    the *filename*, it is never carried inside a file, and an import re-derives
+    it from the name in the library it is arriving at. If it ever did cross,
+    the reference would win.
     """
     folded = unicodedata.normalize("NFKD", name)
     stripped = "".join(ch for ch in folded if not unicodedata.combining(ch))
@@ -411,12 +515,43 @@ PAPER: dict[str, str] = {
 }
 
 
+# The five values `tokens.css` states literally rather than as a `color-mix`,
+# as it states them. `--field` and `--accent-ink` are aliases there
+# (`var(--dock)`, `var(--window)`, `#FFFFFF`) and so agree with the rule by
+# construction; the three mixes are hand-picked and do not.
+GRAPHITE_DERIVED: dict[str, str] = {
+    "--line-soft": "#1E2023",
+    "--line-dashed": "#3A3D42",
+    "--placeholder": "#5B5E63",
+    "--field": "#141517",
+    "--accent-ink": "#111214",
+}
+
+PAPER_DERIVED: dict[str, str] = {
+    "--line-soft": "#E5E2DD",
+    "--line-dashed": "#C2BDB5",
+    "--placeholder": "#A7A49F",
+    "--field": "#FFFFFF",
+    "--accent-ink": "#FFFFFF",
+}
+
+
 @dataclass(frozen=True)
 class Builtin:
     id: str
     label: str
     dark: bool
     colours: dict[str, str]
+    #: The five derived values **as `tokens.css` authors them**, which is not
+    #: quite what the rules produce from the twenty-seven above.
+    #:
+    #: §3.2: "where a built-in disagrees with a rule, the built-in is right and
+    #: stays as written". Graphite's `--line-dashed` is `#3A3D42`; deriving it
+    #: gives `#404246`, which is close enough to be the same design — that is
+    #: the claim the rules make — but it is not the colour anybody chose. So a
+    #: built-in answers with its own, and only a theme somebody *made* is
+    #: derived, which §3.2 blesses explicitly.
+    authored: dict[str, str]
 
 
 #: The family's two, under exactly the ids §3.2 names. An app with more presets
@@ -424,8 +559,8 @@ class Builtin:
 #: reworded — deliberately not the label lower-cased, because a label is what
 #: the interface shows and is free to change.
 BUILTINS: dict[str, Builtin] = {
-    "graphite": Builtin("graphite", "Graphite", True, GRAPHITE),
-    "paper": Builtin("paper", "Paper", False, PAPER),
+    "graphite": Builtin("graphite", "Graphite", True, GRAPHITE, GRAPHITE_DERIVED),
+    "paper": Builtin("paper", "Paper", False, PAPER, PAPER_DERIVED),
 }
 
 
@@ -478,11 +613,16 @@ def decode(text: str, *, theme_id: str = "", stem: str | None = None) -> DecodeR
     base = DEFAULT_BASE
     for key, value in _settings(body):
         if key == "base":
-            candidate = value.strip().lower()
             # An id the reader does not know falls back to graphite. It is not
             # counted as a skipped line: falling back is the specified answer,
             # not a loss, and the file keeps its own word for it on the way out.
-            base = candidate or DEFAULT_BASE
+            #
+            # Compared **case-sensitively**, like every key and value here but
+            # the header. §3.2 calls out case-insensitivity for the header line
+            # and for nothing else, and `themelib.rs` matches ids with `==`. A
+            # tolerant reader here would make `base = PAPER` a light theme in
+            # Tally and a dark one in Umber — the same file, two interfaces.
+            base = value or DEFAULT_BASE
             break
 
     colours = base_colours(base)
@@ -524,7 +664,7 @@ def decode(text: str, *, theme_id: str = "", stem: str | None = None) -> DecodeR
 
 def _body(text: str) -> list[str]:
     """Every line after the header, or `ThemeFormatError`."""
-    lines = text.lstrip("﻿").splitlines()
+    lines = _LINE_BREAK.split(text.lstrip("\ufeff"))
     first = lines[0].strip() if lines else ""
     if first.casefold() != HEADER.casefold():
         raise ThemeFormatError(
@@ -534,7 +674,14 @@ def _body(text: str) -> list[str]:
 
 
 def _settings(body: list[str]) -> list[tuple[str, str]]:
-    """The `key = value` lines, keys lower-cased, both sides trimmed.
+    """The `key = value` lines, both sides trimmed and neither case-folded.
+
+    Keys are matched **exactly**, which `themelib.rs` does and which §3.2
+    implies by naming the header as the one thing matched case-insensitively.
+    Case-folding here looks like generosity and is not: `ACCENT = #FF0000`
+    would be applied by Tally and counted as an unread line by Umber, so the
+    two apps would disagree both about the interface and about the one number
+    §3.2 requires be shown to the user.
 
     A blank line, a line starting with `#`, and a line with no `=` are all
     skipped — and skipped *silently*, because §3.2 lists all three as ordinary
@@ -549,7 +696,7 @@ def _settings(body: list[str]) -> list[tuple[str, str]]:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, _, value = stripped.partition("=")
-        out.append((key.strip().lower(), value.strip()))
+        out.append((key.strip(), value.strip()))
     return out
 
 
@@ -563,12 +710,14 @@ def encode(theme: Theme) -> str:
     §3.2's order, always** — even where the value equals the base's — so what
     leaves the app is complete and legible.
 
-    Nothing else is written: no blank lines, no group comments, no trailing
-    commentary. All three would be legal (a reader skips them), and a comment
-    per group would read nicely — but a reader that counts every line it skipped
-    would then report a file Tally wrote as one it could not fully read. The
-    format's tolerance is for other people's files, not something to spend on
-    decoration.
+    Nothing else is written: no blank lines and no comments. Both are legal and
+    a reader is required to skip them — `themelib.rs` opens its own files with
+    four comment lines explaining the format, and Umber does not count them
+    against an import, so a comment here would cost nothing either. Tally simply
+    has nothing to add that twenty-seven named keys do not already say, and a
+    header comment repeating the specification is a second place for it to go
+    stale. This is a preference, not a rule: if a line of prose would help
+    somebody opening the file in a text editor, write it.
     """
     colours = {**base_colours(theme.base), **theme.colours}
     lines = [HEADER, f"name = {bound_name(theme.name)}", f"base = {theme.base}"]
@@ -592,10 +741,20 @@ def resolve(theme: Theme) -> dict[str, str]:
 
     `--good` and `--critical` (and their `-bg`) are not themeable per §3.2, and
     `--area-alpha` is a constant, so they are not sent either.
+
+    **A built-in answers with its authored five, not its derived five.** §3.2
+    says a built-in that disagrees with a rule is right and stays as written,
+    and Graphite disagrees: derivation gives `--line-dashed` `#404246` where
+    `tokens.css` says `#3A3D42`. Nothing fetches this for a built-in today —
+    the client only resolves a custom theme — but the endpoint accepts the id,
+    and answering a question wrongly because nobody currently asks it is how a
+    trap is set. A theme somebody *copied* from Graphite is not a built-in and
+    is derived, which is exactly what §3.2 describes.
     """
     colours = {**base_colours(theme.base), **theme.colours}
     out = {CSS_NAMES[key]: colours[key] for key in KEYS}
-    out.update(derived(colours, dark=theme.dark))
+    preset = BUILTINS.get(theme.id) if theme.builtin else None
+    out.update(preset.authored if preset else derived(colours, dark=theme.dark))
     return out
 
 

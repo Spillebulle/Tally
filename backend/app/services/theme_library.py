@@ -46,11 +46,11 @@ from .themes import (
     Theme,
     ThemeFormatError,
     base_colours,
-    bound_name,
     builtin_theme,
     decode,
     encode,
     parse_colour,
+    unique_name,
     unique_slug,
 )
 
@@ -203,6 +203,29 @@ def write(user_id: int, theme: Theme) -> Theme:
     return theme
 
 
+def free_name(user_id: int, desired: str, *, excluding: str | None = None) -> str:
+    """A display name nothing else in this account's library is called.
+
+    §3.2: "A name already in the library **gets a number** rather than replacing
+    a theme somebody built." That is about the name a person reads — the id has
+    its own bullet immediately before it — and `themelib.rs::free_name` reads it
+    the same way, comparing against the built-in labels as well as the user's
+    own themes. Without it, `create` twice under one name gives two cards called
+    "Night Owl", and a copy named "Graphite" gives a library listing
+    `['Graphite', 'Paper', 'Graphite']` where one of the two is read-only and
+    the interface has no way to say which.
+
+    `excluding` is the id of the theme being renamed, so re-committing the name
+    a theme already has is not a rename to "Night Owl 2".
+    """
+    taken = [
+        theme.name
+        for theme in list_themes(user_id)
+        if excluding is None or theme.id != excluding
+    ]
+    return unique_name(desired, taken)
+
+
 def create(user_id: int, name: str, base: str, colours: dict[str, str]) -> Theme:
     """Add a theme to the library under a fresh id.
 
@@ -219,10 +242,14 @@ def create(user_id: int, name: str, base: str, colours: dict[str, str]) -> Theme
         raise ThemeLibraryError(
             f"You already have {MAX_THEMES} themes. Delete one before making another."
         )
-    bounded = bound_name(name)
+    # The name is freed as well as the id, and they are two different
+    # questions: the id keeps two *files* apart, the name keeps two *cards*
+    # apart. Numbering one and not the other is what left a library able to
+    # show the same name twice.
+    freed = free_name(user_id, name)
     theme = Theme(
-        id=unique_slug(bounded, taken),
-        name=bounded,
+        id=unique_slug(freed, taken),
+        name=freed,
         base=base,
         colours={**base_colours(base), **colours},
     )
@@ -261,7 +288,11 @@ def import_bytes(user_id: int, data: bytes, filename: str | None = None) -> tupl
 
 
 def apply_edits(
-    theme: Theme, *, name: str | None = None, colours: dict[str, str] | None = None
+    user_id: int,
+    theme: Theme,
+    *,
+    name: str | None = None,
+    colours: dict[str, str] | None = None,
 ) -> Theme:
     """A theme with a new name and/or some new colours, validated.
 
@@ -269,9 +300,15 @@ def apply_edits(
     an unparseable colour is refused here rather than skipped: this is somebody
     typing into the editor, not somebody else's file arriving from a newer
     build, and the tolerance §3.2 asks for is for the second case only.
+
+    A **rename** is numbered against every other theme, the same as a copy. A
+    colour edit is not: `free_name` is asked only when a name was actually sent,
+    or saving a swatch would number the theme every time one of its colours
+    changed — which is why `themelib.rs` keeps `rename` a separate method from
+    `save` rather than freeing the name on every write.
     """
     if name is not None:
-        theme.name = bound_name(name)
+        theme.name = free_name(user_id, name, excluding=theme.id)
     for key, value in (colours or {}).items():
         if key not in KEY_SET:
             raise ThemeLibraryError(f"“{key}” is not one of the theme's colours")

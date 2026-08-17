@@ -167,7 +167,9 @@ async def update_theme(
     """
     theme = _writable(user, theme_id)
     try:
-        edited = library.apply_edits(theme, name=payload.name, colours=payload.colours)
+        edited = library.apply_edits(
+            user.id, theme, name=payload.name, colours=payload.colours
+        )
         library.write(user.id, edited)
     except library.ThemeLibraryError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
