@@ -311,24 +311,6 @@ const TILE_GRID =
   'grid gap-3 grid-cols-[repeat(auto-fit,minmax(170px,1fr))] ' +
   'sm:grid-cols-[repeat(auto-fit,minmax(180px,1fr))]'
 
-/*
- * The track decides a tile's width; the tile must not argue with it.
- *
- * `Tile` carries its own `min-w-[180px]`, which on a 390px phone is 3px wider
- * than the 177px track the grid computes: each tile then refused to shrink, and
- * the row overflowed its column by exactly that much - the one row on the page
- * that did not end where the header and every panel below it end. The floor is
- * the grid's job in both directions (above `sm` the track minimum *is* 180, and
- * on a viewport narrower than 180 a tile that will not shrink can only
- * overflow), so it is cleared here.
- *
- * `!` because `cn` is a plain join, not tailwind-merge: both classes reach the
- * element and without the flag the winner is whichever Tailwind happened to
- * emit last. A one-line change in `components/ui.tsx` would be the tidier fix,
- * and that file is not this task's to edit.
- */
-const TILE_FLUID = '!min-w-0'
-
 /* ── Poster rails ────────────────────────────────────────────────────────── */
 
 /**
@@ -636,7 +618,6 @@ export function Dashboard() {
                   value={tile.value}
                   detail={tile.detail}
                   spark={tile.spark}
-                  className={TILE_FLUID}
                 />
               ))}
         </div>
