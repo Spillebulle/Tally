@@ -764,9 +764,42 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 
 ## Frontend conventions
 
-* **Never a raw hex in a component.** Colours are semantic Tailwind tokens
-  (`bg-surface`, `text-muted`, `border-line`) mapping to CSS variables in
-  `index.css`. Light is the base definition; `.dark` redefines only what changes.
+**The interface follows `../Design-Principles/STYLE-GUIDE.md` and uses
+`tokens.css`; the accent hue is 255. Never a raw hex in a component.** That one
+line is the whole rule, and `docs/interface.md` is where Tally's own part of it
+is settled: the Tailwind names, the painted controls that already exist, and the
+traps. Read that before touching a component.
+
+The shape of it, so the layout below is not a surprise:
+
+```
+src/tokens.css        the house ladder, a verbatim copy. Re-sync with cp; never edit here.
+src/theme-tally.css   what Tally decides: --accent-h, the pinned accent, Plex yellow, heat ramp, the font.
+tailwind.config.js    names for those tokens. No value of its own.
+src/index.css         the painted controls, as component classes.
+scripts/check-design.mjs   the rules tsc cannot see. `npm run check:design`.
+```
+
+Four things about it are worth knowing before they cost an hour:
+
+* **Tailwind fails silently.** `fontSize`, `borderRadius` and `boxShadow` are
+  *replaced* rather than extended, so `text-sm`, `rounded-2xl` and `shadow-card`
+  no longer exist — and an unknown utility generates **nothing** rather than an
+  error, so a stale class does not break the build, it just stops styling the
+  element. `check:design` greps for the retired names because nothing else can.
+* **An opacity modifier on a token colour emits no CSS at all.**
+  `bg-accent/25`, `border-critical/40`: the colour is a `var()` and Tailwind
+  cannot compose alpha into it. Use a token that carries the alpha
+  (`accent-tint`, `accent-ring`, `caution-bg`) or add one with `color-mix`.
+  A `color-mix` over other variables resolves where it is *used*, so it only
+  needs writing in the dark block and follows its inputs into the light theme.
+* **Selection is a neutral `control` fill plus `text-strong` plus a small accent
+  mark**, never an accent background. This is the rule the whole language rests
+  on, and the one the old interface broke most.
+* **There are three theme states, not two.** Dark is bare `:root`; forced light
+  is `.light`; following the system is nothing stamped at all. A token written
+  in only one of the two light blocks breaks the other state.
+
 * **Charts are hand-built SVG/CSS on purpose.** They hold fixed specs a charting
   library fights: ≤24px marks, 4px rounded data-ends square at the baseline, 2px
   surface gaps, hairline recessive gridlines, direct value labels, no legend for
@@ -793,8 +826,9 @@ User overrides (`PlexLibrary.anime_override`, tri-state) always win.
 * **Opacity is not a hit-test.** A control faded out with `opacity-0` is still
   tappable; pair it with `pointer-events-none`, and do not hide anything behind
   hover alone on touch.
-* Dark mode is applied pre-paint by an inline script in `index.html` to avoid a
-  light flash; `ThemeProvider` owns it afterwards.
+* The theme is applied pre-paint by an inline script in `index.html` to avoid a
+  light flash; `ThemeProvider` owns it afterwards and the two have to agree,
+  including that "system" stamps nothing.
 * Status is never colour-alone — a dot always sits beside a written label.
 * **Absolutely-positioned children need an explicit `left`/`right`.** The toggle
   knob rendered outside its track because `left` was `auto` and the static
@@ -834,6 +868,28 @@ none by tests:
 
 So: **screenshot the pages after UI changes, and run the container after
 Dockerfile changes.** Building is not running.
+
+`docs/shots/` is how you do the first one without a Plex server. It seeds a
+deterministic library through the app's own models — 157 films, 45 series,
+793 plays over eighteen months with weekday and evening weighting, a gap and
+two binge days — serves the real build, and screenshots every page in both
+themes with the console captured per page:
+
+```sh
+python docs/shots/shots.py --out <scratch>/shots
+```
+
+Posters render as the deterministic placeholder gradients, because there is no
+Plex server and no TMDB key: that is `posterFallbackGradient`, not a bug, and
+it is why these pictures are for **finding problems** and not for documentation.
+The seeded Plex server points at a port that refuses instantly, because the
+scheduler really does try to sync against whatever is seeded and a plausible
+LAN address sits in a timeout instead.
+
+It has already earned itself: the light theme's heatmap was drawing zero-play
+days as solid black, because the ramp was renamed `--heat-0..4` to `--heat-1..5`
+and a class naming a token that no longer exists generates nothing at all.
+Nobody would have seen that in dark, which is where everybody looks first.
 
 ---
 
