@@ -944,10 +944,10 @@ export function filterTable(page: FilterPage): FilterTable {
      * The one facet where "all of these" is a real question — a title carries
      * several genres, so Crime *and* Drama names a smaller set than either.
      *
-     * It stays on the bar rather than behind the disclosure, in its own
-     * horizontally-scrolling row like the status chips: it is the filter people
-     * reach for constantly, and the chips put the selected ones first so the
-     * active state is visible without scrolling.
+     * It stays on the bar rather than behind the disclosure, because it is the
+     * filter people reach for constantly. The values in force are readable
+     * without opening it: the trigger summarises them, and each one has its own
+     * chip in the row under the strip.
      */
     genre: multiFilter('genre', 'genre', 'Genre', {
       control: { kind: 'multi' },
