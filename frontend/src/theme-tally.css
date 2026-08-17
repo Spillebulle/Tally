@@ -51,6 +51,34 @@
    * `--chrome` rather than left translucent, because the cells sit on a card
    * and a translucent fill would pick up whatever is behind it.
    */
+  /*
+   * Two tokens the house file does not carry, defined once rather than per
+   * theme. A `color-mix` over other variables resolves lazily, at the point it
+   * is used, so these follow `--critical` and `--chrome` into the light theme
+   * without being restated there. Restating them would be the more obvious
+   * thing to do and would be a second copy to keep in step.
+   *
+   * `--critical-line` is the danger button's border: STYLE-GUIDE §7.6 asks for
+   * the critical hue at 40 %, and `--caution` has such a token while
+   * `--critical` does not. It is mixed against `--critical-bg`, the fill it is
+   * drawn on, rather than left translucent, because a 1 px translucent border
+   * on a rounded element is composited as two separately antialiased paths and
+   * renders visibly jagged along the caps.
+   */
+  --critical-line: color-mix(in oklab, var(--critical) 40%, var(--critical-bg));
+
+  /*
+   * The ink inside the logo mark. Deliberately *not* `--accent-ink`, which is
+   * near-black in the dark theme and white in the light one: the mark is one
+   * piece of artwork and has to be the same shape and the same colour
+   * everywhere it appears, or the favicon and the top bar show two different
+   * logos in the same window. It is a mark, not text, so the contrast floor
+   * for body copy does not apply; white measures 3.6:1 on the dark accent and
+   * 5.5:1 on the light one, and reads more clearly at 15 px than near-black,
+   * which turns the strokes into holes punched in the square.
+   */
+  --brand-ink: #ffffff;
+
   --heat-1: color-mix(in oklab, var(--accent) 22%, var(--chrome));
   --heat-2: color-mix(in oklab, var(--accent) 42%, var(--chrome));
   --heat-3: color-mix(in oklab, var(--accent) 62%, var(--chrome));

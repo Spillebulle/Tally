@@ -95,7 +95,15 @@ export default {
           line: 'var(--caution-line)',
         },
         good: { DEFAULT: 'var(--good)', bg: 'var(--good-bg)' },
-        critical: { DEFAULT: 'var(--critical)', bg: 'var(--critical-bg)' },
+        critical: {
+          DEFAULT: 'var(--critical)',
+          bg: 'var(--critical-bg)',
+          line: 'var(--critical-line)',
+        },
+
+        // The logo mark's ink. One colour in every theme, because the mark is
+        // artwork rather than text. See theme-tally.css.
+        'brand-ink': 'var(--brand-ink)',
 
         // Plex's own yellow. The one brand colour Tally does not restyle, and
         // it goes on the Plex badge and nowhere else.
