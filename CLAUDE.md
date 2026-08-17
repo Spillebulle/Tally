@@ -801,13 +801,25 @@ Four things about it are worth knowing before they cost an hour:
   in only one of the two light blocks breaks the other state.
 
 * **Charts are hand-built SVG/CSS on purpose.** They hold fixed specs a charting
-  library fights: ≤24px marks, 4px rounded data-ends square at the baseline, 2px
-  surface gaps, hairline recessive gridlines, direct value labels, no legend for
-  a single series.
+  library fights: ≤24px marks, 2px rounded data-ends square at the baseline, 2px
+  surface gaps, hairline gridlines and no vertical grid, no ticks, and no legend
+  for a single series. The full statement is §8 of the guide.
+* **A bar's frame is scaled to the data, not to a round number above it.**
+  Rounding the ceiling up left a weekday peak of 104 in a frame scaled to 150,
+  so a third of every chart was permanently empty. The maximum is the data's;
+  the *gridlines* are the round numbers under it, chosen by scoring the
+  candidate steps rather than taking the first that fits, because the obvious
+  step family leaves two gridlines where five would fit.
+* **Axis figures replace labels on the bars.** Both is two sets of the same
+  numbers on one chart. The value stays in the tooltip, in the accessible name
+  and in the `DataTable`, so nothing is lost by dropping the caps.
 * **The chart palette was validated, not chosen by eye** — colour-vision
   separation and contrast against both surfaces. If you change series colours,
   re-run the validator in the `dataviz` skill rather than eyeballing. Every chart
   also ships a `DataTable` fallback so nothing is gated behind colour or hover.
+* **Zero is not the bottom of a ramp.** The heatmap's five steps are `heat-1..5`
+  and a day with no plays is `control`, so "nothing happened" and "a little
+  happened" cannot be read as the same thing.
 * **Never key or parse a local date through `toISOString()` / `new Date('YYYY-MM-DD')`.**
   Both convert via UTC, so they are off by one day (east of Greenwich) or one
   month (west) — which is exactly how the heatmap and the monthly axis were
