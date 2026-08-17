@@ -17,28 +17,42 @@ Drawn on a 32-unit grid.
 | | |
 |---|---|
 | Square | 0,0 to 32,32, corner radius 9.6 |
-| Uprights | x = 7.75, 13.25, 18.75, 24.25 (pitch 5.5), y = 8.5 to 23.5 |
-| Fifth mark | (7.75, 21) to (24.25, 11), rising, 31.2° |
+| Uprights | x = 8.5, 13.5, 18.5, 23.5 (pitch 5), y = 8 to 24 |
+| Fifth mark | (8.5, 22.75) to (23.5, 9.25), rising, 42° |
 | Stroke | 2.4 units, round caps |
-| Ink bounds incl. caps | 6.55 to 25.45 across, 7.3 to 24.7 down |
+| Ink bounds incl. caps | 7.3 to 24.7 across, 6.8 to 25.2 down |
 
-Three things about it are load-bearing. The fifth mark ends **on the outer
-uprights' centre lines**, so its round caps are buried inside those strokes
-rather than poking into open field as blobs. Its angle was picked by rendering
-the alternatives: much shallower and each segment between two uprights reads
-as a rung, turning the mark into a fence of H shapes. And the figure has
-180° rotational symmetry about (16, 16), so its centroid is exactly the
-square's centre; a rendered 256 px frame measures 53 px of margin at both
-sides and 59 px top and bottom.
+Three things about it are load-bearing.
 
-Negative space is wider than the ink: strokes are 2.4 units and the gaps
-between uprights are 3.1.
+**The fifth mark ends on the outer uprights' centre lines**, so its round caps
+are buried inside those strokes rather than poking into open field as blobs.
+
+**The 42° rise is a correction for how the mark is actually read.** A stroke
+that merges with what it crosses is not read as one stroke: only the segments
+*between* the uprights survive. If those segments sit near level they read as
+rungs, and four uprights joined by rungs read as two letter H's. At 31° that
+is what the mark said. The fault is invisible at 256 px, where the eye still
+integrates the whole stroke, and plain at 32 px, which is a size people see
+constantly: the browser tab, the task bar, the bookmark bar. The angle was
+settled by rendering two dozen candidates **rasterised at 32 px** and picking
+the one with no letters in it. A slight overhang past the outer uprights was
+tried too, and dropped: on its own it does not break the rung reading, and it
+puts a nib back on each end.
+
+**The figure has 180° rotational symmetry about (16, 16)**, so its centroid is
+exactly the square's centre. A rendered 256 px frame measures 59 px of margin
+at both sides and 55 px top and bottom.
+
+Negative space stays wider than the ink: strokes are 2.4 units and the gaps
+between uprights are 2.6. The uprights stand 1.25 units proud of the fifth
+mark's ink at either end.
 
 **At and below 20 px a second drawing takes over.** The master fuses at that
 size, so the small frame is redrawn on the pixel grid: 1 px uprights on whole
-pixel columns x = 3.5, 6.5, 9.5, 12.5 with 2 px gaps, butt caps, y = 4 to 12,
-and a thin rising fifth mark from (3.5, 10.5) to (12.5, 5.5). This is the
-frame the browser tab and the top bar show.
+pixel columns x = 3.5, 6.5, 9.5, 12.5 with 2 px gaps, butt caps, y = 3 to 13,
+and a rising fifth mark from (3.5, 11.5) to (12.5, 4.5). That is 37.9°, as
+near the master's 42° as a 9-pixel run allows, and steep for the same reason.
+This is the frame the browser tab and the top bar show.
 
 ## Colours
 
@@ -94,11 +108,12 @@ together.
   the owner, against the house rule, and the rest of the family does not do
   it. If the family ever gains a second glyphed mark, revisit section 17.4
   rather than this page.
-- **Whether 32 px wants its own frame.** 16 has one and 256 needs none; at
-  32 the master renders slightly soft because the strokes fall on fractional
-  pixels. It is legible and no third drawing has been cut, but a third drawing
-  is the obvious next move if the desktop `.ico` ever looks wrong in a file
-  list.
+- **Whether 32 px wants its own frame.** 16 has one and 256 needs none. The
+  master's geometry is now chosen at 32 rather than checked there, so a third
+  drawing was not needed; what remains at that size is only softness, because
+  a 2.4-unit stroke falls on fractional pixels. If the desktop `.ico` ever
+  looks wrong in a file list, a hand-tuned 32 px frame is the next move, and
+  it is sanctioned.
 - **Whether the app offers the mark in a neutral.** Section 17.4 wants the
   GitHub profile avatar in a neutral so it favours no one app. Tally does not
   ship one; that belongs to the profile, not to this repository.

@@ -10,6 +10,6 @@
     }
   </style>
   <rect class="square" width="32" height="32" rx="9.6"/>
-  <g class="large"><g stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" fill="none"><path d="M7.75 8.5v15M13.25 8.5v15M18.75 8.5v15M24.25 8.5v15M7.75 21 24.25 11"/></g></g>
-  <g class="small" transform="scale(2)"><g stroke="#FFFFFF" fill="none"><path d="M3.5 4v8M6.5 4v8M9.5 4v8M12.5 4v8" stroke-width="1" shape-rendering="crispEdges"/><path d="M3.5 10.5 12.5 5.5" stroke-width="1" stroke-linecap="round"/></g></g>
+  <g class="large"><g stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" fill="none"><path d="M8.5 8v16M13.5 8v16M18.5 8v16M23.5 8v16M8.5 22.75 23.5 9.25"/></g></g>
+  <g class="small" transform="scale(2)"><g stroke="#FFFFFF" fill="none"><path d="M3.5 3v10M6.5 3v10M9.5 3v10M12.5 3v10" stroke-width="1" shape-rendering="crispEdges"/><path d="M3.5 11.5 12.5 4.5" stroke-width="1" stroke-linecap="round"/></g></g>
 </svg>

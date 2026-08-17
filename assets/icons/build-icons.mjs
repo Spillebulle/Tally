@@ -69,22 +69,31 @@ const TEXT_PAPER = '#3A3836' // --text-strong, light
  * The master drawing, on a 32-unit grid.
  *
  *   square      0,0 to 32,32, corner radius 9.6 (30 % of the side)
- *   uprights    x = 7.75, 13.25, 18.75, 24.25 (pitch 5.5), y = 8.5 to 23.5
- *   fifth mark  (7.75, 21) to (24.25, 11), rising, as a tally's fifth does
+ *   uprights    x = 8.5, 13.5, 18.5, 23.5 (pitch 5), y = 8 to 24
+ *   fifth mark  (8.5, 22.75) to (23.5, 9.25), rising, as a tally's fifth does
  *   stroke      2.4 units, round caps
  *
  * The fifth mark starts and ends exactly on the outer uprights' centre lines,
  * so its round caps sit inside those strokes' own width instead of poking out
- * into open field as blobs. It rises at 31.2 degrees, which was picked by
- * rendering the alternatives: much shallower and each segment between two
- * uprights reads as a rung, so the mark becomes a fence of H shapes rather
- * than four marks with a fifth struck through them.
+ * into open field as blobs.
  *
- * Ink is 2.4 wide and the gaps between uprights are 3.1, so the negative
- * space is wider than the ink. Including the caps the ink spans 6.55 to 25.45
- * across and 7.3 to 24.7 down: 6.55 units of margin at the sides, 7.3 top and
- * bottom, and 2.5 units of upright left proud above and below the fifth mark
- * at either end.
+ * It rises at 42 degrees, and the angle is the load-bearing number. A stroke
+ * that merges with what it crosses is not read as one stroke: only the
+ * segments *between* the uprights survive, and if those segments are close to
+ * horizontal they read as rungs, so four uprights joined by rungs read as two
+ * letter H's. That is what happened at 31 degrees. It is invisible at 256 px,
+ * where the eye still integrates the whole stroke, and plain at 32, which is
+ * a size people actually see: the tab, the task bar, the bookmark bar. The
+ * angle was chosen by rendering two dozen candidates *rasterised at 32 px*
+ * and picking the one with no letters in it. A slight overhang past the outer
+ * uprights was tried as well, and dropped: it does not fix the rung reading
+ * on its own, and it brings back a nib on each end.
+ *
+ * Ink is 2.4 wide and the gaps between uprights are 2.6, so the negative
+ * space stays wider than the ink. Including the caps the ink spans 7.3 to
+ * 24.7 across and 6.8 to 25.2 down: 7.3 units of margin at the sides, 6.8 top
+ * and bottom, and 1.25 units of upright left proud beyond the fifth mark's
+ * ink at either end.
  *
  * The artwork has 180-degree rotational symmetry about (16, 16): the uprights
  * swap in pairs and the fifth mark maps onto itself. Its centroid is
@@ -93,7 +102,7 @@ const TEXT_PAPER = '#3A3836' // --text-strong, light
  */
 const STROKES =
   `<g stroke="${INK}" stroke-width="2.4" stroke-linecap="round" fill="none">` +
-  '<path d="M7.75 8.5v15M13.25 8.5v15M18.75 8.5v15M24.25 8.5v15M7.75 21 24.25 11"/></g>'
+  '<path d="M8.5 8v16M13.5 8v16M18.5 8v16M23.5 8v16M8.5 22.75 23.5 9.25"/></g>'
 
 function markSvg(accent, { size, fullBleed = false } = {}) {
   const dim = size ? ` width="${size}" height="${size}"` : ''
@@ -107,8 +116,10 @@ function markSvg(accent, { size, fullBleed = false } = {}) {
  * The 16 px frame, redrawn on the pixel grid rather than scaled: 1 px
  * uprights centred on x = 3.5/6.5/9.5/12.5 so each lands on one whole pixel
  * column with a 2 px gap either side, butt caps (a round cap is a smear at
- * this size), y = 4 to 12, and a rising fifth mark from (3.5, 10.5) to
- * (12.5, 5.5), the same 29-degree-ish rise as the master. Same mark, tuned
+ * this size), y = 3 to 13, and a rising fifth mark from (3.5, 11.5) to
+ * (12.5, 4.5). That is 37.9 degrees, as near the master's 42 as a 9-pixel
+ * run allows, and steep for the same reason: at 29 degrees the three visible
+ * segments sit almost level and read as rungs here too. Same mark, tuned
  * for the sizes where antialiasing would otherwise fuse it into a blob.
  *
  * The uprights carry `shape-rendering="crispEdges"`. The frame is pixel-exact
@@ -120,8 +131,8 @@ function markSvg(accent, { size, fullBleed = false } = {}) {
  */
 const STROKES_16 =
   `<g stroke="${INK}" fill="none">` +
-  '<path d="M3.5 4v8M6.5 4v8M9.5 4v8M12.5 4v8" stroke-width="1" shape-rendering="crispEdges"/>' +
-  '<path d="M3.5 10.5 12.5 5.5" stroke-width="1" stroke-linecap="round"/>' +
+  '<path d="M3.5 3v10M6.5 3v10M9.5 3v10M12.5 3v10" stroke-width="1" shape-rendering="crispEdges"/>' +
+  '<path d="M3.5 11.5 12.5 4.5" stroke-width="1" stroke-linecap="round"/>' +
   '</g>'
 
 function mark16Svg(accent) {
@@ -257,7 +268,7 @@ writeFileSync(join(outPublic, 'icon-512.png'), pngs.get(512))
 
 /* Maskable icons are full-bleed: Android applies its own mask, so a rounded
    square handed in whole ends up inside a second rounded square. The glyph is
-   unchanged and its corner-to-corner span is 25.4 of 32 units, inside the
+   unchanged and its corner-to-corner span is 25.3 of 32 units, inside the
    25.6-unit safe circle the maskable spec guarantees. */
 for (const size of [192, 512]) {
   writeFileSync(

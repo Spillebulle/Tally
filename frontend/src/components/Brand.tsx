@@ -25,12 +25,18 @@ interface MarkProps {
 }
 
 /*
- * The master drawing, on a 32-unit grid: uprights at x = 7.75/13.25/18.75/
- * 24.25 (pitch 5.5) from y 8.5 to 23.5, the fifth mark rising from (7.75, 21)
- * to (24.25, 11), stroke 2.4, round caps. The fifth mark ends on the outer
+ * The master drawing, on a 32-unit grid: uprights at x = 8.5/13.5/18.5/23.5
+ * (pitch 5) from y 8 to 24, the fifth mark rising from (8.5, 22.75) to
+ * (23.5, 9.25), stroke 2.4, round caps. The fifth mark ends on the outer
  * uprights' centre lines, so its caps are buried in those strokes rather than
  * poking into open field. The figure has 180-degree rotational symmetry about
  * (16, 16), so its centroid is the square's centre.
+ *
+ * The 42-degree rise is the load-bearing number. Where the fifth mark crosses
+ * an upright it merges with it, so only the segments between the uprights are
+ * read; shallower than about 38 degrees those segments sit near level, read
+ * as rungs, and the mark becomes two letter H's. It is invisible at 256 px
+ * and plain at 32. See assets/icons/build-icons.mjs and docs/brand.md.
  */
 const MASTER = (
   <g
@@ -39,7 +45,7 @@ const MASTER = (
     strokeLinecap="round"
     fill="none"
   >
-    <path d="M7.75 8.5v15M13.25 8.5v15M18.75 8.5v15M24.25 8.5v15M7.75 21 24.25 11" />
+    <path d="M8.5 8v16M13.5 8v16M18.5 8v16M23.5 8v16M8.5 22.75 23.5 9.25" />
   </g>
 )
 
@@ -59,11 +65,11 @@ const MASTER = (
 const SMALL = (
   <g stroke="var(--brand-ink)" fill="none">
     <path
-      d="M3.5 4v8M6.5 4v8M9.5 4v8M12.5 4v8"
+      d="M3.5 3v10M6.5 3v10M9.5 3v10M12.5 3v10"
       strokeWidth="1"
       shapeRendering="crispEdges"
     />
-    <path d="M3.5 10.5 12.5 5.5" strokeWidth="1" strokeLinecap="round" />
+    <path d="M3.5 11.5 12.5 4.5" strokeWidth="1" strokeLinecap="round" />
   </g>
 )
 
