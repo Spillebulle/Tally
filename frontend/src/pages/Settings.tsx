@@ -249,14 +249,22 @@ function QueryError({
   error,
   title,
   onRetry,
+  compact,
 }: {
   error: unknown
   title: string
   onRetry: () => void
+  /**
+   * True where the failure stands in for a single row's value rather than for a
+   * whole region. `ErrorState`'s full form is a centred block sized for an empty
+   * page, which turned a one-line fact like the public address into a box taller
+   * than the pane it sat in.
+   */
+  compact?: boolean
 }) {
   return (
     <div className="well">
-      <ErrorState error={error} title={title} onRetry={onRetry} />
+      <ErrorState error={error} title={title} onRetry={onRetry} compact={compact} />
     </div>
   )
 }
@@ -486,6 +494,7 @@ function PlexPane() {
             error={settings.error}
             title="Could not load the webhook address"
             onRetry={() => void settings.refetch()}
+            compact
           />
         ) : (
           <StackedRow
@@ -818,13 +827,16 @@ function LibraryRow({
         </button>
 
         {/* The visible label is short because the row already names the library
-            immediately to its left. The *accessible* name should still carry it,
-            the way the `Select` beside it does with "Anime in {title}": read
-            aloud, four rows currently offer four switches called "Include" and
-            only their order tells them apart. `Toggle` takes its `aria-label`
-            from `label` and has no override, so this waits on a prop there
-            rather than on a second label here. */}
-        <Toggle label="Include" checked={library.enabled} onChange={onToggleEnabled} />
+            immediately to its left. The accessible name carries the library
+            anyway, the way the `Select` beside it does with "Anime in {title}":
+            read aloud, four switches all called "Include" are told apart only
+            by their order. */}
+        <Toggle
+          label="Include"
+          srLabel={`Include ${library.title}`}
+          checked={library.enabled}
+          onChange={onToggleEnabled}
+        />
       </span>
     </li>
   )
@@ -932,6 +944,7 @@ function SyncingPane() {
             error={settings.error}
             title="Could not load the sync schedule"
             onRetry={() => void settings.refetch()}
+            compact
           />
         ) : (
           <Row
@@ -958,6 +971,7 @@ function SyncingPane() {
             error={syncStatus.error}
             title="Could not load the sync status"
             onRetry={() => void syncStatus.refetch()}
+            compact
           />
         ) : (
           <Row
@@ -1150,6 +1164,7 @@ function LibraryPane() {
             error={settings.error}
             title="Could not load Tally's own settings"
             onRetry={() => void settings.refetch()}
+            compact
           />
         ) : settings.isLoading ? (
           <Skeleton className="h-8 w-full max-w-[65ch]" />
@@ -1652,6 +1667,7 @@ function AboutPane() {
             error={settings.error}
             title="Could not load this instance's settings"
             onRetry={() => void settings.refetch()}
+            compact
           />
         ) : (
           <Row
