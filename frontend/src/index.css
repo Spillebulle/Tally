@@ -1,272 +1,363 @@
+/*
+ * Tally's stylesheet.
+ *
+ *   tokens.css        the house ladder, verbatim. Never edited here.
+ *   theme-tally.css   Tally's accent, the Plex yellow, the heat ramp, the font.
+ *   this file         the painted controls, as component classes.
+ *
+ * The rule the whole file exists to keep: a component names a *role*, never a
+ * colour, a size or a shadow. If a class below is missing something, add the
+ * class here rather than reaching for an arbitrary value at the call site.
+ * See ../docs/interface.md.
+ */
+@import './tokens.css';
+@import './theme-tally.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/*
- * Design tokens.
- *
- * Light is the base definition; dark redefines only what changes. The dark
- * chart series are the same hues re-stepped for a dark surface (not an
- * automatic flip) and the full set was validated for colour-vision
- * separation against these exact surfaces.
- */
 @layer base {
-  :root {
-    color-scheme: light;
-
-    --canvas: 246 246 244;
-    --surface: 255 255 255;
-    --raised: 249 249 247;
-    --line: 226 226 222;
-
-    --ink: 17 18 20;
-    --subtle: 82 81 78;
-    --muted: 130 129 124;
-
-    --accent: 42 120 214;
-    --accent-soft: 232 240 252;
-    --accent-ink: 255 255 255;
-
-    /* The accent edge of a selected or hovered control, pre-composited.
-       These are exactly `--accent` at 50% / 40% over the surface each control
-       actually sits on — `--accent-soft` for the selected chip, `--surface`
-       for the hovered one — so they *look* identical to the alpha borders they
-       replace, and only the compositing changes. See `.chip` for why that
-       matters. Recompute both if `--accent`, `--accent-soft` or `--surface`
-       moves. */
-    --line-accent: 137 180 233;
-    --line-accent-soft: 170 201 239;
-
-    --series-1: 42 120 214;
-    --series-2: 235 104 52;
-    --series-3: 27 175 122;
-
-    /* Heatmap ramp: light (near zero) to dark (busiest). Sequential single
-       hue, matching the chart palette. Lived as raw hex in Charts.tsx and was
-       injected as a runtime <style> block, which is exactly what "never a raw
-       hex in a component" exists to prevent. */
-    --heat-0: #cde2fb;
-    --heat-1: #9ec5f4;
-    --heat-2: #5598e7;
-    --heat-3: #2a78d6;
-    --heat-4: #184f95;
-
-    --good: 0 131 0;
-    --warn: 237 161 0;
-    --danger: 227 73 72;
-  }
-
-  .dark {
-    color-scheme: dark;
-
-    --canvas: 15 16 19;
-    --surface: 23 24 28;
-    --raised: 31 33 38;
-    --line: 46 48 55;
-
-    --ink: 245 246 247;
-    --subtle: 176 178 186;
-    --muted: 132 135 145;
-
-    --accent: 57 135 229;
-    --accent-soft: 27 44 70;
-    --accent-ink: 255 255 255;
-
-    /* Same two blends against the dark surfaces. */
-    --line-accent: 42 90 150;
-    --line-accent-soft: 37 68 108;
-
-    --series-1: 57 135 229;
-    --series-2: 217 89 38;
-    --series-3: 25 158 112;
-
-    /* A deliberate re-step for dark, not an inversion of the light ramp. */
-    --heat-0: #1c5cab;
-    --heat-1: #256abf;
-    --heat-2: #3987e5;
-    --heat-3: #6da7ec;
-    --heat-4: #9ec5f4;
-
-    --good: 0 131 0;
-    --warn: 201 133 0;
-    --danger: 230 103 103;
-  }
-
   * {
     @apply border-line;
   }
 
   html {
     -webkit-text-size-adjust: 100%;
+    background: var(--backdrop);
   }
 
   body {
-    @apply bg-canvas text-ink antialiased;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+    @apply bg-backdrop font-sans text-body text-fg antialiased;
   }
 
   /* Keyboard focus is visible everywhere; pointer focus stays quiet. */
   :focus-visible {
-    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-canvas;
+    outline: none;
+    box-shadow: 0 0 0 2px var(--accent-ring);
+    border-radius: var(--r-ctl);
   }
 
   ::selection {
-    @apply bg-accent/25;
+    background: var(--accent-tint);
+  }
+
+  ::placeholder {
+    color: var(--placeholder);
+  }
+
+  /* 6px, quiet, and the same in every scroll area. */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-popover);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
 @layer components {
-  /* Elevation carries the card, not a hairline.
-     The border used to be `border-line`, which drew a grey outline around
-     every card on the dashboard — two strategies for the same job, and on
-     light the outline read as a stray box around content the shadow had
-     already separated. On dark it was very nearly invisible anyway: `--surface`
-     against `--canvas` plus the shadow is what actually reads there, which is
-     why this needs no `.dark` override.
+  /* ── Type roles ──────────────────────────────────────────────────────── */
 
-     The 1px stays, transparent. Removing the width would move every card's
-     content by a pixel and reflow the ones that opt into a coloured edge —
-     `StatTile` sets `hover:border-accent/40` over this rule, and a link that
-     grows a border on hover would nudge its own text. */
-  .card {
-    @apply rounded-2xl border border-transparent bg-surface shadow-card;
+  /*
+   * Every number that is read as a value: a count, a size, a percentage, a
+   * time, a rating. Monospaced and tabular so a column lines up and a figure
+   * does not jitter as it changes.
+   */
+  .figure {
+    @apply font-mono tabular-nums;
   }
+
+  /* A section label inside a list or a sidebar. The one place we shout. */
+  .eyebrow {
+    @apply text-eyebrow font-normal uppercase text-placeholder;
+  }
+
+  /* ── Surfaces ────────────────────────────────────────────────────────── */
+
+  /*
+   * A card is a thing you can pick; a panel is a region of a page. Both are
+   * `chrome` with a hairline and an 8px radius, and neither casts a shadow:
+   * only things that float do. The old interface used elevation to separate
+   * cards from the page, which is why they read as floating tiles rather than
+   * as the page's own structure.
+   */
+  .card {
+    @apply rounded-card border border-line bg-chrome;
+  }
+
+  .panel {
+    @apply overflow-hidden rounded-card border border-line bg-chrome;
+  }
+
+  /* A panel's header: 32px, title at 13px/600, commands right-aligned. */
+  .panel-head {
+    @apply flex h-panelhead items-center gap-2 border-b border-line px-strip;
+  }
+
+  .panel-title {
+    @apply text-heading font-semibold text-strong;
+  }
+
+  .panel-body {
+    @apply p-strip;
+  }
+
+  /* A well: an inset region inside a panel (a list, a preview). */
+  .well {
+    @apply rounded-tool border border-line bg-window;
+  }
+
+  /* ── Buttons ─────────────────────────────────────────────────────────── */
 
   .btn {
-    @apply inline-flex select-none items-center justify-center gap-2 rounded-xl px-4 py-2
-           text-sm font-medium transition-all duration-200 ease-spring
-           disabled:pointer-events-none disabled:opacity-50;
+    @apply inline-flex h-button select-none items-center justify-center gap-2 rounded-ctl
+           px-3 text-control transition-colors duration-hover ease-ease
+           disabled:pointer-events-none disabled:opacity-45;
   }
 
+  /* At most one visible per view. It is the one thing to do here. */
   .btn-primary {
-    @apply btn bg-accent text-accent-ink hover:brightness-110 active:scale-[0.98];
+    @apply btn bg-accent font-semibold text-accent-ink hover:brightness-110;
+  }
+
+  .btn-secondary {
+    @apply btn bg-control text-fg hover:bg-control-hover;
+  }
+
+  /* For use inside a well or on `dock`, where a filled button would vanish. */
+  .btn-outline {
+    @apply btn border border-line bg-transparent text-fg hover:border-line-dashed;
   }
 
   .btn-ghost {
-    @apply btn text-subtle hover:bg-raised hover:text-ink active:scale-[0.98];
+    @apply btn bg-transparent text-muted hover:text-strong;
   }
 
-  .btn-outline {
-    @apply btn border border-line bg-surface text-ink hover:bg-raised active:scale-[0.98];
+  /* Destructive. Always paired with a sentence saying what is lost. */
+  .btn-danger {
+    @apply btn border border-critical-line bg-critical-bg text-critical hover:brightness-110;
   }
 
-  /* The accent edges are opaque tokens, never `border-accent/50`.
-     A 1px *translucent* border on a rounded element is composited as two
-     separately antialiased rounded-rect paths — `background-clip` is
-     `border-box`, so the opaque fill is painted under the border and the ring
-     is blended on top. Where the two coverages disagree along the caps you get
-     a doubled, stair-stepped stroke, and halving the alpha halves the edge
-     contrast that would otherwise hide it. On a pill sitting at a fractional x
-     (flex items are as wide as their text) the result is visibly jagged, which
-     is what the selected filter chip looked like. `--line-accent` is the same
-     colour, already blended, so the stroke is one uniform edge.
+  /* Icon-only, 26px square. Always tooltipped: an icon without a label is a
+     guess until it has one. */
+  .btn-icon {
+    @apply inline-grid h-button w-button place-items-center rounded-ctl text-muted
+           transition-colors duration-hover ease-ease hover:bg-control-hover
+           hover:text-strong disabled:pointer-events-none disabled:opacity-45;
+  }
 
-     Anything else that marks a control as selected wants these too, rather
-     than an alpha border of its own. */
+  /* ── Fields ──────────────────────────────────────────────────────────── */
+
+  .field {
+    @apply h-button w-full rounded-tool border border-line bg-field px-3 text-control
+           text-fg placeholder:text-placeholder focus:border-accent focus:outline-none;
+  }
+
+  /* ── Chips, badges, keycaps ──────────────────────────────────────────── */
+
+  /*
+   * A chip is a read-only figure, not a control: a `dock` pill with a label in
+   * `text-dim` and a value in `text`. It never opens anything. The family's
+   * filled pill means "not a control", which is why the dropdown has no
+   * filled variant.
+   */
   .chip {
-    @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-surface
-           px-3 py-1 text-xs font-medium text-subtle transition-colors
-           hover:border-line-accent-soft hover:text-ink;
+    @apply inline-flex items-center gap-1.5 rounded-ctl border border-line bg-dock
+           px-2 py-1 text-tiny text-fg;
   }
 
-  .chip-active {
-    @apply border-line-accent bg-accent-soft text-accent;
+  /* A removable filter chip: the one chip that is a control, so it carries a
+     dismiss mark rather than reading as a figure. */
+  .chip-removable {
+    @apply chip gap-1 pr-1 transition-colors duration-hover hover:border-line-dashed;
   }
 
-  .input {
-    @apply w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink
-           placeholder:text-muted focus:border-accent focus:outline-none
-           focus:ring-2 focus:ring-accent/25;
+  .badge {
+    @apply inline-flex items-center rounded-tight bg-control px-1.5 py-px text-tiny text-muted;
   }
 
-  .label {
-    @apply text-xs font-medium uppercase tracking-wider text-muted;
+  .badge-good {
+    @apply badge bg-good-bg text-good;
   }
 
-  /* Long horizontal content (tables, chart rows) scrolls inside its own box
-     so the page body never scrolls sideways.
+  .badge-caution {
+    @apply badge bg-caution-bg text-caution;
+  }
 
-     It clips *vertically* as well, and nothing here can stop it: CSS resolves
-     `overflow-y` to `auto` as soon as `overflow-x` is not `visible`, so this is
-     a scroll container on both axes whatever it is asked for. Anything inside
-     that leaves its own box — a card lifting on hover, a shadow, a ring — is
-     cut off at the padding edge unless the container reserves the room. Give
-     it padding and take the same amount back as a negative margin, the way
-     `PosterRail` does, rather than reaching for z-index: this is a clip, not a
-     stacking order, and no z-index escapes it. */
+  .badge-critical {
+    @apply badge bg-critical-bg text-critical;
+  }
+
+  .keycap {
+    @apply inline-flex items-center rounded-tight border border-line bg-control px-1.5
+           py-px font-mono text-tiny text-fg;
+  }
+
+  /* ── Rows ────────────────────────────────────────────────────────────── */
+
+  /*
+   * The selected state of the whole family: a raised *neutral* fill and strong
+   * text, plus a small accent mark where one is needed. Never an accent
+   * background - that is what keeps the accent scarce enough to still mean
+   * something.
+   */
+  .row {
+    @apply flex h-row items-center gap-2 rounded-ctl px-strip text-control text-muted
+           transition-colors duration-hover ease-ease hover:bg-control-hover;
+  }
+
+  .row-selected {
+    @apply bg-control text-strong;
+  }
+
+  /* Sidebar and settings navigation: the row plus a 3px accent bar at the
+     left edge when selected. */
+  .nav-row {
+    @apply relative flex h-[30px] items-center gap-2.5 rounded-ctl px-strip text-control
+           text-muted transition-colors duration-hover ease-ease
+           hover:bg-control-hover hover:text-fg;
+  }
+
+  .nav-row-selected {
+    @apply bg-control text-strong before:absolute before:left-0 before:top-1/2
+           before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-full
+           before:bg-accent before:content-[''];
+  }
+
+  /* ── Popovers ────────────────────────────────────────────────────────── */
+
+  /*
+   * One geometry for every menu, dropdown list and popover: `popover` fill, a
+   * `line-popover` edge, radius 8, 5px of padding and the menu shadow. It
+   * opens 4px from its trigger.
+   */
+  .menu {
+    @apply rounded-card border border-line-popover bg-popover p-[5px] shadow-menu;
+  }
+
+  .menu-item {
+    @apply flex w-full items-center gap-2 rounded-[4px] px-2.5 py-1.5 text-small text-fg
+           transition-colors duration-hover hover:bg-control-hover;
+  }
+
+  .menu-item-selected {
+    @apply bg-control text-strong;
+  }
+
+  .menu-separator {
+    @apply my-1 h-px bg-line;
+  }
+
+  .tooltip {
+    @apply pointer-events-none rounded-tool border border-line bg-popover px-2 py-1
+           text-tiny text-fg shadow-menu;
+  }
+
+  .dialog {
+    @apply rounded-modal border border-line-popover bg-chrome shadow-modal;
+  }
+
+  /* A floating panel: the drawer on a narrow screen, an undocked module. */
+  .floating {
+    @apply rounded-modal border border-line-popover shadow-float;
+    background: color-mix(in oklab, var(--chrome) 96%, transparent);
+    backdrop-filter: blur(6px);
+  }
+
+  /* ── Notices ─────────────────────────────────────────────────────────── */
+
+  .notice {
+    @apply rounded-tool border border-caution-line bg-caution-bg px-3 py-2 text-body text-fg;
+  }
+
+  /* ── Structure ───────────────────────────────────────────────────────── */
+
+  /*
+   * Dashed means "a place something is going": a drop target, an empty slot,
+   * an add-new card. Solid means "a thing that is here". Never used for
+   * decoration, and never for a selected state.
+   */
+  .dashed {
+    border-style: dashed;
+    border-color: var(--line-dashed);
+  }
+
+  /*
+   * Long horizontal content (a table, a poster rail) scrolls inside its own
+   * box so the page never scrolls sideways.
+   *
+   * It clips vertically as well and nothing here can stop it: CSS resolves
+   * `overflow-y` to `auto` as soon as `overflow-x` is not `visible`. Anything
+   * inside that leaves its own box needs the container to reserve the room -
+   * padding plus an equal negative margin - rather than a z-index, which
+   * cannot escape a clip.
+   */
   .scroll-x {
     @apply overflow-x-auto overscroll-x-contain;
   }
 
-  /* Breaks an element out of the centred, padded content column so it spans
-     the whole region the column sits in — from the sidebar's right edge to the
-     window's right edge, and the full width once the sidebar is a drawer.
-     `100cqw` is that region's width, because Layout marks the wrapper around
-     <main> as the query container; `100%` is the column's own content width,
-     so half the difference is exactly the inset to hand back on each side.
-     Deliberately not `100vw`: that counts the scrollbar, and the page would
-     then scroll sideways by its width. */
+  /*
+   * Breaks an element out of the centred content column so it spans the whole
+   * region the column sits in. `100cqw` is that region's width, because Layout
+   * marks the wrapper around <main> as the query container; `100%` is the
+   * column's own width. Deliberately not `100vw`: that counts the scrollbar,
+   * and the page would then scroll sideways by its width.
+   */
   .full-bleed {
     margin-inline: calc((100% - 100cqw) / 2);
   }
 
-  /* The detail hero's fade from artwork into the page background.
-     Many stops rather than three even ones: a linear ramp bands visibly where
-     its slope changes, which is what made the banner look like it stopped at
-     an edge. The bottom seventh is solid, so the title never lands on bare
-     artwork however bright or dark that artwork is, and the rest eases out
-     over the whole height. Built from `--canvas`, so it is correct in both
-     themes, and every stop names the colour — fading to `transparent` would
-     pass through grey. */
+  /*
+   * The detail hero's fade from artwork into the page.
+   *
+   * Many stops rather than three even ones: a linear ramp bands visibly where
+   * its slope changes. The bottom seventh is solid so the title never lands on
+   * bare artwork however bright it is, and every stop names the colour - fading
+   * to `transparent` would pass through grey.
+   */
   .hero-scrim {
     background-image: linear-gradient(
       to top,
-      rgb(var(--canvas)) 0%,
-      rgb(var(--canvas)) 15%,
-      rgb(var(--canvas) / 0.97) 26%,
-      rgb(var(--canvas) / 0.91) 36%,
-      rgb(var(--canvas) / 0.81) 46%,
-      rgb(var(--canvas) / 0.67) 56%,
-      rgb(var(--canvas) / 0.51) 66%,
-      rgb(var(--canvas) / 0.35) 76%,
-      rgb(var(--canvas) / 0.2) 85%,
-      rgb(var(--canvas) / 0.09) 93%,
-      rgb(var(--canvas) / 0) 100%
+      var(--window) 0%,
+      var(--window) 15%,
+      color-mix(in oklab, var(--window) 97%, transparent) 26%,
+      color-mix(in oklab, var(--window) 91%, transparent) 36%,
+      color-mix(in oklab, var(--window) 81%, transparent) 46%,
+      color-mix(in oklab, var(--window) 67%, transparent) 56%,
+      color-mix(in oklab, var(--window) 51%, transparent) 66%,
+      color-mix(in oklab, var(--window) 35%, transparent) 76%,
+      color-mix(in oklab, var(--window) 20%, transparent) 85%,
+      color-mix(in oklab, var(--window) 9%, transparent) 93%,
+      color-mix(in oklab, var(--window) 0%, transparent) 100%
     );
   }
 }
 
 @layer utilities {
+  /* Skeletons stand in for content at the same geometry, with a slow shimmer.
+     The one thing that pulses. */
   .skeleton {
-    @apply relative overflow-hidden bg-raised;
+    @apply relative overflow-hidden bg-control;
   }
 
   .skeleton::after {
     content: '';
-    @apply absolute inset-0 -translate-x-full animate-shimmer
-           bg-gradient-to-r from-transparent via-black/5 to-transparent;
-  }
-
-  .dark .skeleton::after {
-    @apply via-white/5;
+    @apply absolute inset-0 -translate-x-full animate-shimmer;
+    background-image: linear-gradient(
+      to right,
+      transparent,
+      color-mix(in oklab, var(--text) 8%, transparent),
+      transparent
+    );
   }
 
   .text-balance {
     text-wrap: balance;
-  }
-
-  .scrollbar-thin {
-    scrollbar-width: thin;
-    scrollbar-color: rgb(var(--line)) transparent;
-  }
-
-  .scrollbar-thin::-webkit-scrollbar {
-    height: 8px;
-    width: 8px;
-  }
-
-  .scrollbar-thin::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-line;
   }
 
   .scrollbar-none::-webkit-scrollbar {

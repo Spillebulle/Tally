@@ -1,0 +1,101 @@
+/*
+ * Tally's layer over the house tokens.
+ *
+ * `tokens.css` beside this file is a verbatim copy of
+ * ../../../Design-Principles/tokens.css and must stay one, so the house ladder
+ * can be re-synced with a single `cp`. Everything Tally decides for itself
+ * lives here:
+ *
+ *   1. `--accent-h`, the one number an app sets (255, steel blue).
+ *   2. The accent's lightness and chroma, pinned so the dark accent is exactly
+ *      #3987E5. This is a deliberate deviation from the house formula
+ *      (oklch(0.674 0.101 H)), which at hue 255 gives a paler, greyer blue.
+ *      Tally's blue is its identity and predates the guide; the *hue* is the
+ *      house's, and every other accent-derived token still falls out of
+ *      `--accent`, so the system holds. Contrast was checked rather than
+ *      assumed: accent on `chrome` is 4.88:1 dark and 5.09:1 light, on
+ *      `control` 4.48:1 and 4.49:1, and `accent-ink` on accent 5.15:1 and
+ *      5.54:1. All clear the floors in STYLE-GUIDE §2.6.
+ *   3. Two token families the house file does not carry because only Tally
+ *      needs them: the Plex brand yellow, and the sequential heat ramp.
+ *
+ * Structure mirrors `tokens.css` exactly and for the same reason: bare `:root`
+ * is dark, the media query is system-light, and `.light` / `[data-theme=light]`
+ * is forced light. A token written in only one of the two light blocks is a
+ * token that breaks in the other state, so all three blocks are kept in step.
+ */
+
+:root {
+  /* Steel blue. Hue 255 is the guide's own suggestion for Tally. */
+  --accent-h: 255;
+}
+
+/* ══ DARK ══════════════════════════════════════════════════════════════════ */
+:root {
+  --accent: oklch(0.622 0.161 var(--accent-h)); /* #3987E5 */
+  --accent-dim: oklch(0.447 0.097 var(--accent-h)); /* #2C5589 */
+
+  /*
+   * Plex's own yellow, the one brand colour Tally is not free to restyle.
+   * It is a token rather than a hex in a component so the rule "never a raw
+   * hex in a component" stays absolute, and it goes on the Plex badge and
+   * nothing else. It is not a semantic colour and never marks state.
+   */
+  --plex: #e5a00d;
+  --plex-ink: #1b1200;
+
+  /*
+   * Sequential ramp for the activity heatmap: five steps of the accent, per
+   * STYLE-GUIDE §8. Zero is `--control`, not the lightest step, so "nothing
+   * happened" and "a little happened" cannot be confused. Mixed against
+   * `--chrome` rather than left translucent, because the cells sit on a card
+   * and a translucent fill would pick up whatever is behind it.
+   */
+  --heat-1: color-mix(in oklab, var(--accent) 22%, var(--chrome));
+  --heat-2: color-mix(in oklab, var(--accent) 42%, var(--chrome));
+  --heat-3: color-mix(in oklab, var(--accent) 62%, var(--chrome));
+  --heat-4: color-mix(in oklab, var(--accent) 81%, var(--chrome));
+  --heat-5: var(--accent);
+}
+
+/* ══ LIGHT, following the system ═══════════════════════════════════════════ */
+@media (prefers-color-scheme: light) {
+  :root:not(.dark):not([data-theme='dark']) {
+    --accent: oklch(0.52 0.14 var(--accent-h)); /* #2769B7 */
+    --accent-dim: oklch(0.79 0.05 var(--accent-h)); /* #A5BDDB */
+    --plex: #b57c00;
+    --plex-ink: #ffffff;
+    --heat-1: color-mix(in oklab, var(--accent) 18%, var(--chrome));
+    --heat-2: color-mix(in oklab, var(--accent) 36%, var(--chrome));
+    --heat-3: color-mix(in oklab, var(--accent) 56%, var(--chrome));
+    --heat-4: color-mix(in oklab, var(--accent) 78%, var(--chrome));
+    --heat-5: var(--accent);
+  }
+}
+
+/* ══ LIGHT, chosen ═════════════════════════════════════════════════════════ */
+:root.light,
+:root[data-theme='light'] {
+  --accent: oklch(0.52 0.14 var(--accent-h));
+  --accent-dim: oklch(0.79 0.05 var(--accent-h));
+  --plex: #b57c00;
+  --plex-ink: #ffffff;
+  --heat-1: color-mix(in oklab, var(--accent) 18%, var(--chrome));
+  --heat-2: color-mix(in oklab, var(--accent) 36%, var(--chrome));
+  --heat-3: color-mix(in oklab, var(--accent) 56%, var(--chrome));
+  --heat-4: color-mix(in oklab, var(--accent) 78%, var(--chrome));
+  --heat-5: var(--accent);
+}
+
+/* ── The house typeface ────────────────────────────────────────────────────
+ * Archivo, variable 100-900, width axis pinned to normal and subset to Latin
+ * (42 KB). Bundled, never a CDN: the app is self-hosted and often reached
+ * without internet, and a font that arrives late reflows every dense row.
+ */
+@font-face {
+  font-family: 'Archivo';
+  src: url('./assets/fonts/archivo-variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}

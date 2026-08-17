@@ -1,0 +1,240 @@
+/*
+ * House design principles — tokens.
+ *
+ * One file, three jobs:
+ *   1. the neutral ladder every app shares (dark = cool graphite, light = warm paper)
+ *   2. the per-app accent, derived from ONE hue number
+ *   3. the fixed sizes (type scale, chrome heights, radii, shadows)
+ *
+ * To adopt in a project:
+ *   - copy this file in, set --accent-h (and nothing else) at the top
+ *   - put class="dark" or data-theme="dark" on <html> for the dark theme, "light" for light,
+ *     nothing at all to follow the OS
+ *   - never write a hex in a component. If a colour is missing, add a token here.
+ *
+ * Every neutral is stated in OKLCH so the ladder is a *recipe*, not a set of magic hexes:
+ * L steps of ~0.015 between surfaces, chroma ≤ 0.010, hue 264 in the dark theme (cool)
+ * and 82 in the light one (paper). The only place the accent hue leaks into a neutral is
+ * --control-active, the "selected" fill: accent hue at chroma 0.012 (dark) / 0.020 (light).
+ * See STYLE-GUIDE.md §2.
+ */
+
+:root {
+  /* ── The one number an app changes ─────────────────────────────────────── */
+  --accent-h: 68;            /* Umber ochre = 68. Pick a different hue per app. */
+
+  /* ── Type ──────────────────────────────────────────────────────────────── */
+  --font-ui: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-figure: ui-monospace, "Cascadia Mono", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  --text-heading: 13px;      /* panel titles, dialog titles */
+  --text-body:    12px;      /* running text */
+  --text-control: 11.5px;    /* button labels, row labels, list items */
+  --text-small:   11px;      /* menu items, secondary rows */
+  --text-tiny:    10.5px;    /* figures, status bar, chips, eyebrows */
+  --text-page:    15px;      /* a page/pane heading inside a dialog or settings screen */
+  --text-display: 64px;      /* the wordmark, splash only */
+  --lh: 1.35;
+
+  /* ── Space & shape ─────────────────────────────────────────────────────── */
+  --s1: 4px;  --s2: 8px;  --s3: 12px;  --s4: 16px;  --s5: 24px;  --s6: 32px;
+  --r-tight: 3px;   /* keycaps, badges, the logo mark */
+  --r-ctl:   5px;   /* buttons, chips, swatches, tool buttons (32px) use 6 */
+  --r-tool:  6px;
+  --r-card:  8px;   /* cards, tiles, popovers, menus, wells */
+  --r-modal: 10px;  /* dialogs, floating panels */
+
+  --hairline: 1px;
+  --dash: 5px; --dash-gap: 4px;   /* every dashed mark in the family */
+
+  /* ── Chrome heights (desktop and hosted alike) ─────────────────────────── */
+  --h-menubar: 34px;   /* menu bar / hosted top bar */
+  --h-tabstrip: 30px;  /* document tab strip; a tab in it is 24 */
+  --h-toolbar: 36px;   /* options strip / toolbar */
+  --h-status: 26px;    /* status bar */
+  --h-panelhead: 32px; /* docked module header */
+  --h-row: 26px;       /* a list row with a picture */
+  --h-row-plain: 20px; /* a list row that is only text */
+  --h-dropdown: 18px;
+  --h-button: 26px;
+  --h-bottomnav: 52px; /* mobile bar navigation */
+  --w-panel: 264px;    /* a docked module / sidebar column */
+  --w-sidebar: 240px;  /* hosted app navigation column */
+  --w-toolrail: 100px;
+  --pad-strip: 12px;   /* horizontal padding inside every strip */
+  --pad-panel: 12px;
+
+  /* ── Shadows: only things that float cast one ──────────────────────────── */
+  --shadow-menu:  0 8px 32px rgba(0,0,0,.6);
+  --shadow-float: 0 16px 48px rgba(0,0,0,.7);
+  --shadow-modal: 0 24px 64px rgba(0,0,0,.7);
+  --shadow-knob:  0 0 3px rgba(0,0,0,.8);
+
+  /* ── Motion ─────────────────────────────────────────────────────────────── */
+  --t-hover: 80ms;
+  --t-open: 160ms;
+  --ease: cubic-bezier(.22,1,.36,1);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   DARK — Graphite. The default for desktop tools and dashboards.
+   ══════════════════════════════════════════════════════════════════════════ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces, darkest to lightest. Cool grey, hue 264, chroma ≤ .008. */
+  --backdrop:        oklch(0.164 0.005 264);  /* behind the work: canvas pit, page ground        #0D0E10 */
+  --window:          oklch(0.182 0.004 264);  /* panel interiors, wells, dialog body             #111214 */
+  --dock:            oklch(0.195 0.004 264);  /* the docked column / sidebar                     #141517 */
+  --chrome:          oklch(0.209 0.004 264);  /* menu bar, strips, panel headers, cards          #17181A */
+  --popover:         oklch(0.227 0.006 271);  /* menus, tooltips                                 #1B1C1F */
+
+  /* Lines */
+  --line-soft:       oklch(0.243 0.006 258);  /* row separators inside a list                    #1E2023 */
+  --line:            oklch(0.276 0.006 258);  /* the hairline: every strip and panel edge        #26282B */
+  --line-popover:    oklch(0.301 0.008 264);  /* menu and modal edge                             #2C2E32 */
+  --line-dashed:     oklch(0.359 0.010 261);  /* neutral dashed outline (empty state)            #3A3D42 */
+
+  /* Controls */
+  --control:         oklch(0.244 0.006 271);  /* resting button, selected list row              #1F2023 */
+  --control-hover:   oklch(0.276 0.006 258);  /*                                                #26282B */
+  --control-active:  oklch(0.29 0.012 var(--accent-h)); /* selected tool / segment: accent-warmed neutral */
+  --rail:            oklch(0.276 0.006 258);  /* slider track                                    #26282B */
+  --knob:            oklch(0.928 0.003 265);  /* slider knob                                     #E6E7E9 */
+  --field:           var(--dock);             /* text field / search well                                */
+
+  /* Text, four ranks. Never invent a fifth. */
+  --text-strong:     oklch(0.928 0.003 265);  /* titles, selected labels, figures                #E6E7E9 */
+  --text:            oklch(0.841 0.005 258);  /* body                                            #C9CBCE */
+  --text-muted:      oklch(0.695 0.008 261);  /* unselected nav, secondary                       #9A9DA2 */
+  --text-dim:        oklch(0.622 0.008 261);  /* status bar, notes, disabled                     #84878C */
+  --placeholder:     oklch(0.481 0.009 261);  /* input hint, eyebrow labels                      #5B5E63 */
+
+  /* Accent — derived from --accent-h. Umber ochre at h=68 gives #C08A4E / #6B4E2E. */
+  --accent:          oklch(0.674 0.101 var(--accent-h));
+  --accent-dim:      oklch(0.447 0.061 var(--accent-h));   /* dashed outlines, quiet marks */
+  --accent-ink:      var(--window);                        /* text ON an accent fill */
+  --accent-tint:     color-mix(in oklab, var(--accent) 7%, transparent);   /* selected card wash */
+  --accent-ring:     color-mix(in oklab, var(--accent) 35%, transparent);  /* focus ring */
+
+  /* Semantic. Separate from the accent, muted, used for STATE only. */
+  --caution:         oklch(0.693 0.096 38);   /* #D08770 — conflict, look at this */
+  --caution-bg:      oklch(0.245 0.023 42);   /* #2A1D18 */
+  --caution-line:    oklch(0.424 0.068 35);   /* #6E4034 */
+  --good:            oklch(0.70 0.10 145);
+  --good-bg:         oklch(0.245 0.025 145);
+  --critical:        oklch(0.66 0.13 22);     /* only for down / failed / destructive */
+  --critical-bg:     oklch(0.245 0.03 22);
+
+  /* Categorical chart series (six, told apart from each other and from any accent). */
+  --series-1: #3F7BE8; --series-2: #46B04A; --series-3: #A96BE8;
+  --series-4: #1FB5B5; --series-5: #EE5AA8; --series-6: #F0D53C;
+  --grid:            var(--line-soft);
+  --area-alpha:      .14;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LIGHT — Paper. Warm greys, hue 82. Same ladder, same ranks.
+   Applied by <html class="light">, data-theme="light", or the OS preference
+   when nothing is stamped.
+   ══════════════════════════════════════════════════════════════════════════ */
+@media (prefers-color-scheme: light) {
+  :root:not(.dark):not([data-theme="dark"]) { --light: 1; }
+}
+:root.light, :root[data-theme="light"] { --light: 1; }
+
+@media (prefers-color-scheme: light) {
+  :root:not(.dark):not([data-theme="dark"]) {
+    color-scheme: light;
+    --backdrop:       oklch(0.908 0.010 82);   /* #E4E0D9 */
+    --window:         oklch(0.944 0.007 81);   /* #EFECE7 */
+    --dock:           oklch(0.953 0.007 81);   /* #F2EFEA */
+    --chrome:         oklch(0.971 0.006 85);   /* #F7F5F1 */
+    --popover:        #FFFFFF;
+    --line-soft:      oklch(0.915 0.008 82);
+    --line:           oklch(0.890 0.010 82);   /* #DEDAD3 */
+    --line-popover:   oklch(0.890 0.010 82);
+    --line-dashed:    oklch(0.80 0.012 82);
+    --control:        oklch(0.929 0.009 85);   /* #EAE7E1 */
+    --control-hover:  oklch(0.896 0.010 82);   /* #E0DCD5 */
+    --control-active: oklch(0.909 0.020 var(--accent-h));
+    --rail:           oklch(0.890 0.010 82);
+    --knob:           #FFFFFF;
+    --field:          #FFFFFF;
+    --text-strong:    oklch(0.342 0.004 68);   /* #3A3836 */
+    --text:           oklch(0.342 0.004 68);
+    --text-muted:     oklch(0.526 0.007 75);   /* #6D6A66 */
+    --text-dim:       oklch(0.634 0.008 81);   /* #8D8A85 */
+    --placeholder:    oklch(0.72 0.008 81);
+    --accent:         oklch(0.55 0.10 var(--accent-h));   /* h=68 → #9C622F */
+    --accent-dim:     oklch(0.79 0.036 var(--accent-h));  /* #C9B8A2 */
+    --accent-ink:     #FFFFFF;
+    --caution:        oklch(0.518 0.114 39);   /* #9E4E33 */
+    --caution-bg:     oklch(0.943 0.018 49);   /* #F7E9E2 */
+    --caution-line:   oklch(0.832 0.042 51);   /* #DFC1B0 */
+    --good:           oklch(0.50 0.11 145);
+    --good-bg:        oklch(0.94 0.03 145);
+    --critical:       oklch(0.50 0.14 22);
+    --critical-bg:    oklch(0.94 0.03 22);
+    --series-1: #2A5AB4; --series-2: #2E7C33; --series-3: #7742AE;
+    --series-4: #137F7F; --series-5: #B0326E; --series-6: #7E760A;
+    --shadow-menu:  0 8px 32px rgba(40,30,10,.18);
+    --shadow-float: 0 16px 48px rgba(40,30,10,.22);
+    --shadow-modal: 0 24px 64px rgba(40,30,10,.25);
+  }
+}
+:root.light, :root[data-theme="light"] {
+  color-scheme: light;
+  --backdrop:       oklch(0.908 0.010 82);
+  --window:         oklch(0.944 0.007 81);
+  --dock:           oklch(0.953 0.007 81);
+  --chrome:         oklch(0.971 0.006 85);
+  --popover:        #FFFFFF;
+  --line-soft:      oklch(0.915 0.008 82);
+  --line:           oklch(0.890 0.010 82);
+  --line-popover:   oklch(0.890 0.010 82);
+  --line-dashed:    oklch(0.80 0.012 82);
+  --control:        oklch(0.929 0.009 85);
+  --control-hover:  oklch(0.896 0.010 82);
+  --control-active: oklch(0.909 0.020 var(--accent-h));
+  --rail:           oklch(0.890 0.010 82);
+  --knob:           #FFFFFF;
+  --field:          #FFFFFF;
+  --text-strong:    oklch(0.342 0.004 68);
+  --text:           oklch(0.342 0.004 68);
+  --text-muted:     oklch(0.526 0.007 75);
+  --text-dim:       oklch(0.634 0.008 81);
+  --placeholder:    oklch(0.72 0.008 81);
+  --accent:         oklch(0.55 0.10 var(--accent-h));
+  --accent-dim:     oklch(0.79 0.036 var(--accent-h));
+  --accent-ink:     #FFFFFF;
+  --caution:        oklch(0.518 0.114 39);
+  --caution-bg:     oklch(0.943 0.018 49);
+  --caution-line:   oklch(0.832 0.042 51);
+  --good:           oklch(0.50 0.11 145);
+  --good-bg:        oklch(0.94 0.03 145);
+  --critical:       oklch(0.50 0.14 22);
+  --critical-bg:    oklch(0.94 0.03 22);
+  --series-1: #2A5AB4; --series-2: #2E7C33; --series-3: #7742AE;
+  --series-4: #137F7F; --series-5: #B0326E; --series-6: #7E760A;
+  --shadow-menu:  0 8px 32px rgba(40,30,10,.18);
+  --shadow-float: 0 16px 48px rgba(40,30,10,.22);
+  --shadow-modal: 0 24px 64px rgba(40,30,10,.25);
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+html { background: var(--backdrop); }
+body {
+  margin: 0;
+  background: var(--backdrop);
+  color: var(--text);
+  font: var(--text-body)/var(--lh) var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+.figure, .num { font-family: var(--font-figure); font-size: var(--text-tiny); font-variant-numeric: tabular-nums; }
+:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent-ring); border-radius: var(--r-ctl); }
+::placeholder { color: var(--placeholder); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--line-popover); border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
