@@ -2,30 +2,35 @@
 /*
  * Builds every Tally brand asset from one drawing of the mark.
  *
+ *     cd frontend && npm install --no-save playwright && npx playwright install chromium
  *     node assets/icons/build-icons.mjs
  *
- * Run it from anywhere; paths are resolved from this file. It uses the
- * Playwright Chromium that frontend/node_modules already carries to rasterise
- * the SVG, so there is nothing to install beyond `npm ci` in frontend/.
- * Nothing is downloaded; the font is the repo's own Archivo subset.
+ * Playwright is deliberately *not* a dependency of frontend/package.json:
+ * `Dockerfile` runs `npm ci`, and a Playwright devDependency would pull a
+ * Chromium download into every image build. So it is installed ad hoc for a
+ * regeneration and thrown away again. Nothing else is downloaded; the font is
+ * the repo's own Archivo subset.
  *
  * Outputs:
  *   assets/icons/tally-{16,32,48,64,128,256}.png   mark on transparent
  *   assets/icons/tally.ico                          all six frames
- *   frontend/public/favicon.svg                     theme-aware (media query)
+ *   frontend/public/favicon.svg                     both frames, size-switched
  *   frontend/public/favicon.ico                     16/32/48 frames
  *   frontend/public/apple-touch-icon.png            180 px, opaque, full bleed
  *   frontend/public/icon-192.png, icon-512.png      manifest icons
- *   docs/images/banner.png                          1354 x 461 on #0D0E10
- *   docs/images/banner-paper.png                    1354 x 461 on #E4E0D9
+ *   frontend/public/icon-192-maskable.png, icon-512-maskable.png
+ *   docs/images/banner.png                          1354 × 461 on #0D0E10
+ *   docs/images/banner-paper.png                    1354 × 461 on #E4E0D9
  *
  * The mark: a rounded square (radius 30 % of the side) in the accent, with
- * four upright tally strokes and a fifth crossing them. The glyph inside the
- * square is a deliberate, owner-approved departure from the house rule that
- * the mark carries no glyph (STYLE-GUIDE.md 17.4); see docs/brand.md.
+ * four upright tally strokes and a fifth rising across them. The glyph inside
+ * the square is a deliberate, owner-approved departure from the house rule
+ * that the mark carries no glyph (STYLE-GUIDE.md §17.4); see docs/brand.md.
  *
  * Static assets are files, not components, so literal hexes are correct here.
  * The values mirror theme-tally.css and tokens.css; if those move, move these.
+ * The geometry is duplicated in frontend/src/components/Brand.tsx - change
+ * the two together.
  */
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -35,13 +40,24 @@ import { join } from 'node:path'
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..', '..')
 const requireFrontend = createRequire(join(repo, 'frontend', 'package.json'))
-const { chromium } = requireFrontend('playwright')
+
+let chromium
+try {
+  ;({ chromium } = requireFrontend('playwright'))
+} catch {
+  console.error(
+    'playwright is not installed. It is kept out of package.json so that the\n' +
+      'Docker build does not download a Chromium. Install it just for this run:\n\n' +
+      '    cd frontend && npm install --no-save playwright && npx playwright install chromium\n',
+  )
+  process.exit(1)
+}
 
 /* ------------------------------------------------------------------ colours */
 
 const ACCENT_DARK = '#3987E5' // --accent, dark theme (theme-tally.css)
 const ACCENT_LIGHT = '#2769B7' // --accent, light theme
-const INK = '#FFFFFF' // stroke colour in static assets: white reads on both accents
+const INK = '#FFFFFF' // --brand-ink: one ink for the mark, in both themes
 const BACKDROP_DARK = '#0D0E10' // --backdrop, dark
 const BACKDROP_PAPER = '#E4E0D9' // --backdrop, light
 const TEXT_DARK = '#E6E7E9' // --text-strong, dark
@@ -50,21 +66,34 @@ const TEXT_PAPER = '#3A3836' // --text-strong, light
 /* ---------------------------------------------------------------- the mark  */
 
 /*
- * Drawn on a 32-unit grid so every dimension is legible:
- *   - square: 0,0 -> 32,32, corner radius 9.6 (30 % of the side)
- *   - four uprights: x = 7, 13, 19, 25 (6-unit rhythm), y = 9 -> 23
- *   - the fifth: (6,11) -> (26,21), falling through the centre (16,16)
- *   - stroke 3 units, round caps
- * With caps the ink spans x 5.5..26.5 and y 7.5..24.5, so the glyph is
- * centred optically as well as geometrically: the diagonal is symmetric about
- * (16,16) and its caps overhang each side equally. At 16 px a stroke is
- * 1.5 px and each gap 1.5 px, which stays separable.
+ * The master drawing, on a 32-unit grid.
+ *
+ *   square      0,0 to 32,32, corner radius 9.6 (30 % of the side)
+ *   uprights    x = 7.75, 13.25, 18.75, 24.25 (pitch 5.5), y = 8.5 to 23.5
+ *   fifth mark  (7.75, 21) to (24.25, 11), rising, as a tally's fifth does
+ *   stroke      2.4 units, round caps
+ *
+ * The fifth mark starts and ends exactly on the outer uprights' centre lines,
+ * so its round caps sit inside those strokes' own width instead of poking out
+ * into open field as blobs. It rises at 31.2 degrees, which was picked by
+ * rendering the alternatives: much shallower and each segment between two
+ * uprights reads as a rung, so the mark becomes a fence of H shapes rather
+ * than four marks with a fifth struck through them.
+ *
+ * Ink is 2.4 wide and the gaps between uprights are 3.1, so the negative
+ * space is wider than the ink. Including the caps the ink spans 6.55 to 25.45
+ * across and 7.3 to 24.7 down: 6.55 units of margin at the sides, 7.3 top and
+ * bottom, and 2.5 units of upright left proud above and below the fifth mark
+ * at either end.
+ *
+ * The artwork has 180-degree rotational symmetry about (16, 16): the uprights
+ * swap in pairs and the fifth mark maps onto itself. Its centroid is
+ * therefore exactly the square's centre, which is what "optically centred"
+ * has to mean for a figure with a diagonal in it.
  */
 const STROKES =
-  '<g stroke="' +
-  INK +
-  '" stroke-width="3" stroke-linecap="round" fill="none">' +
-  '<path d="M7 9v14M13 9v14M19 9v14M25 9v14M6 11 26 21"/></g>'
+  `<g stroke="${INK}" stroke-width="2.4" stroke-linecap="round" fill="none">` +
+  '<path d="M7.75 8.5v15M13.25 8.5v15M18.75 8.5v15M24.25 8.5v15M7.75 21 24.25 11"/></g>'
 
 function markSvg(accent, { size, fullBleed = false } = {}) {
   const dim = size ? ` width="${size}" height="${size}"` : ''
@@ -75,32 +104,56 @@ function markSvg(accent, { size, fullBleed = false } = {}) {
 }
 
 /*
- * The 16 px frame is redrawn on the pixel grid rather than scaled: 1 px
- * uprights on pixel columns 3/6/9/12 with 2 px gaps, butt caps (a round cap
- * is a smear at this size), and the fifth stroke kept thin so it crosses
- * without flooding the gaps. Same mark, tuned for the one size where
- * antialiasing would otherwise fuse it into a blob.
+ * The 16 px frame, redrawn on the pixel grid rather than scaled: 1 px
+ * uprights centred on x = 3.5/6.5/9.5/12.5 so each lands on one whole pixel
+ * column with a 2 px gap either side, butt caps (a round cap is a smear at
+ * this size), y = 4 to 12, and a rising fifth mark from (3.5, 10.5) to
+ * (12.5, 5.5), the same 29-degree-ish rise as the master. Same mark, tuned
+ * for the sizes where antialiasing would otherwise fuse it into a blob.
+ *
+ * The uprights carry `shape-rendering="crispEdges"`. The frame is pixel-exact
+ * only at exactly 16 px, and the top bar draws it at 15 (section 6.2), where
+ * a 1 px stroke lands on 0.94 px and smears across two columns; snapping the
+ * edges keeps four separate uprights at any size the frame is used at. The
+ * fifth mark is left antialiased, because snapping a diagonal is what makes
+ * it a staircase.
  */
+const STROKES_16 =
+  `<g stroke="${INK}" fill="none">` +
+  '<path d="M3.5 4v8M6.5 4v8M9.5 4v8M12.5 4v8" stroke-width="1" shape-rendering="crispEdges"/>' +
+  '<path d="M3.5 10.5 12.5 5.5" stroke-width="1" stroke-linecap="round"/>' +
+  '</g>'
+
 function mark16Svg(accent) {
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">` +
-    `<rect width="16" height="16" rx="4.8" fill="${accent}"/>` +
-    `<g stroke="${INK}" fill="none">` +
-    `<path d="M3.5 4v8M6.5 4v8M9.5 4v8M12.5 4v8" stroke-width="1"/>` +
-    `<path d="M2.5 5.5 13.5 10.5" stroke-width="1.2" stroke-linecap="round"/>` +
-    `</g></svg>`
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">' +
+    `<rect width="16" height="16" rx="4.8" fill="${accent}"/>${STROKES_16}</svg>`
   )
 }
 
-/* The favicon follows the browser chrome: dark accent by default, the light
-   accent when the chrome is light. An SVG favicon may carry a media query. */
+/*
+ * The favicon carries *both* drawings and switches on rendered size. It has
+ * to: index.html declares it `type="image/svg+xml"`, so Chrome and Firefox
+ * prefer it over the .ico and would otherwise render the master geometry into
+ * a 16 px tab, where the uprights fuse. A media query inside an SVG resolves
+ * against the size the image is rendered at, so `max-width: 20px` picks the
+ * tuned frame in a tab and the master everywhere else. The accent follows the
+ * browser chrome the same way.
+ */
 const faviconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <style>
     .square { fill: ${ACCENT_DARK}; }
     @media (prefers-color-scheme: light) { .square { fill: ${ACCENT_LIGHT}; } }
+    /* One frame at a time: the tuned 16 px drawing only in a tab. */
+    .small { display: none; }
+    @media (max-width: 20px) {
+      .large { display: none; }
+      .small { display: inline; }
+    }
   </style>
   <rect class="square" width="32" height="32" rx="9.6"/>
-  ${STROKES}
+  <g class="large">${STROKES}</g>
+  <g class="small" transform="scale(2)">${STROKES_16}</g>
 </svg>
 `
 
@@ -135,8 +188,14 @@ function bannerHtml(bg, accent, inkText) {
       text-transform: uppercase; color: ${inkText};
       /* trim the trailing tracking so the word is optically centred */
       margin-right: ${-tracking}px;
-      /* Archivo's em box sits low; nudge caps onto the mark's centre line */
-      margin-top: -8px;
+      /* Flexbox centres the line box, but the cap band sits above the line
+         box's centre because of the descender space, so the word rides high.
+         Nudged with a relative offset rather than a margin: under
+         align-items:center a margin is absorbed into the centring and moves
+         the item by half its value, which is how the first attempt at this
+         overshot. */
+      position: relative;
+      top: 1.5px;
     }
   </style></head><body>${markSvg(accent, { size: 152 })}<div class="word">Tally</div></body></html>`
 }
@@ -184,18 +243,30 @@ async function shotSvg(svg, size, { transparent = true } = {}) {
   return page.screenshot({ omitBackground: transparent })
 }
 
-// Mark on transparent, the app-icon ladder.
+// Mark on transparent, the app-icon ladder. 16 uses the tuned frame.
 const pngs = new Map()
 pngs.set(16, await shotSvg(mark16Svg(ACCENT_DARK), 16))
 for (const size of [32, 48, 64, 128, 192, 256, 512]) {
-  const png = await shotSvg(markSvg(ACCENT_DARK, { size }), size)
-  pngs.set(size, png)
+  pngs.set(size, await shotSvg(markSvg(ACCENT_DARK, { size }), size))
 }
 for (const size of [16, 32, 48, 64, 128, 256]) {
   writeFileSync(join(outIcons, `tally-${size}.png`), pngs.get(size))
 }
 writeFileSync(join(outPublic, 'icon-192.png'), pngs.get(192))
 writeFileSync(join(outPublic, 'icon-512.png'), pngs.get(512))
+
+/* Maskable icons are full-bleed: Android applies its own mask, so a rounded
+   square handed in whole ends up inside a second rounded square. The glyph is
+   unchanged and its corner-to-corner span is 25.4 of 32 units, inside the
+   25.6-unit safe circle the maskable spec guarantees. */
+for (const size of [192, 512]) {
+  writeFileSync(
+    join(outPublic, `icon-${size}-maskable.png`),
+    await shotSvg(markSvg(ACCENT_DARK, { size, fullBleed: true }), size, {
+      transparent: false,
+    }),
+  )
+}
 
 // ICOs from the same frames.
 const frame = (size) => ({ size, png: pngs.get(size) })
@@ -213,7 +284,7 @@ writeFileSync(
   }),
 )
 
-// The theme-aware favicon.
+// The size- and theme-switching favicon.
 writeFileSync(join(outPublic, 'favicon.svg'), faviconSvg)
 
 // Banners.

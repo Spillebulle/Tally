@@ -2,7 +2,14 @@
   <style>
     .square { fill: #3987E5; }
     @media (prefers-color-scheme: light) { .square { fill: #2769B7; } }
+    /* One frame at a time: the tuned 16 px drawing only in a tab. */
+    .small { display: none; }
+    @media (max-width: 20px) {
+      .large { display: none; }
+      .small { display: inline; }
+    }
   </style>
   <rect class="square" width="32" height="32" rx="9.6"/>
-  <g stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" fill="none"><path d="M7 9v14M13 9v14M19 9v14M25 9v14M6 11 26 21"/></g>
+  <g class="large"><g stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" fill="none"><path d="M7.75 8.5v15M13.25 8.5v15M18.75 8.5v15M24.25 8.5v15M7.75 21 24.25 11"/></g></g>
+  <g class="small" transform="scale(2)"><g stroke="#FFFFFF" fill="none"><path d="M3.5 4v8M6.5 4v8M9.5 4v8M12.5 4v8" stroke-width="1" shape-rendering="crispEdges"/><path d="M3.5 10.5 12.5 5.5" stroke-width="1" stroke-linecap="round"/></g></g>
 </svg>
