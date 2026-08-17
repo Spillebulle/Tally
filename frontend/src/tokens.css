@@ -12,6 +12,14 @@
  *     nothing at all to follow the OS
  *   - never write a hex in a component. If a colour is missing, add a token here.
  *
+ * A theme a user makes is a `.umbertheme` file: a flat `key = value` table of the 27
+ * shared tokens, hand-editable, the same in every app in the family. STYLE-GUIDE.md §3.2
+ * is the format. The file keys are snake_case and four of them are deliberately not the
+ * names below, because the stored word may never be reworded: --line is `border`,
+ * --line-popover is `popover_border`, --caution/-bg/-line are `warning`/`warning_bg`/
+ * `warning_border`, and --series-1..6 are `link_1..6`. Every other token in this file is
+ * derived from those 27 by the table in §3.2 and is never stored.
+ *
  * Every neutral is stated in OKLCH so the ladder is a *recipe*, not a set of magic hexes:
  * L steps of ~0.015 between surfaces, chroma ≤ 0.010, hue 264 in the dark theme (cool)
  * and 82 in the light one (paper). The only place the accent hue leaks into a neutral is
