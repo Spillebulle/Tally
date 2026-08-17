@@ -12,14 +12,22 @@ of the whole exercise, and it is deliberately written as an independent reader
 rather than as `decode(encode(t))`: a round trip through one implementation only
 proves it agrees with itself.
 """
+import re
+from pathlib import Path
+
 import pytest
 
 from app.services import theme_library
 from app.services.themes import (
     BUILTINS,
+    CSS_NAMES,
+    GRAPHITE,
+    GRAPHITE_DERIVED,
     HEADER,
     KEYS,
     NAME_MAX,
+    PAPER,
+    PAPER_DERIVED,
     Theme,
     ThemeFormatError,
     bound_name,
@@ -337,7 +345,7 @@ def test_a_second_theme_of_the_same_name_gets_a_number(library):
 
 def test_a_rename_leaves_the_id_alone(library):
     theme = theme_library.create(1, "Night Owl", "graphite", {})
-    theme_library.write(1, theme_library.apply_edits(theme, name="Dawn Chorus"))
+    theme_library.write(1, theme_library.apply_edits(1, theme, name="Dawn Chorus"))
     # The id is what `preferences["theme_id"]` points at; re-deriving it from
     # the new name would orphan the selection.
     assert theme_library.load(1, "night-owl").name == "Dawn Chorus"
@@ -404,9 +412,9 @@ def test_an_upload_that_is_not_utf8_is_refused_as_not_a_theme(library):
 def test_the_editor_refuses_a_key_or_a_colour_it_does_not_know(library):
     theme = theme_library.create(1, "Night Owl", "graphite", {})
     with pytest.raises(theme_library.ThemeLibraryError):
-        theme_library.apply_edits(theme, colours={"backdrop": "#11223344"})
+        theme_library.apply_edits(1, theme, colours={"backdrop": "#11223344"})
     with pytest.raises(theme_library.ThemeLibraryError):
-        theme_library.apply_edits(theme, colours={"nonsense": "#112233"})
+        theme_library.apply_edits(1, theme, colours={"nonsense": "#112233"})
 
 
 # --- the endpoints ---------------------------------------------------------
@@ -557,3 +565,272 @@ async def test_deleting_the_selected_theme_lets_go_of_it(authed_client):
     assert (await authed_client.delete("/api/themes/night-owl")).status_code == 204
     preferences = await authed_client.get("/api/users/me/preferences")
     assert preferences.json()["theme_id"] is None
+
+
+# --- pinning the tables that must never drift ------------------------------
+
+
+def test_every_key_maps_to_a_css_property():
+    """`CSS_NAMES` is complete, and spelled the way `tokens.css` spells it.
+
+    Four families of the twenty-seven are deliberately not their CSS names —
+    `border`, `popover_border`, `warning_*` and `link_*` — and §3.2 says the
+    *file* key is the stored word and may never change. A typo on either side
+    of that mapping sets a custom property nothing reads, so the colour
+    silently stays at the base's value on a theme somebody edited: no error, no
+    blank tile, just an edit that did not take.
+    """
+    assert set(CSS_NAMES) == set(KEYS)
+    assert len(set(CSS_NAMES.values())) == len(KEYS)  # no two keys share a property
+    assert all(name.startswith("--") for name in CSS_NAMES.values())
+    # The ones that are not their own names, written out so a rename has to
+    # break a test that says why rather than one that says "expected 27".
+    assert CSS_NAMES["border"] == "--line"
+    assert CSS_NAMES["popover_border"] == "--line-popover"
+    assert CSS_NAMES["warning"] == "--caution"
+    assert CSS_NAMES["warning_bg"] == "--caution-bg"
+    assert CSS_NAMES["warning_border"] == "--caution-line"
+    assert [CSS_NAMES[f"link_{n}"] for n in range(1, 7)] == [
+        f"--series-{n}" for n in range(1, 7)
+    ]
+
+    css = _stylesheet("tokens.css") + _stylesheet("theme-tally.css")
+    for name in CSS_NAMES.values():
+        assert f"{name}:" in css, f"{name} is not declared in the stylesheets"
+
+
+def _stylesheet(name: str) -> str:
+    path = Path(__file__).resolve().parents[2] / "frontend" / "src" / name
+    assert path.is_file(), f"{path} is missing"
+    return path.read_text(encoding="utf-8")
+
+
+def _authored_hexes(css: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Every `--token` in a stylesheet that states a hex, dark half and light.
+
+    A value that *is* a hex, or an OKLCH value with the hex written in the
+    comment beside it — which is how `tokens.css` records what its recipe comes
+    out as. The two halves split at the first `prefers-color-scheme: light`.
+    """
+    dark_half, _, light_half = css.partition("@media (prefers-color-scheme: light)")
+    halves = []
+    for half in (dark_half, light_half):
+        found: dict[str, str] = {}
+        for line in half.splitlines():
+            declarations = re.findall(r"--([a-z0-9-]+):\s*([^;]*);", line)
+            comment = re.search(r"/\*(.*?)\*/", line)
+            for token, value in declarations:
+                hex_in_value = re.search(r"#([0-9A-Fa-f]{6})\b", value)
+                if hex_in_value:
+                    found[f"--{token}"] = f"#{hex_in_value.group(1).upper()}"
+                elif len(declarations) == 1 and comment:
+                    in_comment = re.search(r"#([0-9A-Fa-f]{6})\b", comment.group(1))
+                    if in_comment:
+                        found[f"--{token}"] = f"#{in_comment.group(1).upper()}"
+        halves.append(found)
+    return halves[0], halves[1]
+
+
+def test_the_built_ins_still_match_the_stylesheets():
+    """`GRAPHITE` and `PAPER` against `tokens.css` and `theme-tally.css`.
+
+    The built-ins are compiled in as hexes but *authored* in OKLCH in the
+    stylesheets, and this branch already carries one "re-sync the house tokens"
+    commit. The next one would move the interface and leave the two built-in
+    tables — which is what a copied theme starts from, and what every theme file
+    falls back to — a version behind, with nothing to notice.
+
+    `accent`, `accent_dim`, `link_1` and `link_3` are read from
+    `theme-tally.css` instead: Tally pins its own blue and swaps two series, so
+    the house file's values for those four are Umber's and not what Tally
+    renders.
+    """
+    house_dark, house_light = _authored_hexes(_stylesheet("tokens.css"))
+    tally_dark, tally_light = _authored_hexes(_stylesheet("theme-tally.css"))
+
+    overridden = {"accent", "accent_dim", "link_1", "link_3"}
+    checked = 0
+    for table, house, tally in (
+        (GRAPHITE, house_dark, tally_dark),
+        (PAPER, house_light, tally_light),
+    ):
+        for key, colour in table.items():
+            source = tally if key in overridden else house
+            authored = source.get(CSS_NAMES[key])
+            if authored is None:
+                continue
+            assert authored == colour, f"{key}: stylesheet {authored}, table {colour}"
+            checked += 1
+    # A parser that quietly matched nothing would pass every assertion above.
+    assert checked >= 30, f"only {checked} tokens were actually compared"
+
+
+def test_the_authored_derived_values_still_match_tokens_css():
+    """The three mixes `tokens.css` states literally, for the dark theme.
+
+    These are the values `resolve()` hands back for a built-in instead of
+    deriving them, so a drift here is a built-in rendering with a colour nobody
+    chose — exactly what §3.2's "the built-in is right" sentence forbids.
+    """
+    house_dark, _ = _authored_hexes(_stylesheet("tokens.css"))
+    for name in ("--line-soft", "--line-dashed", "--placeholder"):
+        assert GRAPHITE_DERIVED[name] == house_dark[name]
+    # The two that are aliases rather than mixes.
+    assert GRAPHITE_DERIVED["--field"] == GRAPHITE["dock"]
+    assert GRAPHITE_DERIVED["--accent-ink"] == GRAPHITE["window"]
+    assert PAPER_DERIVED["--field"] == PAPER["popover"]
+    assert PAPER_DERIVED["--accent-ink"] == PAPER["popover"]
+
+
+def test_a_built_in_resolves_to_its_authored_values_and_a_copy_derives():
+    graphite = resolve(builtin_theme("graphite"))
+    assert graphite["--line-dashed"] == "#3A3D42"  # authored, not the derived #404246
+
+    # A theme somebody copied is not a built-in, and §3.2 blesses deriving it.
+    copied = Theme(id="mine", name="Mine", base="graphite", colours=dict(GRAPHITE))
+    assert resolve(copied)["--line-dashed"] == mix(
+        GRAPHITE["border"], GRAPHITE["text_dim"], 0.30
+    )
+    assert resolve(copied)["--line-dashed"] != graphite["--line-dashed"]
+
+
+# --- agreeing with the reference implementation ----------------------------
+
+
+def test_keys_and_base_values_are_matched_case_sensitively():
+    """§3.2 makes the *header* case-insensitive and says nothing else is.
+
+    `themelib.rs` matches a token id and a base id with `==`. A tolerant reader
+    here would apply an `ACCENT = #FF0000` that Umber counts as unread, and read
+    `base = PAPER` as a light theme where Umber reads a dark one — the same
+    file, two interfaces, and two different values for the one number §3.2
+    requires be shown to the user.
+    """
+    result = decode(HEADER + "\nACCENT = #FF0000\nbase = PAPER\n")
+    assert result.skipped == 1
+    assert result.theme.colours["accent"] == BUILTINS["graphite"].colours["accent"]
+    assert result.theme.colours["window"] == BUILTINS["graphite"].colours["window"]
+    assert result.theme.dark is True
+
+
+def test_a_unicode_separator_in_a_name_is_not_a_line_break():
+    """U+2028 is not a control character, so a name may legally contain one.
+
+    Rust's `str::lines()` does not break on it; `str.splitlines()` does, which
+    made Tally read the rest of such a name as a setting — a name and an
+    injected accent, with nothing counted as skipped.
+    """
+    separator = "\u2028"  # LINE SEPARATOR: not a control character
+    result = decode(HEADER + "\nname = A" + separator + "accent = #FF0000\n")
+    assert result.theme.name == "A" + separator + "accent = #FF0000"
+    assert result.theme.colours["accent"] == BUILTINS["graphite"].colours["accent"]
+    assert result.skipped == 0
+
+
+def test_only_control_characters_become_spaces():
+    """A control character breaks the line format; a space-like one does not.
+
+    `is_control` in the reference is Unicode category Cc and nothing else, so a
+    non-breaking space, a zero-width space and the directional marks are kept.
+    An earlier version asked `str.isprintable()`, which is false for all three —
+    so a name Umber keeps came back from Tally with its characters replaced, and
+    the name changed on a round trip between the two apps.
+    """
+    assert bound_name("Night\tOwl\x07") == "Night Owl"
+    # A non-breaking space, a zero-width space, a left-to-right mark and a
+    # line separator. None is category Cc; all four are false for
+    # `str.isprintable()`.
+    for kept in ("\u00a0", "\u200b", "\u200e", "\u2028"):
+        assert bound_name("A" + kept + "B") == "A" + kept + "B"
+
+
+# --- a name already in the library gets a number ---------------------------
+
+
+def test_a_repeat_name_is_numbered_rather_than_duplicated(library):
+    first = theme_library.create(1, "Night Owl", "graphite", {})
+    second = theme_library.create(1, "Night Owl", "graphite", {})
+    # Compared case-insensitively, so "night owl" does not slip past "Night Owl".
+    third = theme_library.create(1, "night owl", "graphite", {})
+    assert [first.name, second.name, third.name] == [
+        "Night Owl",
+        "Night Owl 2",
+        "night owl 3",
+    ]
+    names = [theme.name for theme in theme_library.list_themes(1)]
+    assert len(names) == len({name.lower() for name in names})
+
+
+def test_a_built_in_label_is_taken_too(library):
+    """Two cards both called Graphite are two cards you can only tell apart by
+    which one has a Delete on it."""
+    copy = theme_library.create(1, "Graphite", "graphite", {})
+    assert copy.name == "Graphite 2"
+    assert [theme.name for theme in theme_library.list_themes(1)] == [
+        "Graphite",
+        "Paper",
+        "Graphite 2",
+    ]
+
+
+def test_a_rename_onto_a_taken_name_is_numbered_but_a_no_op_rename_is_not(library):
+    theme_library.create(1, "Night Owl", "graphite", {})
+    other = theme_library.create(1, "Dawn", "graphite", {})
+
+    renamed = theme_library.apply_edits(1, other, name="Night Owl")
+    assert renamed.name == "Night Owl 2"
+    theme_library.write(1, renamed)
+
+    # Re-committing the name a theme already has must not number it — otherwise
+    # saving the editor twice turns "Mine" into "Mine 2".
+    again = theme_library.apply_edits(1, renamed, name="Night Owl 2")
+    assert again.name == "Night Owl 2"
+
+    # And a colour edit does not touch the name at all.
+    coloured = theme_library.apply_edits(1, again, colours={"accent": "#FF0088"})
+    assert coloured.name == "Night Owl 2"
+
+
+def test_a_numbered_name_still_fits_the_bound(library):
+    theme_library.create(1, "z" * 64, "graphite", {})
+    second = theme_library.create(1, "z" * 64, "graphite", {})
+    assert len(second.name) <= NAME_MAX
+    assert second.name.endswith(" 2")
+
+
+def test_an_import_of_a_name_already_held_is_numbered(library):
+    data = (HEADER + "\nname = Night Owl\nbase = paper\n").encode()
+    first, _ = theme_library.import_bytes(1, data, "night-owl.umbertheme")
+    second, _ = theme_library.import_bytes(1, data, "night-owl.umbertheme")
+    assert [first.name, second.name] == ["Night Owl", "Night Owl 2"]
+    # The id is freed separately, and by the other rule.
+    assert [first.id, second.id] == ["night-owl", "night-owl-2"]
+
+
+async def test_the_endpoints_never_show_one_name_twice(authed_client):
+    await authed_client.post("/api/themes", json={"name": "Night Owl"})
+    await authed_client.post("/api/themes", json={"name": "Night Owl"})
+    copied = await authed_client.post("/api/themes", json={"name": "Graphite"})
+    assert copied.json()["name"] == "Graphite 2"
+
+    listed = (await authed_client.get("/api/themes")).json()
+    names = [row["name"] for row in listed]
+    assert names == ["Graphite", "Paper", "Graphite 2", "Night Owl", "Night Owl 2"]
+
+    # A rename onto a name somebody else holds is numbered past every one of
+    # them, including the numbered ones.
+    clash = await authed_client.patch(
+        "/api/themes/graphite-2", json={"name": "Night Owl"}
+    )
+    assert clash.json()["name"] == "Night Owl 3"
+
+    # And the theme that already holds "Night Owl 2" may re-commit "Night Owl"
+    # and keep the name it has, rather than climbing to 4 every time the editor
+    # is saved: `free_name` compares against every *other* theme.
+    settled = await authed_client.patch(
+        "/api/themes/night-owl-2", json={"name": "Night Owl"}
+    )
+    assert settled.json()["name"] == "Night Owl 2"
+
+    final = [row["name"] for row in (await authed_client.get("/api/themes")).json()]
+    assert len(final) == len(set(final))
