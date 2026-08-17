@@ -18,7 +18,6 @@ import argparse
 import json
 import os
 import random
-import re
 import sys
 import uuid
 from datetime import date, datetime, timedelta, UTC
@@ -27,11 +26,6 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 BACKEND_DIR = REPO_ROOT / "backend"
-
-
-def slugify(text: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return s or "item"
 
 
 # ---------------------------------------------------------------------------
@@ -390,10 +384,22 @@ COUNTRY_LANG_OVERRIDES: dict[str, tuple[str, str]] = {
     "Downton Abbey": ("GB", "en"),
 }
 
-FLAGSHIP_SHOWS = {
-    "Breaking Bad", "Friends", "Seinfeld", "The Office", "One Piece",
-    "Attack on Titan", "Game of Thrones", "The X-Files",
+# Real season counts, so a flagship show's episodes label as e.g. "S05E01"
+# rather than a plausible-looking but wrong number a rng.randint would produce
+# (Breaking Bad seeded with 7 seasons once; it has 5). One Piece is still
+# airing, so its count is TheTVDB's season 22 as of this writing rather than a
+# fixed total.
+FLAGSHIP_SEASON_COUNTS = {
+    "Breaking Bad": 5,
+    "Friends": 10,
+    "Seinfeld": 9,
+    "The Office": 9,
+    "One Piece": 22,
+    "Attack on Titan": 4,
+    "Game of Thrones": 8,
+    "The X-Files": 11,
 }
+FLAGSHIP_SHOWS = set(FLAGSHIP_SEASON_COUNTS)
 
 DEVICES = [
     ("Chrome", "Plex Web"),
@@ -532,6 +538,7 @@ def main() -> None:
         utcnow,
     )
     from app.security import encrypt_secret, hash_password
+    from app.services.guids import ExternalIds, build_guid_key
 
     rng = random.Random(args.seed)
 
@@ -669,7 +676,7 @@ def main() -> None:
             country, language = country_lang(title, category)
             is_anime = category == "anime"
             item = MediaItem(
-                guid_key=f"seed:movie:{slugify(title)}-{year}",
+                guid_key=build_guid_key(MediaType.MOVIE.value, ExternalIds(), title=title, year=year),
                 media_type=MediaType.MOVIE,
                 title=title,
                 year=year,
@@ -717,7 +724,7 @@ def main() -> None:
             release_status = "ended" if ended else rng.choice(["airing", "airing", "ended"])
             show_created = now - timedelta(days=rng.randint(0, 900))
             show = MediaItem(
-                guid_key=f"seed:show:{slugify(title)}-{start_year}",
+                guid_key=build_guid_key(MediaType.SHOW.value, ExternalIds(), title=title, year=start_year),
                 media_type=MediaType.SHOW,
                 title=title,
                 year=start_year,
@@ -754,7 +761,7 @@ def main() -> None:
             )
 
             if title in FLAGSHIP_SHOWS:
-                n_seasons = rng.randint(5, 8)
+                n_seasons = FLAGSHIP_SEASON_COUNTS[title]
                 eps_range = (10, 22)
             else:
                 n_seasons = rng.randint(1, 4)
@@ -766,7 +773,10 @@ def main() -> None:
             for season_number in range(1, n_seasons + 1):
                 season_year = min(start_year + season_number - 1, end_year or (start_year + season_number - 1))
                 season = MediaItem(
-                    guid_key=f"seed:show:{slugify(title)}-{start_year}/s{season_number}",
+                    guid_key=build_guid_key(
+                        MediaType.SEASON.value, ExternalIds(),
+                        show_key=show.guid_key, season_number=season_number,
+                    ),
                     media_type=MediaType.SEASON,
                     title=f"Season {season_number}",
                     year=season_year,
@@ -784,9 +794,10 @@ def main() -> None:
                 leaf_count += n_episodes
                 for episode_number in range(1, n_episodes + 1):
                     episode = MediaItem(
-                        guid_key=(
-                            f"seed:show:{slugify(title)}-{start_year}"
-                            f"/s{season_number}e{episode_number}"
+                        guid_key=build_guid_key(
+                            MediaType.EPISODE.value, ExternalIds(),
+                            show_key=show.guid_key, season_number=season_number,
+                            episode_number=episode_number,
                         ),
                         media_type=MediaType.EPISODE,
                         title=rng.choice(EPISODE_TITLES),
