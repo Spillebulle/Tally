@@ -1,29 +1,35 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { UseQueryResult } from '@tanstack/react-query'
+import { Check, ChevronRight, Clock, Tv } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useAuth, useToast } from '@/lib/app-context'
-import type { ContinueWatchingItem, MediaCard } from '@/lib/types'
+import type { ContinueWatchingItem, MediaCard, StatCount } from '@/lib/types'
 import {
-  cn,
   compactNumber,
   displaySubtitle,
-  formatWatchTime,
-  posterFallbackGradient,
+  formatDateTime,
   relativeTime,
 } from '@/lib/utils'
-import { PosterRail } from '@/components/Poster'
-import { StatTile } from '@/components/Charts'
-import { EmptyState, Spinner } from '@/components/ui'
+import { Artwork, Poster, PosterSkeleton } from '@/components/Poster'
 import {
-  ChartIcon,
-  CheckIcon,
-  ClockIcon,
-  FilmIcon,
-  PlayIcon,
-  SparkIcon,
-  TvIcon,
-} from '@/components/Icons'
+  EmptyState,
+  ErrorState,
+  PageHeader,
+  Panel,
+  ProgressBar,
+  Skeleton,
+  Spinner,
+  Tile,
+} from '@/components/ui'
+
+/*
+ * The first screen: a tile grid of figures, then one panel per thing the page
+ * shows (§10). Nothing here draws its own chrome - `Tile`, `Panel`, `Poster`
+ * and the two states are the house primitives, and this file only composes
+ * them.
+ */
 
 function greeting(): string {
   const hour = new Date().getHours()
@@ -33,106 +39,289 @@ function greeting(): string {
   return 'Good evening'
 }
 
-/** Wide hero card for something the user is partway through. */
-function ContinueCard({
+/**
+ * A figure for a tile, or `null` for "nothing recorded".
+ *
+ * §7.14: an unknown value is an en dash, never a "0". The two answers look
+ * identical as digits and mean different things, and `Tile` draws the dash
+ * itself when the value is null.
+ */
+function figure(value: number | null | undefined): string | null {
+  return value != null && value > 0 ? compactNumber(value) : null
+}
+
+/** A number inside a sentence is still a figure, so it is still mono. */
+function Num({ children }: { children: React.ReactNode }) {
+  return <span className="figure">{children}</span>
+}
+
+/**
+ * Fold a daily series into a fixed number of buckets.
+ *
+ * A year of days is 365 points in 48px, which draws as noise rather than as a
+ * shape. Roughly a fortnight per bucket says "rising" or "spiky" and claims
+ * nothing more precise, which is all a sparkline is allowed to say.
+ */
+function fold(series: StatCount[], buckets = 24): number[] {
+  if (series.length < 2) return []
+  const size = Math.ceil(series.length / buckets)
+  const out: number[] = []
+  for (let index = 0; index < series.length; index += size) {
+    out.push(series.slice(index, index + size).reduce((sum, point) => sum + point.value, 0))
+  }
+  return out
+}
+
+/**
+ * §8's sparkline: 48 by 16, the accent line at 1.25px, its area at 14% and an
+ * endpoint dot. No axes, no labels, no scale of its own.
+ *
+ * `aria-hidden`, because it is redundant by construction: the figure above it
+ * and the line below it carry every number. A series that is flat at zero is
+ * drawn as nothing at all, rather than as a line implying data that is not
+ * there.
+ */
+function Sparkline({ points }: { points: number[] }) {
+  const max = Math.max(...points, 0)
+  if (points.length < 2 || max <= 0) return null
+
+  const width = 48
+  const height = 16
+  // Inset by the dot's radius at every edge, so neither the endpoint dot nor a
+  // flat maximum is clipped by the viewBox.
+  const inset = 1.5
+  const step = (width - inset * 2) / (points.length - 1)
+  const x = (index: number) => inset + index * step
+  const y = (value: number) => height - inset - (value / max) * (height - inset * 2)
+  const line = points
+    .map((value, index) => `${index === 0 ? 'M' : 'L'}${x(index).toFixed(2)},${y(value).toFixed(2)}`)
+    .join(' ')
+
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      className="block"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        d={`${line} L${x(points.length - 1).toFixed(2)},${height} L${x(0).toFixed(2)},${height} Z`}
+        className="fill-accent"
+        // The area alpha is a token, and an opacity modifier on a token colour
+        // emits no CSS at all. See docs/interface.md.
+        style={{ fillOpacity: 'var(--area-alpha)' }}
+      />
+      <path
+        d={line}
+        fill="none"
+        className="stroke-accent"
+        strokeWidth={1.25}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle
+        cx={x(points.length - 1)}
+        cy={y(points[points.length - 1])}
+        r={1.5}
+        className="fill-accent"
+      />
+    </svg>
+  )
+}
+
+/* ── Continue watching ───────────────────────────────────────────────────── */
+
+/**
+ * One thing the viewer is partway through: the artwork, what it is, how far in
+ * and a mark-as-watched.
+ *
+ * A row rather than the old hero card. Six of them are the point of the screen,
+ * and rows put six on the fold where cards put three.
+ */
+function ContinueRow({
   entry,
   onMarkWatched,
-  markingId = null,
+  marking,
 }: {
   entry: ContinueWatchingItem
   onMarkWatched: (card: MediaCard) => void
-  /** Item whose mark-as-watched is in flight, if any. */
-  markingId?: number | null
+  /** True while this row's mark-as-watched is in flight. */
+  marking: boolean
 }) {
   const target = entry.next_episode ?? entry.item
-  const poster = entry.item.poster_url ?? entry.show?.poster_url
+  const poster = entry.item.poster_url ?? entry.show?.poster_url ?? null
   const heading = entry.show?.title ?? entry.item.show_title ?? entry.item.title
   const sub = entry.next_episode
     ? `Up next · ${displaySubtitle(entry.next_episode)}`
     : displaySubtitle(entry.item)
 
+  // The rail reads the resume position in both shapes; the label beside it says
+  // which question it is answering, exactly as it did before. Only the numbers
+  // are mono: a whole phrase set in the figure face reads as a code.
+  const progressLabel = entry.next_episode ? (
+    <>
+      <Num>{entry.item.watched_episodes ?? 0}</Num>/
+      <Num>{entry.item.total_episodes ?? '?'}</Num> episodes
+    </>
+  ) : (
+    <>
+      <Num>{Math.round(entry.progress_percent)}%</Num> watched
+    </>
+  )
+
   return (
-    <article
-      className="group card flex gap-4 overflow-hidden p-3 transition-all duration-300
-                 ease-spring hover:-translate-y-0.5 hover:shadow-lift"
+    <div
+      className="group/row flex items-center gap-3 rounded-ctl p-2 transition-colors
+                 duration-hover ease-ease hover:bg-control-hover"
     >
-      <Link
-        to={`/item/${target.id}`}
-        className="relative h-[132px] w-[88px] shrink-0 overflow-hidden rounded-lg bg-raised"
-        style={poster ? undefined : { background: posterFallbackGradient(heading) }}
-      >
-        {poster && (
-          <img src={poster} alt="" loading="lazy" className="h-full w-full object-cover" />
-        )}
-        <span
-          className="absolute inset-0 grid place-items-center bg-black/45 opacity-0
-                     transition-opacity group-hover:opacity-100"
-        >
-          <PlayIcon className="text-2xl text-white" />
-        </span>
+      <Link to={`/item/${target.id}`} tabIndex={-1} aria-hidden="true" className="shrink-0">
+        <Artwork
+          src={poster}
+          title={heading}
+          showTitle={false}
+          className="h-[60px] w-10 rounded-tight"
+        />
       </Link>
 
-      <div className="flex min-w-0 flex-1 flex-col justify-between py-0.5">
-        <div className="min-w-0">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
           <Link
             to={`/item/${target.id}`}
-            className="line-clamp-1 font-medium text-ink hover:text-accent"
+            className="line-clamp-1 min-w-0 flex-1 text-body font-semibold text-strong
+                       transition-colors duration-hover hover:text-accent"
           >
             {heading}
           </Link>
-          <p className="mt-0.5 line-clamp-1 text-sm text-muted">{sub}</p>
-          {entry.item.is_anime && (
-            <span className="mt-2 inline-flex items-center gap-1 rounded-md bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">
-              <SparkIcon className="text-[11px]" />
-              Anime
-            </span>
-          )}
+          <span
+            className="shrink-0 text-tiny text-dim"
+            title={
+              entry.resumed_at
+                ? `Last played ${formatDateTime(entry.resumed_at)}`
+                : 'No play recorded.'
+            }
+          >
+            {relativeTime(entry.resumed_at)}
+          </span>
         </div>
 
-        <div className="mt-3">
-          <div className="flex items-center justify-between gap-2 text-[11px] text-muted">
-            <span>
-              {entry.next_episode
-                ? `${entry.item.watched_episodes ?? 0}/${entry.item.total_episodes ?? '?'} episodes`
-                : `${Math.round(entry.progress_percent)}% watched`}
-            </span>
-            <span>{relativeTime(entry.resumed_at)}</span>
-          </div>
-          <div className="mt-1.5 flex items-center gap-2">
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
-              <div
-                className="h-full rounded-full bg-accent transition-[width] duration-700 ease-spring"
-                style={{ width: `${Math.max(2, Math.min(100, entry.progress_percent))}%` }}
-              />
-            </div>
-            <button
-              type="button"
-              onClick={() => onMarkWatched(target)}
-              disabled={markingId === target.id}
-              className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-muted
-                         transition-colors hover:bg-raised hover:text-good"
-              title={markingId === target.id ? 'Marking as watched…' : 'Mark as watched'}
-              aria-label={
-                markingId === target.id
-                  ? `Marking ${target.title} as watched`
-                  : `Mark ${target.title} as watched`
-              }
-            >
-              {markingId === target.id ? (
-                <Spinner className="text-base" />
-              ) : (
-                <CheckIcon className="text-base" />
-              )}
-            </button>
-          </div>
+        <div className="mt-0.5 flex items-center gap-2">
+          {/* The badge sits beside the subtitle, not at the row's far edge:
+              flex-1 on the text would push it half a card away from the thing
+              it labels. */}
+          <span className="truncate text-small text-muted">{sub}</span>
+          {entry.item.is_anime && <span className="badge shrink-0">Anime</span>}
+        </div>
+
+        {/* The rail is a fixed 120px rather than the row's whole width: a rail
+            that runs the length of the card reads as a slider, and it pushes
+            the reading of it half a screen away from what it measures. */}
+        <div className="mt-1.5 flex items-center gap-2">
+          <ProgressBar className="w-[120px] shrink-0" fraction={entry.progress_percent / 100} />
+          <span className="truncate text-tiny text-dim">{progressLabel}</span>
         </div>
       </div>
-    </article>
+
+      <button
+        type="button"
+        onClick={() => onMarkWatched(target)}
+        disabled={marking}
+        className="btn-icon shrink-0"
+        title={marking ? 'Marking as watched.' : 'Mark as watched'}
+        aria-label={
+          marking ? `Marking ${target.title} as watched` : `Mark ${target.title} as watched`
+        }
+      >
+        {marking ? <Spinner className="text-body" /> : <Check size={16} />}
+      </button>
+    </div>
   )
 }
 
 /** Keep the fold useful: the rest of the dashboard should stay reachable. */
 const CONTINUE_LIMIT = 6
+
+/* ── Poster rails ────────────────────────────────────────────────────────── */
+
+/**
+ * A panel holding a horizontally scrolling row of poster cards.
+ *
+ * Composed here rather than taken from `PosterRail` for one reason: that
+ * component has no error branch, and a failed request must not render as an
+ * empty rail that quietly disappears.
+ */
+function RailPanel({
+  title,
+  query,
+  commands,
+  onQuickWatch,
+  quickWatchPendingId = null,
+}: {
+  title: string
+  query: UseQueryResult<MediaCard[]>
+  commands?: React.ReactNode
+  onQuickWatch?: (card: MediaCard) => void
+  quickWatchPendingId?: number | null
+}) {
+  const cards = query.data ?? []
+
+  if (query.isError) {
+    return (
+      <Panel title={title}>
+        <ErrorState error={query.error} onRetry={() => query.refetch()} />
+      </Panel>
+    )
+  }
+
+  // Nothing to show and nothing on the way: the panel says nothing at all
+  // rather than standing there empty, which is how this page has always
+  // behaved.
+  if (!query.isLoading && cards.length === 0) return null
+
+  return (
+    <Panel
+      title={title}
+      count={query.isLoading ? undefined : cards.length}
+      commands={commands}
+    >
+      {/* The padding is room for the keyboard focus ring, not spacing:
+          `scroll-x` clips on both axes (see index.css), and a ring on a flush
+          tile would be cut on every edge. Each padding is taken straight back
+          as a negative margin, so nothing moves. */}
+      <div className="scroll-x scrollbar-none -mx-1 -my-1 flex gap-3 px-1 py-1">
+        {(query.isLoading ? Array.from({ length: 8 }) : cards).map((card, index) => (
+          <div
+            key={query.isLoading ? index : (card as MediaCard).id}
+            className="w-[130px] shrink-0 sm:w-[140px]"
+          >
+            {query.isLoading ? (
+              <PosterSkeleton />
+            ) : (
+              <Poster
+                card={card as MediaCard}
+                onQuickWatch={onQuickWatch}
+                quickWatchPending={quickWatchPendingId === (card as MediaCard).id}
+              />
+            )}
+          </div>
+        ))}
+      </div>
+    </Panel>
+  )
+}
+
+/** A panel head command that goes somewhere else on the page. */
+function GoTo({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <Link to={to} className="btn-ghost px-2">
+      {children}
+      <ChevronRight size={16} aria-hidden="true" />
+    </Link>
+  )
+}
+
+/* ── The page ────────────────────────────────────────────────────────────── */
 
 export function Dashboard() {
   const { user } = useAuth()
@@ -171,177 +360,227 @@ export function Dashboard() {
     },
     onError: (error: Error) => notify(error.message, 'error'),
   })
+  const markingId = markWatched.isPending ? markWatched.variables.id : null
 
   const visibleContinue = showAllContinue
     ? (continueWatching.data ?? [])
     : (continueWatching.data ?? []).slice(0, CONTINUE_LIMIT)
 
+  // Only a *successful* summary can say the library is empty. A failed one
+  // says nothing, so a 500 cannot tell the user to go and set up Plex again.
   const libraryEmpty =
     summary.isSuccess &&
     summary.data.library_movies === 0 &&
     summary.data.library_shows === 0
 
   const name = user?.display_name || user?.username || ''
+  const hours = stats.data ? Math.round(stats.data.total_runtime_minutes / 60) : 0
+  const plays = fold(stats.data?.activity_by_day ?? [])
+
+  // A "0" here would say the opposite of what the tiles below say with an en
+  // dash, and the two are the same fact.
+  const subtitle = stats.isError ? (
+    'Your viewing figures could not be loaded.'
+  ) : !stats.data ? (
+    'Reading your viewing history.'
+  ) : stats.data.watch_events === 0 ? (
+    'Nothing has been logged over the past year.'
+  ) : (
+    <>
+      <Num>{compactNumber(stats.data.watch_events)}</Num> plays and{' '}
+      <Num>{compactNumber(hours)}</Num> hours over the past year.
+    </>
+  )
 
   return (
-    <div className="space-y-10">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-ink sm:text-[28px]">
-          {greeting()}
-          {name ? `, ${name.split(' ')[0]}` : ''}
-        </h1>
-        <p className="mt-1 text-sm text-muted">
-          {stats.data
-            ? `${compactNumber(stats.data.watch_events)} plays logged over the past year · ${formatWatchTime(stats.data.total_runtime_minutes)} of screen time`
-            : 'Loading your viewing history…'}
-        </p>
-      </div>
+    <div className="space-y-3">
+      <PageHeader
+        title={`${greeting()}${name ? `, ${name.split(' ')[0]}` : ''}`}
+        subtitle={subtitle}
+      />
 
       {libraryEmpty && (
-        <EmptyState
-          icon={<TvIcon />}
-          title="Your library is empty"
-          description="Connect your Plex server and run a first sync to import everything you have watched."
-          action={
-            <Link to="/settings" className="btn-primary mt-2">
-              Set up Plex
-            </Link>
-          }
-        />
+        <div className="card">
+          <EmptyState
+            icon={<Tv size={24} />}
+            title="Your library is empty"
+            description="Connect your Plex server and run a first sync to import everything you have watched."
+            action={
+              <Link to="/settings" className="btn-primary">
+                Set up Plex
+              </Link>
+            }
+          />
+        </div>
       )}
 
-      {/* Continue watching */}
-      {(continueWatching.isLoading || (continueWatching.data?.length ?? 0) > 0) && (
-        <section className="animate-fade-up">
-          <div className="mb-3 flex items-baseline justify-between gap-4">
-            <h2 className="text-lg font-semibold tracking-tight text-ink">
-              Continue watching
-            </h2>
-            {(continueWatching.data?.length ?? 0) > CONTINUE_LIMIT && (
+      {/* At a glance. Six figures, reflowing from 180px (§7.14). */}
+      {stats.isError ? (
+        <div className="card">
+          <ErrorState
+            error={stats.error}
+            title="Could not load your figures"
+            onRetry={() => stats.refetch()}
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
+          {stats.isLoading || !stats.data
+            ? Array.from({ length: 6 }, (_, index) => (
+                <Skeleton key={index} className="h-[82px] rounded-card" />
+              ))
+            : [
+                {
+                  eyebrow: 'Plays logged',
+                  value: figure(stats.data.watch_events),
+                  detail: 'Over the past 12 months.',
+                  spark: <Sparkline points={plays} />,
+                },
+                {
+                  eyebrow: 'Screen time',
+                  value: figure(hours),
+                  detail: 'Hours, over the past 12 months.',
+                },
+                {
+                  eyebrow: 'Films',
+                  value: figure(stats.data.total_movies_watched),
+                  detail: 'Watched in the past 12 months.',
+                },
+                {
+                  eyebrow: 'Episodes',
+                  value: figure(stats.data.total_episodes_watched),
+                  detail: 'Watched in the past 12 months.',
+                },
+                {
+                  eyebrow: 'Anime plays',
+                  value: figure(stats.data.total_anime_watched),
+                  detail: summary.data?.library_anime ? (
+                    <>
+                      <Num>{compactNumber(summary.data.library_anime)}</Num> titles in your
+                      library.
+                    </>
+                  ) : (
+                    'Over the past 12 months.'
+                  ),
+                },
+                {
+                  eyebrow: 'Current streak',
+                  value: figure(stats.data.current_streak_days),
+                  detail: stats.data.longest_streak_days > 0 ? (
+                    <>
+                      Days in a row. Longest is <Num>{stats.data.longest_streak_days}</Num>.
+                    </>
+                  ) : (
+                    'Days in a row.'
+                  ),
+                },
+              ].map((tile) => (
+                <Tile
+                  key={tile.eyebrow}
+                  eyebrow={tile.eyebrow}
+                  value={tile.value}
+                  detail={tile.detail}
+                  spark={tile.spark}
+                />
+              ))}
+        </div>
+      )}
+
+      {/* Continue watching. Hidden entirely when there is nothing part-watched,
+          which is the behaviour this panel has always had. */}
+      {continueWatching.isError ? (
+        <Panel title="Continue watching">
+          <ErrorState
+            error={continueWatching.error}
+            onRetry={() => continueWatching.refetch()}
+          />
+        </Panel>
+      ) : continueWatching.isLoading || (continueWatching.data?.length ?? 0) > 0 ? (
+        <Panel
+          title="Continue watching"
+          count={continueWatching.isLoading ? undefined : continueWatching.data?.length}
+          commands={
+            (continueWatching.data?.length ?? 0) > CONTINUE_LIMIT && (
               <button
                 type="button"
                 onClick={() => setShowAllContinue((value) => !value)}
-                className="text-sm text-muted hover:text-accent"
+                className="btn-ghost px-2"
               >
-                {showAllContinue
-                  ? 'Show fewer'
-                  : `Show all ${continueWatching.data?.length}`}
+                {showAllContinue ? 'Show fewer' : `Show all ${continueWatching.data?.length}`}
               </button>
-            )}
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            )
+          }
+          bodyClassName="p-1.5"
+        >
+          <div className="grid gap-0.5 sm:grid-cols-2 xl:grid-cols-3">
             {continueWatching.isLoading
-              ? Array.from({ length: 3 }, (_, index) => (
-                  <div key={index} className="skeleton h-[156px] rounded-2xl" />
+              ? Array.from({ length: 4 }, (_, index) => (
+                  <Skeleton key={index} className="h-[76px]" />
                 ))
               : visibleContinue.map((entry) => (
-                  <ContinueCard
+                  <ContinueRow
                     key={`${entry.item.id}-${entry.next_episode?.id ?? 'self'}`}
                     entry={entry}
                     onMarkWatched={(card) => markWatched.mutate(card)}
-                    markingId={markWatched.isPending ? markWatched.variables.id : null}
+                    marking={markingId === (entry.next_episode ?? entry.item).id}
                   />
                 ))}
           </div>
-        </section>
-      )}
+        </Panel>
+      ) : null}
 
-      {/* At-a-glance figures */}
-      {stats.data && (
-        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <StatTile
-            label="Movies watched"
-            value={compactNumber(stats.data.total_movies_watched)}
-            hint="Past 12 months"
-            icon={<FilmIcon />}
-          />
-          <StatTile
-            label="Episodes watched"
-            value={compactNumber(stats.data.total_episodes_watched)}
-            hint="Past 12 months"
-            icon={<TvIcon />}
-          />
-          <StatTile
-            label="Anime plays"
-            value={compactNumber(stats.data.total_anime_watched)}
-            hint={`${summary.data?.library_anime ?? 0} titles in your library`}
-            icon={<SparkIcon />}
-          />
-          <StatTile
-            label="Current streak"
-            value={`${stats.data.current_streak_days} ${stats.data.current_streak_days === 1 ? 'day' : 'days'}`}
-            hint={`Longest: ${stats.data.longest_streak_days} days`}
-            icon={<ClockIcon />}
-            accent={stats.data.current_streak_days > 0}
-          />
-        </section>
-      )}
-
-      <PosterRail
+      <RailPanel
         title="Recently watched"
-        cards={recentlyWatched.data ?? []}
-        loading={recentlyWatched.isLoading}
-        action={
-          <Link to="/history" className="text-sm text-muted hover:text-accent">
-            All history →
-          </Link>
-        }
+        query={recentlyWatched}
+        commands={<GoTo to="/history">All history</GoTo>}
       />
 
-      <PosterRail
+      <RailPanel
         title="Recently added to Plex"
-        cards={recentlyAdded.data ?? []}
-        loading={recentlyAdded.isLoading}
+        query={recentlyAdded}
         onQuickWatch={(card) => markWatched.mutate(card)}
-        quickWatchPendingId={markWatched.isPending ? markWatched.variables.id : null}
+        quickWatchPendingId={markingId}
       />
 
-      <PosterRail
+      <RailPanel
         title="New anime"
-        cards={recentAnime.data ?? []}
-        loading={recentAnime.isLoading}
-        action={
-          <Link to="/anime" className="text-sm text-muted hover:text-accent">
-            Browse anime →
-          </Link>
-        }
+        query={recentAnime}
+        commands={<GoTo to="/anime">Browse anime</GoTo>}
         onQuickWatch={(card) => markWatched.mutate(card)}
-        quickWatchPendingId={markWatched.isPending ? markWatched.variables.id : null}
+        quickWatchPendingId={markingId}
       />
 
       {stats.data && stats.data.top_genres.length > 0 && (
-        <section className="animate-fade-up">
-          <div className="mb-3 flex items-baseline justify-between gap-4">
-            <h2 className="text-lg font-semibold tracking-tight text-ink">
-              What you gravitate to
-            </h2>
-            <Link to="/stats" className="text-sm text-muted hover:text-accent">
-              Full stats →
-            </Link>
-          </div>
+        <Panel
+          title="What you gravitate to"
+          commands={<GoTo to="/stats">Full stats</GoTo>}
+        >
           <div className="flex flex-wrap gap-2">
-            {stats.data.top_genres.slice(0, 10).map((genre, index) => (
+            {stats.data.top_genres.slice(0, 10).map((genre) => (
               <Link
                 key={genre.label}
                 // /browse: the counts behind these chips include shows and
                 // episodes, and /movies would also drop anime entirely.
                 to={`/browse?genre=${encodeURIComponent(genre.label)}`}
-                className={cn('chip', index === 0 && 'chip-active')}
+                className="chip transition-colors duration-hover ease-ease
+                           hover:border-line-dashed hover:text-strong"
               >
                 {genre.label}
-                <span className="tabular-nums text-muted">{genre.value}</span>
+                <span className="figure text-dim">{genre.value}</span>
               </Link>
             ))}
           </div>
-        </section>
+        </Panel>
       )}
 
       {!libraryEmpty && !stats.isLoading && stats.data?.watch_events === 0 && (
-        <EmptyState
-          icon={<ChartIcon />}
-          title="Nothing logged yet"
-          description="Once you watch something on Plex — or mark it watched here — it will show up in your history and stats."
-        />
+        <div className="card">
+          <EmptyState
+            icon={<Clock size={24} />}
+            title="Nothing logged yet"
+            description="Once you watch something on Plex, or mark it watched here, it will show up in your history and stats."
+          />
+        </div>
       )}
     </div>
   )
