@@ -114,41 +114,57 @@
 
   /* ── Buttons ─────────────────────────────────────────────────────────── */
 
+  /*
+   * §7.6: a disabled control is at 45 % and carries a tooltip saying why.
+   *
+   * It used to carry `disabled:pointer-events-none` as well, which made that
+   * tooltip unreachable: no pointer events means no hover, so the browser never
+   * shows the `title`, and nine explanations on the settings page alone were
+   * decorative. A disabled `<button>` *does* receive `mouseover` when its
+   * pointer events are left alone - checked in this project's own Chromium
+   * rather than assumed - and the `disabled` attribute is what refuses the
+   * click, so nothing needed `pointer-events` to be safe.
+   *
+   * Every variant's hover is therefore gated on `enabled:`, or a disabled
+   * control that can now be hovered would light up as though it were live.
+   * A control that cannot be given a real `disabled` attribute (an anchor, a
+   * wrapper) states its reason on the wrapping element instead.
+   */
   .btn {
     @apply inline-flex h-button select-none items-center justify-center gap-2 rounded-ctl
            px-3 text-control transition-colors duration-hover ease-ease
-           disabled:pointer-events-none disabled:opacity-45;
+           disabled:cursor-not-allowed disabled:opacity-45;
   }
 
   /* At most one visible per view. It is the one thing to do here. */
   .btn-primary {
-    @apply btn bg-accent font-semibold text-accent-ink hover:brightness-110;
+    @apply btn bg-accent font-semibold text-accent-ink enabled:hover:brightness-110;
   }
 
   .btn-secondary {
-    @apply btn bg-control text-fg hover:bg-control-hover;
+    @apply btn bg-control text-fg enabled:hover:bg-control-hover;
   }
 
   /* For use inside a well or on `dock`, where a filled button would vanish. */
   .btn-outline {
-    @apply btn border border-line bg-transparent text-fg hover:border-line-dashed;
+    @apply btn border border-line bg-transparent text-fg enabled:hover:border-line-dashed;
   }
 
   .btn-ghost {
-    @apply btn bg-transparent text-muted hover:text-strong;
+    @apply btn bg-transparent text-muted enabled:hover:text-strong;
   }
 
   /* Destructive. Always paired with a sentence saying what is lost. */
   .btn-danger {
-    @apply btn border border-critical-line bg-critical-bg text-critical hover:brightness-110;
+    @apply btn border border-critical-line bg-critical-bg text-critical enabled:hover:brightness-110;
   }
 
   /* Icon-only, 26px square. Always tooltipped: an icon without a label is a
      guess until it has one. */
   .btn-icon {
     @apply inline-grid h-button w-button place-items-center rounded-ctl text-muted
-           transition-colors duration-hover ease-ease hover:bg-control-hover
-           hover:text-strong disabled:pointer-events-none disabled:opacity-45;
+           transition-colors duration-hover ease-ease enabled:hover:bg-control-hover
+           enabled:hover:text-strong disabled:cursor-not-allowed disabled:opacity-45;
   }
 
   /* ── Fields ──────────────────────────────────────────────────────────── */
