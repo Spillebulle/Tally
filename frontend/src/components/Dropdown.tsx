@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom'
 import { Check, ChevronDown, Minus, Search } from 'lucide-react'
 import type { MultiValue } from '@/lib/browse-filters'
 import { cn } from '@/lib/utils'
-import { CheckboxMark, Segmented } from './ui'
+import { CheckboxMark, Segmented, TOP_LAYER_ATTR } from './ui'
 
 /**
  * The one dropdown in the app (§7.7).
@@ -165,37 +165,56 @@ function panelStyle(rect: DOMRect, exactWidth: boolean, height: number): CSSProp
   // A bordered trigger gets a list of its own width, floored at the menu
   // minimum: a narrow filter trigger would otherwise hand its search field a
   // 90px list. A bare trigger's list is its width or wider, up to 240.
-  const width = exactWidth
-    ? Math.max(rect.width, MENU_MIN)
-    : Math.min(Math.max(rect.width, MENU_MIN), BARE_MAX)
-  if (exactWidth) style.width = width
+  const exact = Math.max(rect.width, MENU_MIN)
+  const bareCap = Math.min(BARE_MAX, window.innerWidth - 2 * EDGE)
+  if (exactWidth) style.width = exact
   else {
     style.minWidth = rect.width
-    style.maxWidth = Math.min(BARE_MAX, window.innerWidth - 2 * EDGE)
+    style.maxWidth = bareCap
   }
 
-  // Left edges aligned, unless that would push the list off screen. The test
-  // uses the width the panel may actually reach, not the floor: a bare panel
-  // rendering at 240 against a 190 test sat flush to the window edge.
-  if (rect.left + width > window.innerWidth - EDGE) {
+  // Left edges aligned, unless the panel would then cross the right edge. The
+  // test is the width the panel can actually *reach*, which for a bare panel is
+  // its cap and not the 190 floor: the floor is only what a narrow trigger is
+  // widened to, and a long option label grows the panel past it on the same
+  // frame. Measured against the floor: a 60px bare trigger at x=795 in a 1000px
+  // window opened a 222px panel 17px past the right edge — and `BrowseFilters`
+  // makes the whole filter strip bare, so that is the live configuration.
+  // `bordered` never showed it because its width is applied exactly.
+  const reach = exactWidth ? exact : bareCap
+  if (rect.left + reach > window.innerWidth - EDGE) {
+    // Pinned no closer than EDGE to the window, which is *not* quite "right
+    // edges aligned to the trigger": the `Math.max` floors the inset at 8px, so
+    // a trigger with less than 8px of margin gets a panel a little inboard of it
+    // — measured 7px inboard for a trigger 1px from the edge. §7.7's "never let
+    // it be clipped" outranks its "right edges aligned" in that corner, and no
+    // page here puts a trigger inside 8px of the window edge. Alignment is
+    // exact for every trigger that has 8px or more of margin, which is all of
+    // them.
     style.right = Math.max(EDGE, window.innerWidth - rect.right)
   } else {
     style.left = rect.left
   }
 
   // 4px below, or flipped 4px above when the room below has run out. Whichever
-  // side is taken, the panel is then clamped into it: nothing here may leave
-  // the viewport, because the search field and the first rows are at the top
-  // and a panel hanging past it cannot be reached at all. Measured before
-  // this: 69px off the top of a 500px window.
+  // side is taken, the panel is then clamped to *that side's* room: nothing here
+  // may leave the viewport, because the search field and the first rows are at
+  // the top and a panel hanging past it cannot be reached at all. Measured
+  // before this: 69px off the top of a 500px window.
+  //
+  // The clamp is the side's real room and nothing else. A 120px floor stood here
+  // and won over the room whenever neither side had 120 — which is a very short
+  // window, but at 240px tall it put the flipped panel's top at -14. A short
+  // list is answered by the list scrolling inside itself, never by the panel
+  // overflowing.
   const below = window.innerHeight - rect.bottom - 4 - EDGE
   const above = rect.top - 4 - EDGE
   if (height <= below || below >= above) {
     style.top = rect.bottom + 4
-    style.maxHeight = Math.max(120, below)
+    style.maxHeight = Math.max(0, below)
   } else {
     style.bottom = window.innerHeight - rect.top + 4
-    style.maxHeight = Math.max(120, above)
+    style.maxHeight = Math.max(0, above)
   }
   return style
 }
@@ -233,8 +252,15 @@ function DropdownShell({
   variant?: 'bordered' | 'bare'
   /**
    * Fill the line the control stands on, and open a list of the same width.
-   * A form row and a filter that is alone on its line both want this; §7.7
-   * calls it "full when alone on a line".
+   * §7.7 calls it "full when alone on a line".
+   *
+   * **Nothing passes it.** Every dropdown on screen today sits in a row and is
+   * sized to its content: `BrowseFilters` says so at its call site, and the one
+   * dropdown in a settings form row is given a fixed `w-[8.5rem]` instead. So
+   * this is an offered shape, not a shape in use — worth keeping, because the
+   * width has to be a prop rather than a `className` (`cn` is a plain join, and
+   * a caller's class only sits beside the built-in one and loses to whichever
+   * CSS rule is later), but it must not be described as a case that has landed.
    */
   fullWidth?: boolean
   triggerClassName?: string
@@ -400,6 +426,12 @@ function DropdownShell({
             style={style}
             onKeyDown={onKeyDown}
             onBlur={onBlur}
+            // Says "there is a layer above you" to anything that owns the
+            // keyboard underneath — `Dialog`, today. Being portalled is what
+            // makes the mark necessary: a modal decides what is inside itself
+            // with `contains()`, and this panel is a sibling of the backdrop
+            // however plainly it sits on top of the dialog. See TOP_LAYER_ATTR.
+            {...{ [TOP_LAYER_ATTR]: '' }}
             className="menu z-50 flex flex-col motion-safe:animate-rise"
           >
             {children({ close })}
@@ -482,7 +514,7 @@ export function Select({
   placeholder?: string
   className?: string
   variant?: 'bordered' | 'bare'
-  /** Fill the line: a form row, or a filter alone on its line (§7.7). */
+  /** Fill the line (§7.7). Offered; no caller passes it — see `DropdownShell`. */
   fullWidth?: boolean
 }) {
   const current = options.find((option) => option.value === value)
@@ -630,7 +662,7 @@ export function MultiSelect({
   /** Draws an option as something other than its plain text — a badge, say. */
   renderOption?: (option: DropdownOption) => ReactNode
   variant?: 'bordered' | 'bare'
-  /** Fill the line: a form row, or a filter alone on its line (§7.7). */
+  /** Fill the line (§7.7). Offered; no caller passes it — see `DropdownShell`. */
   fullWidth?: boolean
 }) {
   const known = new Map(options.map((option) => [option.value, option.label]))
