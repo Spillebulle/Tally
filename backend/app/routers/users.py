@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from ..deps import AdminUser, CurrentUser, DbSession
 from ..models import User
 from ..schemas import UserOut, UserPreferences, UserUpdate
+from ..services.theme_library import load as load_theme
 from ..timezones import is_valid as is_valid_timezone
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -25,6 +26,12 @@ DEFAULT_PREFERENCES = {
     # every timestamp is stored as — right for the database, wrong for "what
     # did I watch on Tuesday?" anywhere but Greenwich.
     "timezone": None,
+    # The custom theme applied, by its id in `$DATA_DIR/themes/<user_id>/`.
+    # None means a built-in, and `theme` above (dark / light / system) decides
+    # which — a custom theme is a fourth choice beside those three, not a
+    # modifier of them, because its `base` also settles whether the page is
+    # dark. See `docs/themes.md`.
+    "theme_id": None,
 }
 
 
@@ -61,6 +68,16 @@ async def update_preferences(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             f"Unknown timezone {updates['timezone']!r}",
+        )
+    # Same rule as the timezone, one step further: an id this account does not
+    # have would be a theme the resolver 404s on every page load, leaving the
+    # interface in whatever the built-in preference last said while the settings
+    # screen claims a custom theme is applied. None stays valid: it *means* a
+    # built-in.
+    if updates.get("theme_id") is not None and load_theme(user.id, updates["theme_id"]) is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"No theme called {updates['theme_id']!r}",
         )
     # Reassign rather than mutate: SQLAlchemy won't flag an in-place JSON edit.
     user.preferences = {**DEFAULT_PREFERENCES, **(user.preferences or {}), **updates}

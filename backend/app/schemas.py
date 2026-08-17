@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import ApiKeyScope, MediaType, WatchSource, WatchStatus
+from .services.themes import SLUG_MAX as THEME_ID_MAX
 
 
 class ORMModel(BaseModel):
@@ -69,6 +70,9 @@ class UserPreferences(BaseModel):
     separate_anime: bool | None = None
     default_view: str | None = None
     theme: str | None = None
+    # A custom theme's id, or None for a built-in. Validated in the router,
+    # which is the only place that can see whether this account has that file.
+    theme_id: str | None = Field(None, max_length=THEME_ID_MAX)
     # IANA name ("Europe/Oslo"). None means UTC — see `app/timezones.py` and the
     # stats router, which bucket days in this zone. Validated in the router
     # rather than here, so an unloadable zone is a 422 and not a silent UTC.
@@ -1083,6 +1087,79 @@ class SavedViewOut(ORMModel):
     query: str
     created_at: datetime
     updated_at: datetime
+
+
+# --- themes ---------------------------------------------------------------
+#
+# The wire shapes for `routers/themes.py`. Deliberately thin: the format is
+# STYLE-GUIDE §3.2 and lives in `services/themes.py`, and a second definition of
+# it here — a model per colour key, say — would be a second thing to keep in
+# step with a file format that may never change.
+
+
+#: What a name may *arrive* as. The format's own bound is 64 characters and it
+#: is applied by cutting, not by refusing — §3.2 holds a name "to the same bound
+#: in both directions", so a long one is trimmed rather than rejected. This is
+#: only here to stop a megabyte of text being carried around to be cut to 64.
+THEME_NAME_INPUT_MAX = 512
+
+
+class ThemeSummary(BaseModel):
+    """A row in the theme picker."""
+
+    id: str
+    name: str
+    base: str
+    #: Compiled in, read-only, and not in the library directory. Spelled the
+    #: way the User flags are (`is_admin`, `is_active`), because a bare
+    #: `builtin` reads as a noun in a payload full of them.
+    is_builtin: bool
+    #: Whether the base is a dark theme. The client stamps `class="dark"` or
+    #: `"light"` to match, because `tokens.css` carries values that are not
+    #: among the twenty-seven and still differ by theme.
+    dark: bool
+
+
+class ThemeDetail(ThemeSummary):
+    """A theme with its twenty-seven stored keys, for the editor."""
+
+    colours: dict[str, str]
+
+
+class ThemeCreate(BaseModel):
+    """Copy `source_id` under a new name — the only way to make a theme.
+
+    `source_id` defaults to the family's dark built-in so a bare "new theme"
+    still means something; the interface sends whatever is currently applied.
+    """
+
+    name: str = Field(min_length=1, max_length=THEME_NAME_INPUT_MAX)
+    source_id: str = Field("graphite", max_length=THEME_ID_MAX)
+
+
+class ThemePatch(BaseModel):
+    """Rename, write some colours, or both. An absent field does not change.
+
+    `colours` is a partial table: only the keys sent are written, so the editor
+    can save one swatch without shipping the other twenty-six back.
+    """
+
+    name: str | None = Field(None, min_length=1, max_length=THEME_NAME_INPUT_MAX)
+    colours: dict[str, str] | None = None
+
+
+class ThemeImported(BaseModel):
+    """The imported theme, and how much of the file could not be read.
+
+    `skipped_lines` is the whole reason this is not just `ThemeDetail`: §3.2 says an
+    import that loses something must say so, and a 200 with no detail would
+    swallow it.
+    """
+
+    theme: ThemeDetail
+    #: Named for what it counts rather than for what happened to it, because
+    #: the interface has to put the number in a sentence.
+    skipped_lines: int
 
 
 PlexAuthPoll.model_rebuild()
