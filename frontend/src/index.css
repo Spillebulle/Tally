@@ -283,7 +283,7 @@
      the page (a drawer, a sheet, a lightbox) must dim it by the same amount,
      and two different alphas read as two different depths. */
   .dialog-backdrop {
-    background: color-mix(in oklab, var(--backdrop) 60%, transparent);
+    background: var(--scrim);
   }
 
   /* A floating panel: the drawer on a narrow screen, an undocked module. */

@@ -45,20 +45,15 @@
   --plex-ink: #1b1200;
 
   /*
-   * Sequential ramp for the activity heatmap: five steps of the accent, per
-   * STYLE-GUIDE §8. Zero is `--control`, not the lightest step, so "nothing
-   * happened" and "a little happened" cannot be confused. Mixed against
-   * `--chrome` rather than left translucent, because the cells sit on a card
-   * and a translucent fill would pick up whatever is behind it.
-   */
-  /*
-   * Two tokens the house file does not carry, defined once rather than per
-   * theme. A `color-mix` over other variables resolves lazily, at the point it
-   * is used, so these follow `--critical` and `--chrome` into the light theme
-   * without being restated there. Restating them would be the more obvious
-   * thing to do and would be a second copy to keep in step.
+   * `--critical-line` is defined once rather than per theme. A `color-mix` over
+   * other variables resolves lazily, at the point it is used, so it follows
+   * `--critical` into the light theme without being restated there. Restating
+   * it would be the more obvious thing to do and would be a second copy to
+   * keep in step. `--scrim` below is the counter-example: it cannot be left to
+   * resolve, because a light theme's dim has to come from its ink and not from
+   * its ground.
    *
-   * `--critical-line` is the danger button's border: STYLE-GUIDE §7.6 asks for
+   * It is the danger button's border: STYLE-GUIDE §7.6 asks for
    * the critical hue at 40 %, and `--caution` has such a token while
    * `--critical` does not. It is mixed against `--critical-bg`, the fill it is
    * drawn on, rather than left translucent, because a 1 px translucent border
@@ -79,6 +74,25 @@
    */
   --brand-ink: #ffffff;
 
+  /*
+   * The dim behind a modal or a drawer.
+   *
+   * §7.17 says "`backdrop` at 60 % alpha", which is right in the dark theme,
+   * where `backdrop` is near-black. In the light theme it is a pale warm grey
+   * over a pale warm grey, and it dims nothing: the drawer was separating on
+   * its shadow and its 96 % fill alone. So the scrim is its own token, and in
+   * the light theme it is drawn from the *ink* rather than the ground, which is
+   * the only dark colour a paper palette has.
+   */
+  --scrim: color-mix(in oklab, var(--backdrop) 60%, transparent);
+
+  /*
+   * Sequential ramp for the activity heatmap: five steps of the accent, per
+   * STYLE-GUIDE §8. Zero is `--control`, not the lightest step, so "nothing
+   * happened" and "a little happened" cannot be confused. Mixed against
+   * `--chrome` rather than left translucent, because the cells sit on a card
+   * and a translucent fill would pick up whatever is behind it.
+   */
   --heat-1: color-mix(in oklab, var(--accent) 22%, var(--chrome));
   --heat-2: color-mix(in oklab, var(--accent) 42%, var(--chrome));
   --heat-3: color-mix(in oklab, var(--accent) 62%, var(--chrome));
@@ -93,6 +107,7 @@
     --accent-dim: oklch(0.79 0.05 var(--accent-h)); /* #A5BDDB */
     --plex: #b57c00;
     --plex-ink: #ffffff;
+    --scrim: color-mix(in oklab, var(--text-strong) 32%, transparent);
     --heat-1: color-mix(in oklab, var(--accent) 18%, var(--chrome));
     --heat-2: color-mix(in oklab, var(--accent) 36%, var(--chrome));
     --heat-3: color-mix(in oklab, var(--accent) 56%, var(--chrome));
@@ -108,6 +123,7 @@
   --accent-dim: oklch(0.79 0.05 var(--accent-h));
   --plex: #b57c00;
   --plex-ink: #ffffff;
+  --scrim: color-mix(in oklab, var(--text-strong) 32%, transparent);
   --heat-1: color-mix(in oklab, var(--accent) 18%, var(--chrome));
   --heat-2: color-mix(in oklab, var(--accent) 36%, var(--chrome));
   --heat-3: color-mix(in oklab, var(--accent) 56%, var(--chrome));
