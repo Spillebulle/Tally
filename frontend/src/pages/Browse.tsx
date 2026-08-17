@@ -11,7 +11,7 @@ import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { PosterGrid } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
-import { FilmIcon, SearchIcon } from '@/components/Icons'
+import { Film, Search } from 'lucide-react'
 
 /**
  * `browse` is everything at once — no media type, anime included. It exists for
@@ -53,6 +53,10 @@ export function Browse({ mode }: BrowseProps) {
     sorts: SORTS,
     defaultSort: mode === 'search' || mode === 'browse' ? 'title' : 'added',
     defaults: { personal: personalDefault },
+    // `/search` is a destination of its own now, not a box in the top bar, so
+    // its field takes the caret on arrival and says it searches the library
+    // rather than "these titles" — there is no narrower set here to mean.
+    searchIsThePage: mode === 'search',
     // `since`/`until` filter watch *events*, which /api/media knows nothing
     // about. Omitted rather than ignored, so a stray one from a History link
     // cannot sit in the URL looking like it does something.
@@ -195,33 +199,42 @@ export function Browse({ mode }: BrowseProps) {
         busy={isFetching && !isLoading}
       />
 
+      {/* A failed request is not an empty list, so the error branch comes
+          first; falling through would tell the user their library is empty
+          and hide a 500. The card is the chrome the state itself no longer
+          draws: it stands where the grid would, and a bare sentence in that
+          much space reads as a page that failed to render. */}
       {isError ? (
-        <ErrorState error={error} onRetry={() => void refetch()} />
+        <div className="card">
+          <ErrorState error={error} onRetry={() => void refetch()} />
+        </div>
       ) : !isLoading && total === 0 ? (
-        <EmptyState
-          icon={mode === 'search' ? <SearchIcon /> : <FilmIcon />}
-          title={
-            search
-              ? 'Nothing matched that search'
-              : filters.active
-                ? 'Nothing matched those filters'
-                : 'Nothing here yet'
-          }
-          description={
-            search
-              ? 'Try a shorter search, or check the spelling.'
-              : filters.active
-                ? 'Try widening them, or clear them to see everything.'
-                : 'Run a Plex sync from Settings to import your library.'
-          }
-          action={
-            !search && filters.active ? (
-              <button type="button" onClick={filters.clear} className="btn-outline mt-2">
-                Clear filters
-              </button>
-            ) : undefined
-          }
-        />
+        <div className="card">
+          <EmptyState
+            icon={mode === 'search' ? <Search size={24} /> : <Film size={24} />}
+            title={
+              search
+                ? 'Nothing matched that search'
+                : filters.active
+                  ? 'Nothing matched those filters'
+                  : 'Nothing here yet'
+            }
+            description={
+              search
+                ? 'Try a shorter search, or check the spelling.'
+                : filters.active
+                  ? 'Try widening them, or clear them to see everything.'
+                  : 'Run a Plex sync from Settings to import your library.'
+            }
+            action={
+              !search && filters.active ? (
+                <button type="button" onClick={filters.clear} className="btn-secondary">
+                  Clear filters
+                </button>
+              ) : undefined
+            }
+          />
+        </div>
       ) : (
         <PosterGrid
           cards={data?.items ?? []}
