@@ -38,7 +38,7 @@ export function compactNumber(value: number): string {
 }
 
 export function formatDate(iso: string | null | undefined): string {
-  if (!iso) return '—'
+  if (!iso) return '–'
   return new Date(iso).toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'short',
@@ -47,7 +47,7 @@ export function formatDate(iso: string | null | undefined): string {
 }
 
 export function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
+  if (!iso) return '–'
   return new Date(iso).toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -57,7 +57,7 @@ export function formatDateTime(iso: string | null | undefined): string {
 }
 
 export function relativeTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
+  if (!iso) return '–'
   const then = new Date(iso).getTime()
   const seconds = Math.round((then - Date.now()) / 1000)
   const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
@@ -93,8 +93,8 @@ export const STATUS_DOT: Record<WatchStatus, string> = {
   plan_to_watch: 'bg-muted',
   watching: 'bg-accent',
   completed: 'bg-good',
-  on_hold: 'bg-warn',
-  dropped: 'bg-danger',
+  on_hold: 'bg-caution',
+  dropped: 'bg-critical',
 }
 
 /**
@@ -108,7 +108,7 @@ export const RATING_SCALE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const
 
 /** Trim the decimal when a rating is whole: "8" rather than "8.0". */
 export const formatRating = (rating: number | null): string =>
-  rating === null ? '—' : Number.isInteger(rating) ? String(rating) : rating.toFixed(1)
+  rating === null ? '–' : Number.isInteger(rating) ? String(rating) : rating.toFixed(1)
 
 export function episodeCode(card: MediaCard): string | null {
   if (card.media_type !== 'episode') return null
@@ -139,6 +139,7 @@ export function posterFallbackGradient(seed: string): string {
     hash |= 0
   }
   const hue = Math.abs(hash) % 360
+  // design-check-allow raw-colour: a deterministic stand-in for user artwork, derived from the title. It is content, not chrome, so it does not take a theme token.
   return `linear-gradient(150deg, hsl(${hue} 42% 32%), hsl(${(hue + 45) % 360} 38% 18%))`
 }
 
