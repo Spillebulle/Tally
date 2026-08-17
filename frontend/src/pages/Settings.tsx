@@ -7,8 +7,6 @@ import {
   Info,
   KeyRound,
   Library as LibraryIcon,
-  Monitor,
-  Moon,
   Plus,
   RefreshCw,
   ScanSearch,
@@ -32,21 +30,33 @@ import {
   Spinner,
   Toggle,
 } from '@/components/ui'
-import { SyncProgress, syncLabel } from '@/components/Layout'
+import { SyncProgress } from '@/components/Layout'
 
 /*
  * Settings, in the shape STYLE-GUIDE §9 fixes.
  *
- * Two columns at 1024px and up: a 240px column holding the title, the sidebar
- * tabs (§7.4) and the version line, and a pane with its own header, one body
- * and a footer. Below 1024px the tab column stacks into a segmented control at
- * the top. There is no Save button anywhere: every control writes as it is
- * touched, which is what the footer says.
+ * Two columns at 1024px and up: a 240px column holding the title and the
+ * sidebar tabs (§7.4), and a pane with its own header, one body and a footer.
+ * Below 1024px the tab column stacks into a segmented control at the top.
+ * Every control writes as it is touched, with one exception the footer names:
+ * a server address is committed with a button, because a half-typed host would
+ * otherwise be tried on every keystroke.
+ *
+ * The version and licence pair (§12) is *not* here. It lives at the foot of the
+ * app sidebar, and §12 offers the sidebar or the settings column, not both:
+ * printing it in two corners of one screen reads as two numbers rather than as
+ * one. The About pane reports the version as a fact of the instance, which is a
+ * different statement.
  *
  * A row is a label, an optional second line, and its control hard against the
  * right edge. Rows group under an eyebrow with a `line-soft` hairline between
  * groups. A setting Tally cannot change from here says so in the row rather
  * than being drawn disabled with no explanation.
+ *
+ * Every request this page reads is checked for `isError` before its value is
+ * drawn. `/api/settings` is a *local* request, and the pane used to explain a
+ * failed one with a sentence about what Plex had not told Tally yet, which is
+ * a confident and wrong story about somebody else's machine.
  */
 
 /* ── The tabs ────────────────────────────────────────────────────────────── */
@@ -137,7 +147,14 @@ function Group({
   )
 }
 
-/** Label at the left, an optional second line under it, the control at the right edge. */
+/**
+ * Label at the left, an optional second line under it, the control at the right
+ * edge.
+ *
+ * The 8px vertical padding is `Toggle`'s, deliberately: a group mixes rows and
+ * toggles freely, and at 6px against the toggle's 8px the Anime group stepped
+ * 48px, 59px, 48px down the page. One rhythm inside one group.
+ */
 function Row({
   label,
   hint,
@@ -151,7 +168,7 @@ function Row({
   children?: ReactNode
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-1.5">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2">
       <div className="min-w-0">
         {htmlFor ? (
           <label htmlFor={htmlFor} className="block text-control text-fg">
@@ -180,7 +197,7 @@ function StackedRow({
   children: ReactNode
 }) {
   return (
-    <div className="py-1.5">
+    <div className="py-2">
       {htmlFor ? (
         <label htmlFor={htmlFor} className="block text-control text-fg">
           {label}
@@ -194,10 +211,53 @@ function StackedRow({
   )
 }
 
-/** A value the pane reports rather than offers: read as a fact, not a control. */
+/**
+ * A value the pane reports rather than offers: read as a fact, not a control.
+ *
+ * `figure` is for a value and a value only, so a column of them lines up: a
+ * version number, an address, a count. A *phrase* containing a number is not a
+ * figure, because a sentence set in mono reads as code. "Every 30 minutes" puts
+ * `.figure` round the 30 and nothing else.
+ *
+ * The same line divides the times on this page. An absolute timestamp is a
+ * value and is monospaced; a relative one ("6 hours ago", and in some locales
+ * "yesterday", with no number in it at all) is prose and is not.
+ */
 function Fact({ children, figure }: { children: ReactNode; figure?: boolean }) {
   return (
     <span className={cn('text-control text-strong', figure && 'figure text-tiny')}>{children}</span>
+  )
+}
+
+/**
+ * A standalone sentence under a group's rows.
+ *
+ * It exists so the 65 ch measure of §4 is not a thing each call site remembers.
+ * These notes ran the full width of the pane, 144 characters a line at 1440px,
+ * directly under row hints that were already capped.
+ */
+function Note({ children, className }: { children: ReactNode; className?: string }) {
+  return <p className={cn('max-w-[65ch] text-small text-dim', className)}>{children}</p>
+}
+
+/**
+ * A request this page could not complete, said so where its value would have
+ * gone (rule 12). Wrapped in a well so it reads as one region of the pane
+ * rather than as the whole page having failed.
+ */
+function QueryError({
+  error,
+  title,
+  onRetry,
+}: {
+  error: unknown
+  title: string
+  onRetry: () => void
+}) {
+  return (
+    <div className="well">
+      <ErrorState error={error} title={title} onRetry={onRetry} />
+    </div>
   )
 }
 
@@ -210,13 +270,6 @@ export function Settings() {
   // than rendering an empty pane.
   const active = TABS.find((tab) => tab.id === requested)?.id ?? DEFAULT_TAB
   const current = TABS.find((tab) => tab.id === active) as Tab
-
-  const version = useQuery({
-    queryKey: ['app-version'],
-    queryFn: api.settings.version,
-    staleTime: Infinity,
-    gcTime: Infinity,
-  })
 
   const setTab = (next: TabId) => {
     const params2 = new URLSearchParams(params)
@@ -252,11 +305,6 @@ export function Settings() {
               )
             })}
           </nav>
-          <p className="px-2.5 pb-1 pt-3 text-tiny text-dim">
-            {version.data ? <span className="figure">v{version.data.version}</span> : null}
-            {version.data ? ' · ' : null}
-            Apache-2.0
-          </p>
         </div>
       </div>
 
@@ -276,7 +324,7 @@ export function Settings() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="border-b border-line p-strip">
           <h2 className="text-page font-semibold text-strong">{current.label}</h2>
-          <p className="mt-0.5 text-body text-muted">{current.description}</p>
+          <p className="mt-0.5 max-w-[65ch] text-body text-muted">{current.description}</p>
         </header>
 
         <div className="min-w-0 flex-1 p-strip">
@@ -289,8 +337,14 @@ export function Settings() {
           {active === 'about' && <AboutPane />}
         </div>
 
+        {/* §9 puts a sentence here saying how settings are kept. It has to
+            agree with what is on screen: the Plex pane really does have a Save,
+            so the footer names it rather than denying it exists. */}
         <footer className="border-t border-line p-strip text-tiny text-dim">
-          Changes apply as you make them. There is no save button.
+          <span className="block max-w-[65ch]">
+            Changes apply as you make them, apart from a Plex server address,
+            which waits for its Save button.
+          </span>
         </footer>
       </div>
     </div>
@@ -374,10 +428,16 @@ function PlexPane() {
             type="button"
             onClick={() => discover.mutate()}
             disabled={discover.isPending || !user?.has_plex_link}
+            // A disabled control says why it is disabled, and there are two
+            // reasons it can be. The tooltip is readable now that `.btn` no
+            // longer takes pointer events off it, so it has to be the right
+            // sentence rather than a plausible one.
             title={
-              user?.has_plex_link
-                ? 'Ask plex.tv which servers this account can reach.'
-                : 'Link a Plex account first.'
+              !user?.has_plex_link
+                ? 'Link a Plex account first.'
+                : discover.isPending
+                  ? 'Already asking plex.tv.'
+                  : 'Ask plex.tv which servers this account can reach.'
             }
             className="btn-outline"
           >
@@ -418,44 +478,51 @@ function PlexPane() {
       </Group>
 
       <Group title="Live updates">
-        <StackedRow
-          label="Webhook address"
-          htmlFor="webhook"
-          hint="With a Plex Pass, point a Plex webhook here and a play registers the moment it happens instead of at the next sync. Tally works without one."
-        >
-          <div className="flex gap-2">
-            <input
-              id="webhook"
-              readOnly
-              value={webhookUrl}
-              className="field figure text-tiny"
-              onFocus={(event) => event.currentTarget.select()}
-            />
-            <button
-              type="button"
-              disabled={!webhookUrl}
-              title={
-                webhookUrl ? 'Copy the address.' : 'The address is still loading.'
-              }
-              onClick={async () => {
-                const copied = await copyText(webhookUrl)
-                notify(
-                  copied
-                    ? 'Webhook address copied.'
-                    : 'Could not copy. Select the address and press Ctrl+C.',
-                  copied ? 'success' : 'error',
-                )
-              }}
-              className="btn-outline shrink-0"
-            >
-              <Copy size={16} aria-hidden="true" />
-              Copy
-            </button>
-          </div>
-          <p className="mt-2 text-small text-dim">
-            Add it in Plex under Settings, then Webhooks.
-          </p>
-        </StackedRow>
+        {/* The address comes from `/api/settings`. A failed request there is not
+            an address that is "still loading", and saying so would leave a
+            disabled Copy button explaining itself with something untrue. */}
+        {settings.isError ? (
+          <QueryError
+            error={settings.error}
+            title="Could not load the webhook address"
+            onRetry={() => void settings.refetch()}
+          />
+        ) : (
+          <StackedRow
+            label="Webhook address"
+            htmlFor="webhook"
+            hint="With a Plex Pass, point a Plex webhook here and a play registers the moment it happens instead of at the next sync. Tally works without one."
+          >
+            <div className="flex gap-2">
+              <input
+                id="webhook"
+                readOnly
+                value={webhookUrl}
+                className="field figure text-tiny"
+                onFocus={(event) => event.currentTarget.select()}
+              />
+              <button
+                type="button"
+                disabled={!webhookUrl}
+                title={webhookUrl ? 'Copy the address.' : 'The address is still loading.'}
+                onClick={async () => {
+                  const copied = await copyText(webhookUrl)
+                  notify(
+                    copied
+                      ? 'Webhook address copied.'
+                      : 'Could not copy. Select the address and copy it yourself.',
+                    copied ? 'success' : 'error',
+                  )
+                }}
+                className="btn-outline shrink-0"
+              >
+                <Copy size={16} aria-hidden="true" />
+                Copy
+              </button>
+            </div>
+            <Note className="mt-2">Add it in Plex under Settings, then Webhooks.</Note>
+          </StackedRow>
+        )}
       </Group>
     </>
   )
@@ -565,7 +632,11 @@ function ServerPanel({ server }: { server: Server }) {
             type="button"
             onClick={() => test.mutate()}
             disabled={test.isPending}
-            title={`Ask ${server.name} whether it answers on this address.`}
+            title={
+              test.isPending
+                ? `Already asking ${server.name}.`
+                : `Ask ${server.name} whether it answers on this address.`
+            }
             className={cn(
               'btn-outline',
               // Never colour alone: the label carries the result too, so it
@@ -622,9 +693,11 @@ function ServerPanel({ server }: { server: Server }) {
             onClick={() => saveUrl.mutate(urlDraft.trim() || null)}
             disabled={saveUrl.isPending || urlDraft.trim() === (server.manual_url ?? '')}
             title={
-              urlDraft.trim() === (server.manual_url ?? '')
-                ? 'The address has not been changed.'
-                : 'Use this address for every request to this server.'
+              saveUrl.isPending
+                ? 'Saving the address.'
+                : urlDraft.trim() === (server.manual_url ?? '')
+                  ? 'The address has not been changed.'
+                  : 'Use this address for every request to this server.'
             }
             className="btn-secondary shrink-0"
           >
@@ -639,7 +712,11 @@ function ServerPanel({ server }: { server: Server }) {
                 saveUrl.mutate(null)
               }}
               disabled={saveUrl.isPending}
-              title="Go back to the addresses Plex advertises."
+              title={
+                saveUrl.isPending
+                  ? 'Saving the address.'
+                  : 'Go back to the addresses Plex advertises.'
+              }
               className="btn-ghost shrink-0"
             >
               Auto-detect
@@ -673,9 +750,15 @@ function ServerPanel({ server }: { server: Server }) {
   )
 }
 
-/** The three states of `anime_override`, as the values the dropdown round-trips. */
+/**
+ * The three states of `anime_override`, as the values the dropdown round-trips.
+ *
+ * Every option names the field, the default included. "Detect" on its own said
+ * nothing about *what* is detected, and it is the state most libraries are in,
+ * sitting immediately left of a button labelled "Scan".
+ */
 const ANIME_OPTIONS = [
-  { value: 'auto', label: 'Detect' },
+  { value: 'auto', label: 'Detect anime' },
   { value: 'yes', label: 'Always anime' },
   { value: 'no', label: 'Never anime' },
 ]
@@ -734,8 +817,13 @@ function LibraryRow({
           Scan
         </button>
 
-        {/* The switch's label is short because the row already names the
-            library immediately to its left. */}
+        {/* The visible label is short because the row already names the library
+            immediately to its left. The *accessible* name should still carry it,
+            the way the `Select` beside it does with "Anime in {title}": read
+            aloud, four rows currently offer four switches called "Include" and
+            only their order tells them apart. `Toggle` takes its `aria-label`
+            from `label` and has no override, so this waits on a prop there
+            rather than on a second label here. */}
         <Toggle label="Include" checked={library.enabled} onChange={onToggleEnabled} />
       </span>
     </li>
@@ -797,6 +885,13 @@ function SyncingPane() {
   const running = syncStatus.data?.running
   const lastRun = syncStatus.data?.last_run
 
+  // A cancel already in flight, whether this button knows it from its own
+  // request or from a status that came back with the flag set. Reading only the
+  // flag left the label saying "Cancel sync" until a poll landed, up to three
+  // seconds after the click. This is the shell's `SyncControl` line for line,
+  // and the two must not drift: they are the same control in two places.
+  const stopping = cancelSync.isPending || Boolean(syncStatus.data?.cancel_requested)
+
   return (
     <>
       {/* From the click, not from the poll that confirms it. See SyncProgress. */}
@@ -809,32 +904,63 @@ function SyncingPane() {
             <button
               type="button"
               onClick={() => cancelSync.mutate()}
-              disabled={!running || cancelSync.isPending || syncStatus.data?.cancel_requested}
+              disabled={!running || stopping}
               title={
-                running ? 'Stop after the current step.' : 'The sync has not started yet.'
+                stopping
+                  ? 'Already stopping. The run ends after the current step.'
+                  : running
+                    ? 'Stop after the current step.'
+                    : 'The sync has not started yet.'
               }
               className="btn-ghost shrink-0"
             >
-              {syncStatus.data?.cancel_requested ? 'Stopping' : 'Cancel'}
+              {stopping ? 'Stopping…' : 'Cancel sync'}
             </button>
           </div>
+          {/* `status={undefined}` is the "clicked, nothing back yet" state, and
+              it depends on `SyncProgress`'s `sliding` defaulting to true: with
+              no status there is no total, so the rail is indeterminate only
+              while that default holds. Flip the default and this draws an empty
+              track under the words "Starting sync". */}
           <SyncProgress status={running ? syncStatus.data : undefined} />
         </div>
       )}
 
       <Group title="Schedule">
+        {settings.isError ? (
+          <QueryError
+            error={settings.error}
+            title="Could not load the sync schedule"
+            onRetry={() => void settings.refetch()}
+          />
+        ) : (
+          <Row
+            label="Automatic sync"
+            hint="Set with the SYNC_INTERVAL_MINUTES environment variable, so it cannot be changed here."
+          >
+            {settings.isLoading ? (
+              <Skeleton className="h-4 w-28" />
+            ) : settings.data ? (
+              // The number is the figure; the sentence around it is not.
+              <Fact>
+                Every <span className="figure">{settings.data.sync_interval_minutes}</span> minutes
+              </Fact>
+            ) : (
+              <Fact>Unknown</Fact>
+            )}
+          </Row>
+        )}
         <Row
-          label="Automatic sync"
-          hint="Set with the SYNC_INTERVAL_MINUTES environment variable, so it cannot be changed here."
+          label="Last sync"
+          hint={
+            lastRun ? (
+              <span className="figure">{formatDateTime(lastRun.started_at)}</span>
+            ) : undefined
+          }
         >
-          <Fact figure>
-            {settings.data ? `Every ${settings.data.sync_interval_minutes} minutes` : '–'}
-          </Fact>
-        </Row>
-        <Row label="Last sync" hint={lastRun ? formatDateTime(lastRun.started_at) : undefined}>
           {lastRun ? (
             <>
-              <Fact figure>{relativeTime(lastRun.started_at)}</Fact>
+              <Fact>{relativeTime(lastRun.started_at)}</Fact>
               <RunStatus status={lastRun.status} />
             </>
           ) : (
@@ -874,7 +1000,7 @@ function SyncingPane() {
         ) : runs.isLoading ? (
           <Skeleton className="h-16 w-full" />
         ) : (runs.data?.length ?? 0) === 0 ? (
-          <p className="py-1.5 text-small text-dim">No sync has run yet.</p>
+          <Note className="py-2">No sync has run yet.</Note>
         ) : (
           <ul className="divide-y divide-line-soft">
             {runs.data?.slice(0, 8).map((run) => (
@@ -898,7 +1024,16 @@ function SyncingPane() {
             type="button"
             onClick={() => fullSync.mutate()}
             disabled={fullSync.isPending || running}
-            title={syncLabel(syncStatus.data, fullSync.isPending)}
+            // A disabled control says why *it* is disabled. This used to borrow
+            // `syncLabel`, which describes the running sync ("Sync with Plex
+            // now." when idle, on a button that does something else).
+            title={
+              fullSync.isPending
+                ? 'Starting the full re-import.'
+                : running
+                  ? 'A sync is already running. Wait for it to finish, or cancel it above.'
+                  : 'Read the whole Plex history again and rescan every library.'
+            }
             className="btn-danger"
           >
             {fullSync.isPending || running ? <Spinner /> : null}
@@ -995,21 +1130,39 @@ function LibraryPane() {
             ]}
           />
         </Row>
-        <p className="text-small text-dim">
-          {plexSummary(plexWeeks)} {inForceSummary(effectiveWeeks)}
-        </p>
+        {/* `plexSummary(null)` explains what Plex has not said yet, which is a
+            statement about the Plex server and is only true once Tally's own
+            settings have actually been read. A failed or unfinished request to
+            `/api/settings` says nothing about Plex at all. */}
+        {settings.isError ? (
+          <QueryError
+            error={settings.error}
+            title="Could not load Tally's own settings"
+            onRetry={() => void settings.refetch()}
+          />
+        ) : settings.isLoading ? (
+          <Skeleton className="h-8 w-full max-w-[65ch]" />
+        ) : (
+          <Note>
+            {plexSummary(plexWeeks)} {inForceSummary(effectiveWeeks)}
+          </Note>
+        )}
       </Group>
 
       <Group title="Danger">
         <Row
           label="Re-run anime detection"
-          hint="Every library left on Detect is judged again, which can move titles between Anime and the film and show sections. A library you have set by hand keeps what you set."
+          hint="Every library left to detect anime for itself is judged again, which can move titles between Anime and the film and show sections. A library you have set by hand keeps what you set."
         >
           <button
             type="button"
             onClick={() => reclassify.mutate()}
             disabled={reclassify.isPending}
-            title="Judge every title again from its library, agent, genres and MyAnimeList."
+            title={
+              reclassify.isPending
+                ? 'Already re-running anime detection.'
+                : 'Judge every title again from its library, agent, genres and MyAnimeList.'
+            }
             className="btn-danger"
           >
             {reclassify.isPending ? <Spinner /> : <Sparkles size={16} aria-hidden="true" />}
@@ -1023,16 +1176,55 @@ function LibraryPane() {
 
 /* ── Appearance ──────────────────────────────────────────────────────────── */
 
-const THEME_CARDS: Array<{ value: Theme; label: string; icon: LucideIcon; caption: string }> = [
-  { value: 'dark', label: 'Dark', icon: Moon, caption: 'Suits poster artwork.' },
-  { value: 'light', label: 'Light', icon: Sun, caption: 'Paper, for a bright room.' },
+const THEME_CARDS: Array<{ value: Theme; label: string; caption: string }> = [
+  { value: 'dark', label: 'Dark', caption: 'Suits poster artwork.' },
+  { value: 'light', label: 'Light', caption: 'Paper, for a bright room.' },
   {
     value: 'system',
     label: 'Follow the system',
-    icon: Monitor,
     caption: 'Whatever this device is set to.',
   },
 ]
+
+/**
+ * A card's preview, drawn in the theme the card offers rather than in the one
+ * the page happens to be wearing.
+ *
+ * `.sample-dark` / `.sample-light` in `theme-tally.css` re-declare exactly five
+ * tokens on a subtree, so **only** `bg-backdrop`, `bg-chrome`, `border-line`,
+ * `bg-strong` / `text-strong` and `bg-accent` may appear in here. Anything else
+ * resolves in the page's own theme and the preview becomes a mixture of the two,
+ * which is worse than the 24px icon this replaced.
+ *
+ * What it draws is Tally's own shell in miniature: the sidebar with a selected
+ * row carrying its accent mark, then a heading and a rail of cards. The bars
+ * stand for text, which is why they are `bg-strong` faded with an element
+ * opacity (an alpha *modifier* on a token colour would emit no CSS at all).
+ */
+function ThemeSample({ sample }: { sample: 'sample-dark' | 'sample-light' }) {
+  return (
+    <span className={cn('block border-b border-line', sample)}>
+      <span className="flex h-16 bg-backdrop">
+        <span className="flex w-2/5 flex-col gap-1 border-r border-line bg-chrome p-1.5">
+          <span className="flex items-center gap-1">
+            <span className="h-2 w-0.5 shrink-0 rounded-tight bg-accent" />
+            <span className="h-1 flex-1 rounded-tight bg-strong opacity-70" />
+          </span>
+          <span className="h-1 w-3/4 rounded-tight bg-strong opacity-25" />
+          <span className="h-1 w-2/3 rounded-tight bg-strong opacity-25" />
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col gap-1.5 p-1.5">
+          <span className="h-1 w-1/2 rounded-tight bg-strong opacity-70" />
+          <span className="flex min-h-0 flex-1 gap-1">
+            <span className="flex-1 rounded-tight border border-line bg-chrome" />
+            <span className="flex-1 rounded-tight border border-line bg-chrome" />
+            <span className="flex-1 rounded-tight border border-line bg-chrome" />
+          </span>
+        </span>
+      </span>
+    </span>
+  )
+}
 
 function AppearancePane() {
   const { theme, resolved, setTheme } = useTheme()
@@ -1041,8 +1233,13 @@ function AppearancePane() {
     <Group title="Theme">
       <div className="grid max-w-[600px] grid-cols-2 gap-2 sm:grid-cols-3">
         {THEME_CARDS.map((card) => {
-          const Icon = card.icon
           const selected = theme === card.value
+          // "Follow the system" shows whichever palette is resolved just now,
+          // because that is what picking it would give you.
+          const sample =
+            card.value === 'light' || (card.value === 'system' && resolved === 'light')
+              ? 'sample-light'
+              : 'sample-dark'
           return (
             <button
               key={card.value}
@@ -1059,13 +1256,7 @@ function AppearancePane() {
                   : 'hover:border-line-dashed',
               )}
             >
-              <span className="grid h-16 place-items-center border-b border-line bg-window">
-                <Icon
-                  size={24}
-                  aria-hidden="true"
-                  className={selected ? 'text-strong' : 'text-muted'}
-                />
-              </span>
+              <ThemeSample sample={sample} />
               <span className="flex items-start justify-between gap-2 p-strip">
                 <span className="min-w-0">
                   <span className="block truncate text-body font-semibold text-strong">
@@ -1081,11 +1272,11 @@ function AppearancePane() {
           )
         })}
       </div>
-      <p className="text-small text-dim">
+      <Note>
         {theme === 'system'
           ? `This device is asking for the ${resolved} theme just now, and Tally follows it as it changes.`
           : `Tally stays on the ${theme} theme whatever this device asks for.`}
-      </p>
+      </Note>
     </Group>
   )
 }
@@ -1153,10 +1344,10 @@ function MetadataPane() {
           </Row>
         ))
       )}
-      <p className="text-small text-dim">
+      <Note>
         Keys are read from environment variables when Tally starts, so they cannot be changed
         here.
-      </p>
+      </Note>
     </Group>
   )
 }
@@ -1238,7 +1429,13 @@ function ApiKeysPane() {
               <button
                 type="submit"
                 disabled={create.isPending || !name.trim()}
-                title={name.trim() ? 'Issue the key.' : 'Give the key a name first.'}
+                title={
+                  create.isPending
+                    ? 'Issuing the key.'
+                    : name.trim()
+                      ? 'Issue the key.'
+                      : 'Give the key a name first.'
+                }
                 className="btn-primary shrink-0"
               >
                 {create.isPending ? <Spinner /> : <Plus size={16} aria-hidden="true" />}
@@ -1257,10 +1454,10 @@ function ApiKeysPane() {
               options={SCOPE_OPTIONS}
             />
           </Row>
-          <p className="text-small text-dim">
+          <Note>
             Access is fixed when the key is issued. To change it, revoke the key and make
             another.
-          </p>
+          </Note>
         </form>
 
         {issued && (
@@ -1268,12 +1465,20 @@ function ApiKeysPane() {
             <p className="text-control font-semibold text-strong">
               Copy this now. It is not shown again.
             </p>
-            <div className="mt-2 flex gap-2">
-              <input
+            <div className="mt-2 flex flex-wrap gap-2">
+              {/* A textarea rather than an input, because this is the one value
+                  in the app that cannot be recovered and it must be readable in
+                  full: in a single-line field at 390px it was clipped mid-key.
+                  Still focus-selectable, so a long press copies it on a phone.
+                  `field-sizing` trims the second row where the key fits on one
+                  line; `rows={2}` is what a browser without it falls back to,
+                  which is the safe way round. */}
+              <textarea
                 readOnly
+                rows={2}
                 value={issued.key}
                 aria-label="Your new API key"
-                className="field figure text-tiny"
+                className="field figure h-auto min-w-[15rem] flex-1 resize-none break-all py-1.5 text-tiny [field-sizing:content]"
                 onFocus={(event) => event.currentTarget.select()}
               />
               <button
@@ -1282,12 +1487,13 @@ function ApiKeysPane() {
                   // Only claim success when the copy actually resolved:
                   // `navigator.clipboard` does not exist over plain HTTP, which
                   // is how self-hosted Tally is usually reached, and this key
-                  // cannot be recovered.
+                  // cannot be recovered. The fallback names no keystroke: this
+                  // is read on a phone as often as on a desktop.
                   const copied = await copyText(issued.key)
                   notify(
                     copied
                       ? 'API key copied.'
-                      : 'Could not copy. Select the key and press Ctrl+C before closing this.',
+                      : 'Could not copy. Select the key and copy it yourself before closing this.',
                     copied ? 'success' : 'error',
                   )
                 }}
@@ -1306,9 +1512,9 @@ function ApiKeysPane() {
                 Done
               </button>
             </div>
-            <p className="mt-2 text-small text-dim">
+            <Note className="mt-2">
               Only its fingerprint is stored, so Tally cannot show it to you again.
-            </p>
+            </Note>
           </Notice>
         )}
       </Group>
@@ -1319,9 +1525,9 @@ function ApiKeysPane() {
         ) : keys.isLoading ? (
           <Skeleton className="h-16 w-full" />
         ) : all.length === 0 ? (
-          <p className="py-1.5 text-small text-dim">
+          <Note className="py-2">
             No keys yet. Create one to use the API from a script or another app.
-          </p>
+          </Note>
         ) : (
           <ul className="divide-y divide-line-soft">
             {all.map((key) => (
@@ -1346,8 +1552,10 @@ function ApiKeysPane() {
                     )}
                   </p>
                   <p className="text-small text-dim">
+                    {/* An absolute timestamp is a value and is monospaced; a
+                        relative one is a phrase and is not. */}
                     <span className="figure">{key.prefix}…</span> · created{' '}
-                    {formatDateTime(key.created_at)} ·{' '}
+                    <span className="figure">{formatDateTime(key.created_at)}</span> ·{' '}
                     {key.last_used_at
                       ? `last used ${relativeTime(key.last_used_at)}`
                       : 'never used'}
@@ -1358,7 +1566,11 @@ function ApiKeysPane() {
                     type="button"
                     onClick={() => revoke.mutate(key.id)}
                     disabled={revoke.isPending && revoke.variables === key.id}
-                    title="Stop this key working. It cannot be restored."
+                    title={
+                      revoke.isPending && revoke.variables === key.id
+                        ? 'Revoking this key.'
+                        : 'Stop this key working. It cannot be restored.'
+                    }
                     className="btn-danger shrink-0"
                   >
                     {revoke.isPending && revoke.variables === key.id ? <Spinner /> : null}
@@ -1370,19 +1582,17 @@ function ApiKeysPane() {
           </ul>
         )}
         {all.some((key) => !key.revoked_at) && (
-          <p className="text-small text-dim">
-            Revoking takes effect immediately, on every integration using that key.
-          </p>
+          <Note>Revoking takes effect immediately, on every integration using that key.</Note>
         )}
       </Group>
 
       <Group title="Using a key">
-        <p className="py-1.5 text-small text-dim">
+        <Note className="py-2">
           Send it as <span className="figure">X-API-Key</span> or{' '}
           <span className="figure">Authorization: Bearer</span>, in a header and never in the
           URL, which ends up in logs. Endpoints under <span className="figure">/api</span>{' '}
           accept it as far as its access allows.
-        </p>
+        </Note>
         <a href="/api/docs" className="btn-outline w-fit" title="Open the generated API reference.">
           <ExternalLink size={16} aria-hidden="true" />
           API docs
@@ -1404,23 +1614,45 @@ function AboutPane() {
     gcTime: Infinity,
   })
 
+  // `/api/version` is the source; `/api/settings` reports the same number and
+  // stands in when the first has not answered.
+  const reported = version.data?.version ?? settings.data?.version
+
   return (
     <>
       <Group title="This instance">
+        {/* A missing value is a word, not a dash: §12 asks for something that
+            can be read aloud. A version number and an address are values and
+            are monospaced; "Not set" and "Unknown" are words and are not. */}
         <Row label="Version">
-          <Fact figure>{version.data?.version ?? settings.data?.version ?? '–'}</Fact>
+          {reported ? <Fact figure>{reported}</Fact> : <Fact>Unknown</Fact>}
         </Row>
         <Row label="Licence">
           <Fact>Apache-2.0</Fact>
         </Row>
-        <Row label="Public address" hint="What Tally puts in the webhook address it hands to Plex.">
-          <Fact figure>{settings.data?.public_url ?? '–'}</Fact>
-        </Row>
+        {settings.isError ? (
+          <QueryError
+            error={settings.error}
+            title="Could not load this instance's settings"
+            onRetry={() => void settings.refetch()}
+          />
+        ) : (
+          <Row
+            label="Public address"
+            hint="What Tally puts in the webhook address it hands to Plex."
+          >
+            {settings.data?.public_url ? (
+              <Fact figure>{settings.data.public_url}</Fact>
+            ) : (
+              <Fact>Not set</Fact>
+            )}
+          </Row>
+        )}
       </Group>
 
       <Group title="Your account">
         <Row label="Signed in as">
-          <Fact>{user?.display_name || user?.username || '–'}</Fact>
+          <Fact>{user?.display_name || user?.username || 'Unknown'}</Fact>
         </Row>
         <Row label="Account">
           <Fact>{user?.plex_username ? `Plex · ${user.plex_username}` : 'Local account'}</Fact>
