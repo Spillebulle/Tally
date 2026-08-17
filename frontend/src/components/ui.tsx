@@ -182,14 +182,24 @@ export function StarRating({ rating, onChange, size = 'md', readOnly }: StarRati
 
         if (!interactive) return <span key={position}>{star}</span>
 
+        // One sentence, used for both the tooltip and the accessible name.
+        // They were "1 / 10" and "1 out of 10", so a person hovering and a
+        // person listening were told different things about the same star —
+        // and neither string said what clicking it does. Clicking the current
+        // value clears the rating, so that star says so.
+        const say =
+          score === position
+            ? `Clear your rating of ${position} out of 10.`
+            : `Rate this ${position} out of 10.`
+
         return (
           <button
             key={position}
             type="button"
             role="radio"
             aria-checked={score === position}
-            aria-label={`${position} out of 10`}
-            title={`${position} / 10`}
+            aria-label={say}
+            title={say}
             onClick={() => onChange?.(score === position ? null : position)}
             className="group/star inline-flex"
           >
