@@ -1606,12 +1606,11 @@ export function Stats() {
 
               The axis used to print every third hour and nothing else, which
               left twenty-four bars under eight numbers and read as a broken
-              chart — the bars appeared to fall between the labels because
-              nothing tied any bar to any label. `minLabelWidth` gives every
-              hour a tick inside its own column and thins only the *text*, to
-              whatever the measured width can hold: all twenty-four on a wide
-              card, every second or third on a phone, and a mark under each one
-              either way.
+              chart. Then it thinned the labels to what fitted, and the unnamed
+              columns lost their label row and dropped their bars into it.
+              `fitLabels` keeps every bar, tick and number and scales the type
+              to the measured column width instead — the whole profile, at
+              whatever size the card allows.
             */}
             <ColumnChart
               data={hours.map((hour) => ({
@@ -1621,9 +1620,7 @@ export function Stats() {
               // "07", not "07:00" — the axis says what the units are once, in
               // the heading, and two digits is what fits under a 14px column.
               formatLabel={(label) => label.slice(0, 2)}
-              // What one "07" needs, with room around it. The chart works the
-              // rest out from its own width.
-              minLabelWidth={20}
+              fitLabels
               // Measured: 24 caps ate a third of the frame's height and left
               // the bars a stub. The numbers stay in the tooltip, the
               // accessible name and the table.
