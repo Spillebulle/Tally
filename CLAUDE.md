@@ -848,6 +848,48 @@ Four things about it are worth knowing before they cost an hour:
 
 ---
 
+## Themes are a file format, not a feature
+
+A theme is a `.umbertheme` file, and the whole point of it is that the same file
+opens in Umber and in anything else in the family. The format is §3.2 of the
+style guide, Tally's own decisions are in `docs/themes.md`, and the rules below
+are the ones that will be broken by accident.
+
+* **Twenty-seven colours are stored; everything else is derived.** That is what
+  makes a file portable, so a token that could be derived must not become a
+  twenty-eighth key. Four file keys deliberately do not match the CSS names,
+  because a stored word may never be reworded: `border`, `popover_border`,
+  `warning*` and `link_1..6`.
+* **Never send a variable that is a `color-mix` of other variables.** A CSS
+  variable defined as a mix resolves where it is *used*, so `--accent-tint`,
+  `--accent-ring`, `--grid`, `--heat-1..5`, `--scrim` and `--critical-line` all
+  follow a custom theme on their own. Only five derived values are transmitted,
+  and the client refuses any variable outside that set — a sent copy of a
+  computed value is a stale copy, and the stylesheet already has it right.
+* **A custom theme stamps its base's class.** `tokens.css` carries values that
+  are not among the twenty-seven and differ by theme, the shadows most
+  obviously, so applying colours without stamping `dark`/`light` gives a light
+  theme the dark theme's shadows. Which bases are dark is the **server's** fact,
+  sent as `dark` on the payload; a table of it in the client is a second thing
+  to keep in step.
+* **The server owns parsing, encoding and derivation**, because it owns the
+  files. One decoder and one encoder, and the interchange format *is* the
+  storage format, so a stored form and a shared form cannot drift.
+* **Built-ins are compiled in and never written to the library.** The only way
+  to make a theme is to copy one, which puts the copy where an update never
+  reaches. A write to a built-in is a 409 with a sentence, not a silent no-op.
+* **An unreadable line costs one colour and is counted.** The count is shown to
+  the user, so only lines that name a setting and fail to deliver one are
+  counted: blank lines, comments and lines without `=` are grammar and cost
+  nothing. Reporting them would put "3 lines could not be read" in front of
+  somebody whose file lost nothing.
+* **Do not test the encoder with the decoder.** That proves only that they agree
+  with each other. `test_a_written_file_satisfies_the_reader_rules` parses the
+  bytes with an independent reader written from the guide, and that is the test
+  the whole feature rests on.
+
+---
+
 ## Testing and verification
 
 ```bash
