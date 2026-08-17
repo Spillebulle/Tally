@@ -86,9 +86,24 @@ it lost**: the response carries the skipped-line count so the interface can say
 "N lines could not be read, so those colours came from the theme it names as
 its base", which §3.2 requires and which a 200 with no detail would swallow.
 
+The shapes, so the client and the server do not have to guess at each other.
+A theme is `{id, name, base, is_builtin, dark}`, and the two endpoints that
+carry one whole add `colours`, keyed by the **file** key (`border`,
+`warning_bg`, `link_1`) and always all twenty-seven of them, since whatever the
+file held the rest come from the base it names. `dark` is sent rather than
+worked out from `base`, because which bases are dark is the server's fact — an
+app with more presets adds its own — and a copy of that table in the client is
+a second thing to keep in step. `POST /api/themes` takes `{name, source_id}`;
+`PATCH` takes `{name?, colours?}` with `colours` partial, so the editor can
+save one swatch without shipping the other twenty-six back;
+`POST /api/themes/import` takes the file as multipart `file` and answers
+`{theme, skipped_lines}`.
+
 The selected theme is a user preference like any other:
 `User.preferences["theme_id"]`, absent meaning a built-in and the existing
-dark / light / system preference deciding which.
+dark / light / system preference deciding which. Setting it to an id this
+account does not have is a 422, the same answer an unloadable timezone gets and
+for the same reason.
 
 ## Testing
 

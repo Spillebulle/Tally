@@ -23,6 +23,7 @@ from .routers import (
     series,
     stats,
     sync,
+    themes,
     users,
     watchlist,
     webhooks,
@@ -99,6 +100,7 @@ for router in (
     images.router,
     api_keys.router,
     saved_views.router,
+    themes.router,
 ):
     app.include_router(router)
 
