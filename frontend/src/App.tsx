@@ -14,8 +14,12 @@ import { Watchlist } from '@/pages/Watchlist'
 
 function FullPageSpinner() {
   return (
-    <div className="grid min-h-screen place-items-center bg-canvas">
-      <Spinner className="text-3xl text-accent" />
+    <div className="grid min-h-screen place-items-center bg-window">
+      {/* A spinner is a last resort and is 16px `text-dim` (section 7.18).
+          There is nothing to say beside it here: the app has not decided yet
+          whether there is a session, so the page has no subject. */}
+      {/* 16px is the spinner's fixed size; it is an icon, not type. */}
+      <Spinner className="text-[16px] text-dim" />
       <span className="sr-only">Loading</span>
     </div>
   )
@@ -44,10 +48,10 @@ function PlexCallback() {
   }, [])
 
   return (
-    <div className="grid min-h-screen place-items-center bg-canvas px-6 text-center">
+    <div className="grid min-h-screen place-items-center bg-window px-6 text-center">
       <div>
-        <Spinner className="mx-auto text-2xl text-accent" />
-        <p className="mt-4 text-sm text-muted">
+        <Spinner className="mx-auto text-[16px] text-dim" />
+        <p className="mt-3 text-body text-muted">
           Signed in with Plex. You can close this window.
         </p>
       </div>
