@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import { Check, Sparkles, Star } from 'lucide-react'
 import type { MediaCard } from '@/lib/types'
 import {
   cn,
@@ -7,7 +8,6 @@ import {
   formatRating,
   posterFallbackGradient,
 } from '@/lib/utils'
-import { CheckIcon, SparkIcon, StarIcon } from './Icons'
 import { Spinner } from './ui'
 
 /**
@@ -17,6 +17,9 @@ import { Spinner } from './ui'
  * actually exists is only known once the request comes back. Layering means a
  * 404 simply reveals the placeholder, and there is no second code path to keep
  * in step with the first. `children` render above the artwork.
+ *
+ * Everything drawn over the artwork is a mark over user content, so it takes
+ * a derived ink (white on a dark scrim) rather than a theme token (§2.6).
  */
 export function Artwork({
   src,
@@ -40,7 +43,7 @@ export function Artwork({
     >
       {showTitle && (
         <div className="absolute inset-0 flex items-end p-3">
-          <span className="line-clamp-4 text-sm font-semibold text-white/90">{title}</span>
+          <span className="line-clamp-4 text-body font-semibold text-white/90">{title}</span>
         </div>
       )}
       {src && (
@@ -87,21 +90,23 @@ interface PosterProps {
   onQuickWatch?: (card: MediaCard) => void
   /** True while this card's quick-watch is in flight. */
   quickWatchPending?: boolean
+  /** Draws the 2px accent border of a picked card (§7.15). */
+  selected?: boolean
   className?: string
 }
 
 /**
- * The poster tile used across every grid and rail.
- *
- * The whole tile is one link; quick actions sit in an overlay that only appears
- * on hover or keyboard focus, so the default state stays quiet and the artwork
- * carries the page.
+ * The poster card used across every grid and rail (§7.15): the picture flush
+ * to the card's edge, a caption row under it, never over it. Hover turns the
+ * border dashed; a selected card wears the 2px accent border. No lift, no
+ * shadow — cards are the page's structure, not floating things.
  */
 export function Poster({
   card,
   showProgress = true,
   onQuickWatch,
   quickWatchPending = false,
+  selected = false,
   className,
 }: PosterProps) {
   const title = displayTitle(card)
@@ -114,31 +119,30 @@ export function Poster({
   const isComplete = card.status === 'completed'
 
   return (
-    <div className={cn('group/poster relative', className)}>
+    <div
+      className={cn(
+        'group/poster card relative overflow-hidden transition-colors duration-hover ease-ease',
+        selected
+          ? 'border-accent ring-1 ring-accent'
+          : 'hover:border-line-dashed focus-within:border-line-dashed',
+        className,
+      )}
+    >
       <Link
         to={`/item/${card.id}`}
         className="block focus-visible:outline-none"
-        aria-label={subtitle ? `${title} — ${subtitle}` : title}
+        aria-label={subtitle ? `${title}, ${subtitle}` : title}
       >
-        <Artwork
-          src={card.poster_url}
-          title={title}
-          className="aspect-[2/3] w-full rounded-xl bg-raised shadow-card
-                     ring-1 ring-line transition-all duration-300 ease-spring
-                     group-hover/poster:-translate-y-1 group-hover/poster:shadow-lift
-                     group-focus-within/poster:-translate-y-1 group-focus-within/poster:ring-accent"
-          imgClassName="transition-transform duration-500 ease-spring
-                        group-hover/poster:scale-[1.04]"
-        >
-          {/* Badges */}
+        <Artwork src={card.poster_url} title={title} className="aspect-[2/3] w-full">
+          {/* Badges sit over the artwork, so they keep the scrim-and-white
+              derived ink rather than theme tokens. */}
           <div className="pointer-events-none absolute left-2 top-2 flex flex-wrap gap-1.5">
             {card.is_anime && (
               <span
-                className="inline-flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5
-                           text-[10px] font-semibold uppercase tracking-wide text-white
-                           backdrop-blur-sm"
+                className="inline-flex items-center gap-1 rounded-tight bg-black/70 px-1.5 py-0.5
+                           text-eyebrow font-semibold uppercase text-white backdrop-blur-sm"
               >
-                <SparkIcon className="text-[11px]" />
+                <Sparkles size={11} aria-hidden="true" />
                 Anime
               </span>
             )}
@@ -147,9 +151,8 @@ export function Poster({
                 failed to load — which is how it got reported as a bug. */}
             {card.is_personal_media && (
               <span
-                className="inline-flex items-center rounded-md bg-black/70 px-1.5 py-0.5
-                           text-[10px] font-semibold uppercase tracking-wide text-white
-                           backdrop-blur-sm"
+                className="inline-flex items-center rounded-tight bg-black/70 px-1.5 py-0.5
+                           text-eyebrow font-semibold uppercase text-white backdrop-blur-sm"
               >
                 Home video
               </span>
@@ -158,24 +161,25 @@ export function Poster({
 
           {isComplete && (
             <span
-              className="pointer-events-none absolute right-2 top-2 grid h-6 w-6 place-items-center
-                         rounded-full bg-good text-white shadow"
+              className="pointer-events-none absolute right-2 top-2 grid h-5 w-5 place-items-center
+                         rounded-full bg-good text-white"
               title="Watched"
             >
-              <CheckIcon className="text-xs" />
+              <Check size={12} strokeWidth={3} aria-hidden="true" />
             </span>
           )}
 
-          {/* Hover overlay */}
+          {/* Hover overlay. Everything in it is also reachable elsewhere (the
+              item page), since hover does not exist on touch. */}
           <div
             className="absolute inset-0 flex items-end justify-between gap-2 bg-gradient-to-t
                        from-black/85 via-black/25 to-transparent p-2.5 opacity-0
-                       transition-opacity duration-300
+                       transition-opacity duration-open
                        group-hover/poster:opacity-100 group-focus-within/poster:opacity-100"
           >
             {card.rating != null && card.rating > 0 ? (
-              <span className="flex items-center gap-0.5 text-[11px] text-white/90">
-                <StarIcon filled className="text-warn" />
+              <span className="figure flex items-center gap-1 text-tiny text-white/90">
+                <Star size={11} fill="currentColor" aria-hidden="true" />
                 {formatRating(card.rating)}
                 <span className="text-white/60">/10</span>
               </span>
@@ -190,9 +194,9 @@ export function Poster({
                   onQuickWatch(card)
                 }}
                 disabled={quickWatchPending}
-                className="pointer-events-auto grid h-8 w-8 place-items-center rounded-full
-                           bg-white/95 text-black transition-transform hover:scale-110
-                           active:scale-95 disabled:scale-100"
+                className="pointer-events-auto grid h-7 w-7 place-items-center rounded-full
+                           bg-white/95 text-black transition-opacity duration-hover
+                           hover:opacity-90 disabled:opacity-70"
                 title={quickWatchPending ? 'Marking as watched…' : 'Mark as watched'}
                 aria-label={
                   quickWatchPending
@@ -203,9 +207,9 @@ export function Poster({
                 {/* Marking pushes a scrobble to Plex, so it is a round trip.
                     Without this the tile just sat there looking ignored. */}
                 {quickWatchPending ? (
-                  <Spinner className="text-sm" />
+                  <Spinner className="text-body" />
                 ) : (
-                  <CheckIcon className="text-sm" />
+                  <Check size={14} aria-hidden="true" />
                 )}
               </button>
             )}
@@ -213,47 +217,46 @@ export function Poster({
 
           {/* Resume progress sits on the artwork's bottom edge. */}
           {showProgress && progress != null && progress > 0 && progress < 100 && (
-            <div className="absolute inset-x-0 bottom-0 h-1 bg-black/50">
+            <div className="absolute inset-x-0 bottom-0 h-[3px] bg-black/50">
               <div className="h-full bg-accent" style={{ width: `${progress}%` }} />
             </div>
           )}
         </Artwork>
-      </Link>
 
-      <div className="mt-2 px-0.5">
-        <Link
-          to={`/item/${card.id}`}
-          className="line-clamp-1 text-sm font-medium text-ink hover:text-accent"
-        >
-          {title}
-        </Link>
-        <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
-          <span className="line-clamp-1">{subtitle ?? '—'}</span>
-        </div>
-        {episodeProgress != null && card.media_type === 'show' && (
-          <div className="mt-1.5 flex items-center gap-2">
-            <div className="h-1 flex-1 overflow-hidden rounded-full bg-line">
+        {/* Caption row: title 12px 600 `text-strong`, the figure at the right
+            in `text-dim` (§7.15). */}
+        <div className="px-2.5 py-2">
+          <div className="line-clamp-1 text-body font-semibold text-strong">{title}</div>
+          <div className="mt-0.5 flex items-center justify-between gap-2 text-tiny text-dim">
+            <span className="line-clamp-1">{subtitle ?? '–'}</span>
+            {episodeProgress != null && card.media_type === 'show' && (
+              <span className="figure shrink-0">
+                {card.watched_episodes}/{card.total_episodes}
+              </span>
+            )}
+          </div>
+          {episodeProgress != null && card.media_type === 'show' && (
+            <div className="mt-1.5 h-[3px] overflow-hidden rounded-full bg-rail">
               <div
                 className="h-full rounded-full bg-accent"
                 style={{ width: `${Math.min(100, episodeProgress)}%` }}
               />
             </div>
-            <span className="shrink-0 text-[10px] tabular-nums text-muted">
-              {card.watched_episodes}/{card.total_episodes}
-            </span>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      </Link>
     </div>
   )
 }
 
 export function PosterSkeleton() {
   return (
-    <div>
-      <div className="skeleton aspect-[2/3] w-full rounded-xl" />
-      <div className="skeleton mt-2 h-3.5 w-3/4 rounded" />
-      <div className="skeleton mt-1.5 h-3 w-1/3 rounded" />
+    <div className="card overflow-hidden">
+      <div className="skeleton aspect-[2/3] w-full" />
+      <div className="px-2.5 py-2">
+        <div className="skeleton h-3 w-3/4 rounded-tight" />
+        <div className="skeleton mt-1.5 h-2.5 w-1/3 rounded-tight" />
+      </div>
     </div>
   )
 }
@@ -276,7 +279,7 @@ export function PosterGrid({
 }: PosterGridProps) {
   return (
     <div
-      className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4
+      className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4
                  lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7"
     >
       {loading
@@ -316,23 +319,22 @@ export function PosterRail({
   if (!loading && cards.length === 0) return null
 
   return (
-    <section className="animate-fade-up">
-      <div className="mb-3 flex items-baseline justify-between gap-4">
-        <h2 className="text-lg font-semibold tracking-tight text-ink">{title}</h2>
+    <section>
+      <div className="mb-2 flex items-baseline justify-between gap-4">
+        <h2 className="text-heading font-semibold text-strong">{title}</h2>
         {action}
       </div>
-      {/* The padding is room for the hover lift, not spacing: `scroll-x` is a
-          scroll container on *both* axes (see index.css), and a tile that
-          translates up by 4px and grows `shadow-lift` leaves the padding box
-          and is clipped. With no top padding the clip line fell exactly under
-          the heading, so a hovered card looked like it slid behind the
-          section title — a z-index would not have helped, because a clip is
-          not a stacking order. Each padding is taken straight back as a
-          negative margin, so nothing moves and the rail still starts flush
-          with the heading above it. */}
-      <div className="scroll-x scrollbar-none -mx-2 -mt-2 flex gap-4 px-2 pb-2 pt-2">
+      {/* The padding is room for the keyboard focus ring, not spacing:
+          `scroll-x` clips on both axes (see index.css), and a 2px ring on a
+          flush tile would be cut on every edge. Each padding is taken straight
+          back as a negative margin, so nothing moves and the rail still starts
+          flush with the heading above it. */}
+      <div className="scroll-x scrollbar-none -mx-1 -my-1 flex gap-3 px-1 py-1">
         {(loading ? Array.from({ length: 8 }) : cards).map((card, index) => (
-          <div key={loading ? index : (card as MediaCard).id} className="w-[140px] shrink-0 sm:w-[160px]">
+          <div
+            key={loading ? index : (card as MediaCard).id}
+            className="w-[140px] shrink-0 sm:w-[150px]"
+          >
             {loading ? (
               <PosterSkeleton />
             ) : (

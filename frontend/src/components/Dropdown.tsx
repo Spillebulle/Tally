@@ -1,35 +1,37 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type RefObject,
 } from 'react'
+import { createPortal } from 'react-dom'
+import { Check, ChevronDown, Minus, Search } from 'lucide-react'
 import type { MultiValue } from '@/lib/browse-filters'
 import { cn } from '@/lib/utils'
-import { CheckIcon, ChevronRightIcon, SearchIcon } from './Icons'
-import { Segmented } from './ui'
+import { CheckboxMark, Segmented } from './ui'
 
 /**
- * The one dropdown in the app.
+ * The one dropdown in the app (§7.7).
  *
- * Everything that offers a list of things to pick goes through here — the
+ * Everything that offers a list of things to pick goes through here: the
  * single-value selects (sort, a decade, a status) and the multi-value facets
- * (genre, certificate, format, library, server) alike — so that a dropdown
- * looks and behaves the same wherever it is met. Before this there were two
- * shapes: a native `<select>`, whose popup the page cannot style at all and
- * which arrives square-cornered and system-coloured in the middle of a rounded
- * surface, and a flat row of chips, which is fine for six genres and unusable
- * for sixty.
+ * (genre, certificate, format, library, server) alike, so that a dropdown
+ * looks and behaves the same wherever it is met.
  *
- * ## Why this floats when the filter disclosure does not
+ * ## The list matches the box it drops from
  *
- * The "Filters" panel pushes the page down rather than floating, and that is
- * still right for a panel the size of a card. A *dropdown* cannot: it belongs
- * to the control it hangs off, and shoving the grid down every time somebody
- * glances at the genre list is worse than the layer it saves. So this is the
- * one floating layer here, and it pays the price a floating layer owes:
+ * The list opens 4px below the trigger, left edges aligned (right edges when
+ * the trigger sits near the window's right edge), at least as wide as the
+ * trigger; a bordered trigger gets a list of exactly its width. It flips above
+ * when there is no room below, and it is **portalled** to the page so no
+ * container can clip it. The current item is marked with the selected-row
+ * look, never an accent background.
+ *
+ * ## What a floating layer owes
  *
  * - **Escape closes it and hands focus back to the trigger**, so the keyboard
  *   is never stranded in a layer over the page.
@@ -37,18 +39,11 @@ import { Segmented } from './ui'
  *   so a tap that starts outside is not also delivered to whatever it lands on.
  * - **Focus leaving closes it**, which is what makes Tab an exit and not a trap.
  * - **It is unmounted when closed**, never faded. `opacity-0` leaves a panel's
- *   worth of controls armed and tappable over the grid — see the standing rule
- *   about opacity not being a hit test.
+ *   worth of controls armed and tappable over the grid; opacity is not a
+ *   hit test.
  * - **Nothing is behind hover.** Hover only tints a row; every state a row can
- *   be in is drawn (a tick, a minus, a strike-through) and said in its
+ *   be in is drawn (a tick, a dash, a strike-through) and said in its
  *   accessible name.
- *
- * ## Anchoring
- *
- * The panel anchors to whichever edge of its trigger keeps it on screen. A
- * control near the right of the filter bar would otherwise open a panel past
- * the window edge and take the whole page sideways with it, which is the exact
- * thing every horizontally-scrolling row in this app exists to prevent.
  */
 
 /**
@@ -63,11 +58,14 @@ export interface DropdownOption {
   label: string
 }
 
-/** Roughly the panel's widest rendering, for the "does it fit?" test. */
-const PANEL_WIDTH = 288
+/** More than about ten items earns a search field (§7.7); fewer has nothing to find. */
+const SEARCHABLE_FROM = 10
 
-/** Options above this many earn a search box; below it there is nothing to find. */
-const SEARCHABLE_FROM = 6
+/** The list's cap before it scrolls inside itself. */
+const LIST_MAX_HEIGHT = 280
+
+/** A rough ceiling for the whole panel, for the "does it fit below?" test. */
+const PANEL_ESTIMATE = LIST_MAX_HEIGHT + 88
 
 /** Moves focus between the rows of a menu, for the arrow keys. */
 function moveFocus(list: HTMLElement | null, delta: number) {
@@ -86,14 +84,19 @@ function moveFocus(list: HTMLElement | null, delta: number) {
 }
 
 /**
- * Arrow / Home / End navigation over a menu's rows.
+ * Arrow / Home / End navigation over a menu's rows, plus typing to jump: a
+ * printable character focuses the first row whose label starts with what was
+ * typed, the way a native select does. The buffer clears after a pause.
  *
  * Takes the ref rather than the node: the handler is built while the list is
  * still being rendered, so reading `.current` here would capture the `null` it
  * held a moment before the panel mounted and the arrow keys would do nothing.
  */
-const menuKeys =
-  (listRef: RefObject<HTMLElement | null>) => (event: ReactKeyboardEvent) => {
+function useMenuKeys(listRef: RefObject<HTMLElement | null>) {
+  const buffer = useRef('')
+  const timer = useRef<number>()
+
+  return (event: ReactKeyboardEvent) => {
     const list = listRef.current
     const items = () =>
       Array.from(list?.querySelectorAll<HTMLButtonElement>('[data-option]') ?? [])
@@ -116,22 +119,74 @@ const menuKeys =
         all[all.length - 1]?.focus()
         break
       }
-      default:
+      default: {
+        // Typing jumps, but only when the keystroke is not already feeding a
+        // search box.
+        if (event.key.length !== 1 || event.ctrlKey || event.metaKey || event.altKey) break
+        if ((event.target as HTMLElement).tagName === 'INPUT') break
+        window.clearTimeout(timer.current)
+        buffer.current += event.key.toLowerCase()
+        timer.current = window.setTimeout(() => {
+          buffer.current = ''
+        }, 500)
+        const hit = items().find((item) =>
+          (item.dataset.label ?? item.textContent ?? '')
+            .trim()
+            .toLowerCase()
+            .startsWith(buffer.current),
+        )
+        hit?.focus()
         break
+      }
     }
   }
+}
+
+/** Where the open list sits, computed from the trigger's rectangle. */
+function panelStyle(rect: DOMRect, exactWidth: boolean): CSSProperties {
+  const style: CSSProperties = { position: 'fixed' }
+  // A bordered trigger gets a list of its own width — floored at the menu
+  // minimum (§7.1), because a narrow filter trigger would otherwise hand its
+  // search field a 90px list. A bare trigger's list is its width or wider,
+  // up to 240.
+  const width = exactWidth
+    ? Math.max(rect.width, 190)
+    : Math.max(rect.width, 190)
+  if (exactWidth) style.width = width
+  else {
+    style.minWidth = rect.width
+    style.maxWidth = Math.min(240, window.innerWidth - 16)
+  }
+
+  // Left edges aligned, unless that would push the list off screen.
+  if (rect.left + width > window.innerWidth - 8) {
+    style.right = Math.max(8, window.innerWidth - rect.right)
+  } else {
+    style.left = rect.left
+  }
+
+  // 4px below, or flipped 4px above when the room below has run out.
+  const fitsBelow =
+    rect.bottom + 4 + PANEL_ESTIMATE <= window.innerHeight ||
+    rect.bottom < window.innerHeight - rect.top
+  if (fitsBelow) style.top = rect.bottom + 4
+  else style.bottom = window.innerHeight - rect.top + 4
+  return style
+}
 
 /**
- * The trigger, the panel, and the plumbing that closes it.
+ * The trigger, the portalled list, and the plumbing that closes it.
  *
- * The panel's contents mount fresh on every open — a render prop rather than
- * children — which is what lets a search box and a frozen ordering reset
+ * The panel's contents mount fresh on every open (a render prop rather than
+ * children), which is what lets a search box and a frozen ordering reset
  * themselves without anything having to remember to clear them.
  */
 function DropdownShell({
   label,
   summary,
+  summaryNode,
   active,
+  variant = 'bordered',
   triggerClassName,
   children,
 }: {
@@ -139,14 +194,23 @@ function DropdownShell({
   label: string
   /** What the trigger shows: the current selection, in the user's words. */
   summary: string
-  /** Draw the trigger as narrowing something. */
+  /** The summary with structure (a mono count), where plain text is not enough. */
+  summaryNode?: ReactNode
+  /** Something is in force here: the label is drawn in full ink. */
   active?: boolean
+  /**
+   * `bordered` reads as a control on its own line or in a form row and gets a
+   * list of exactly its width; `bare` is a word and a chevron for inside a
+   * dense strip, whose list is at least its width (§7.7).
+   */
+  variant?: 'bordered' | 'bare'
   triggerClassName?: string
   children: (api: { close: () => void }) => ReactNode
 }) {
   const [open, setOpen] = useState(false)
-  const [alignRight, setAlignRight] = useState(false)
+  const [style, setStyle] = useState<CSSProperties>({})
   const wrapRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
 
   const close = () => {
@@ -154,48 +218,75 @@ function DropdownShell({
     triggerRef.current?.focus()
   }
 
+  const inside = (node: Node | null) =>
+    Boolean(
+      node && (wrapRef.current?.contains(node) || panelRef.current?.contains(node)),
+    )
+
   useEffect(() => {
     if (!open) return
     const onPointerDown = (event: PointerEvent) => {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false)
+      if (!inside(event.target as Node)) setOpen(false)
     }
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [open])
 
-  const toggle = () => {
-    if (open) {
-      close()
-      return
-    }
+  const place = () => {
     const rect = triggerRef.current?.getBoundingClientRect()
-    // Enough room to the right, or hang it off the right edge instead.
-    setAlignRight(Boolean(rect && rect.left + PANEL_WIDTH > window.innerWidth - 16))
-    setOpen(true)
+    if (rect) setStyle(panelStyle(rect, variant === 'bordered'))
+  }
+
+  // The list is anchored to the trigger but lives in a portal, so it has to
+  // follow the trigger when the page scrolls or the window resizes. The
+  // *first* placement happens in `toggle`, before the open render: mounted
+  // unpositioned even for a frame, the panel sits in flow at the end of the
+  // document, and its search box's autofocus scrolls the whole page down to
+  // it — which is exactly what happened.
+  useLayoutEffect(() => {
+    if (!open) return
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, variant])
+
+  const onKeyDown = (event: ReactKeyboardEvent) => {
+    if (!open) return
+    if (event.key === 'Escape') {
+      // Stopped here so a page listening for Escape does not also act on the
+      // same press; closing this layer is the whole of what was meant.
+      event.stopPropagation()
+      event.preventDefault()
+      close()
+    }
+  }
+
+  const onBlur = () => {
+    if (!open) return
+    // Deferred a frame, then judged by where focus actually is. The panel is
+    // portalled and its search box autofocuses while the portal is still
+    // mounting, so at the instant the trigger blurs, `relatedTarget` points
+    // into a subtree the refs have not caught up with yet; judging that
+    // snapshot closed the panel in the same breath as opening it. A frame
+    // later `document.activeElement` is settled: still inside means the focus
+    // only moved within the control, and nowhere (`body`) is a click on the
+    // page chrome, which the pointer listener already answers.
+    requestAnimationFrame(() => {
+      const now = document.activeElement
+      if (now && now !== document.body && !inside(now)) setOpen(false)
+    })
   }
 
   return (
     <div
       ref={wrapRef}
       className="relative inline-flex min-w-0"
-      onKeyDown={(event) => {
-        if (!open) return
-        if (event.key === 'Escape') {
-          // Stopped here so a page listening for Escape does not also act on
-          // the same press — closing this layer is the whole of what was meant.
-          event.stopPropagation()
-          event.preventDefault()
-          close()
-        }
-      }}
-      onBlur={(event) => {
-        if (!open) return
-        const next = event.relatedTarget as Node | null
-        // A null `relatedTarget` is focus going nowhere — a click on the page
-        // chrome, which the pointer listener already answers. Closing here too
-        // would fight it and swallow the click that reopens the control.
-        if (next && !wrapRef.current?.contains(next)) setOpen(false)
-      }}
+      onKeyDown={onKeyDown}
+      onBlur={onBlur}
     >
       <button
         ref={triggerRef}
@@ -204,43 +295,56 @@ function DropdownShell({
         aria-expanded={open}
         aria-label={`${label}: ${summary}`}
         title={`${label}: ${summary}`}
-        onClick={toggle}
+        onClick={() => {
+          if (open) {
+            close()
+          } else {
+            place()
+            setOpen(true)
+          }
+        }}
         className={cn(
-          'inline-flex h-9 min-w-0 max-w-[13rem] items-center gap-1.5 rounded-xl border',
-          'border-line bg-surface px-3 text-sm text-ink transition-colors',
-          'hover:border-line-accent-soft',
-          active && 'border-line-accent bg-accent-soft text-accent',
+          'inline-flex min-w-0 max-w-[13rem] items-center text-control',
+          'transition-colors duration-hover ease-ease',
+          variant === 'bordered' &&
+            'h-button gap-1.5 rounded-ctl border border-line bg-transparent px-2.5 hover:border-line-dashed',
+          variant === 'bordered' && open && 'border-line-dashed',
+          variant === 'bare' && 'h-dropdown gap-1 rounded-[4px] px-1 hover:text-strong',
+          active ? 'text-strong' : 'text-muted',
           triggerClassName,
         )}
       >
-        <span className="truncate">{summary}</span>
-        <ChevronRightIcon
+        <span className="truncate">{summaryNode ?? summary}</span>
+        <ChevronDown
+          size={14}
+          aria-hidden="true"
           className={cn(
-            'ml-auto shrink-0 text-xs text-muted transition-transform duration-200',
-            open ? '-rotate-90' : 'rotate-90',
+            'ml-auto shrink-0 text-muted transition-transform duration-open ease-ease',
+            open && 'rotate-180',
           )}
         />
       </button>
 
       {/* Unmounted when closed, so nothing inside is focusable or tappable
-          while it is invisible. */}
-      {open && (
-        <div
-          className={cn(
-            'absolute top-full z-30 mt-1.5 w-max min-w-[11rem]',
-            'max-w-[min(18rem,calc(100vw-2rem))] animate-fade-up rounded-2xl border',
-            'border-line bg-surface p-1.5 shadow-lift',
-            alignRight ? 'right-0' : 'left-0',
-          )}
-        >
-          {children({ close })}
-        </div>
-      )}
+          while it is invisible. Portalled so no container can clip it. */}
+      {open &&
+        createPortal(
+          <div
+            ref={panelRef}
+            style={style}
+            onKeyDown={onKeyDown}
+            onBlur={onBlur}
+            className="menu z-50 motion-safe:animate-rise"
+          >
+            {children({ close })}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }
 
-/** The search box every long list gets, and short ones do not need. */
+/** The search field every long list gets, pinned at the top (§7.7, §7.11). */
 function OptionSearch({
   label,
   value,
@@ -255,10 +359,11 @@ function OptionSearch({
   autoFocus: boolean
 }) {
   return (
-    <div className="relative mb-1.5">
-      <SearchIcon
-        className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2
-                   text-sm text-muted"
+    <div className="relative mb-1">
+      <Search
+        size={16}
+        aria-hidden="true"
+        className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
       />
       <input
         type="text"
@@ -275,19 +380,19 @@ function OptionSearch({
             onEnterList()
           }
         }}
-        className="input h-8 rounded-lg py-0 pl-8 text-sm"
+        className="field pl-8"
       />
     </div>
   )
 }
 
-/** Nothing matched the search — said, rather than an empty panel. */
+/** Nothing matched the search: said, rather than an empty panel. */
 const NoMatches = () => (
-  <p className="px-2 py-3 text-center text-xs text-muted">No matches.</p>
+  <p className="px-2 py-3 text-center text-tiny text-dim">No matches.</p>
 )
 
 /**
- * A dropdown that picks one thing. The rounded replacement for `<select>`.
+ * A dropdown that picks one thing. The house replacement for `<select>`.
  *
  * Values are opaque strings the caller round-trips; `BrowseFilters` hands over
  * indices, because a filter's value can be an object and only the table knows
@@ -299,18 +404,22 @@ export function Select({
   value,
   onChange,
   className,
+  variant,
 }: {
   label: string
   options: DropdownOption[]
   value: string
   onChange: (value: string) => void
   className?: string
+  variant?: 'bordered' | 'bare'
 }) {
   const current = options.find((option) => option.value === value)
   return (
     <DropdownShell
       label={label}
-      summary={current?.label ?? options[0]?.label ?? '—'}
+      summary={current?.label ?? options[0]?.label ?? '–'}
+      active
+      variant={variant}
       triggerClassName={className}
     >
       {({ close }) => (
@@ -341,6 +450,7 @@ function SelectPanel({
 }) {
   const [search, setSearch] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
+  const menuKeys = useMenuKeys(listRef)
   const searchable = options.length > SEARCHABLE_FROM
 
   const needle = search.trim().toLowerCase()
@@ -363,8 +473,8 @@ function SelectPanel({
         ref={listRef}
         role="menu"
         aria-label={label}
-        onKeyDown={menuKeys(listRef)}
-        className="scrollbar-thin max-h-64 overflow-y-auto"
+        onKeyDown={menuKeys}
+        className="flex max-h-[280px] flex-col gap-px overflow-y-auto"
       >
         {visible.length === 0 && <NoMatches />}
         {visible.map((option) => {
@@ -374,21 +484,19 @@ function SelectPanel({
               key={option.value}
               type="button"
               data-option=""
+              data-label={option.label}
               role="menuitemradio"
               aria-checked={chosen}
               autoFocus={!searchable && chosen}
               onClick={() => onPick(option.value)}
-              className={cn(
-                'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm',
-                'transition-colors hover:bg-raised hover:text-ink',
-                chosen ? 'font-medium text-accent' : 'text-subtle',
-              )}
+              className={cn('menu-item text-left', chosen && 'menu-item-selected')}
             >
-              <CheckIcon
-                className={cn('shrink-0 text-xs', !chosen && 'opacity-0')}
-                aria-hidden="true"
-              />
-              <span className="truncate">{option.label}</span>
+              <span className="min-w-0 flex-1 truncate">{option.label}</span>
+              {/* The fill marks the current item; the check restates it, since
+                  short labels can make the fill easy to miss. */}
+              {chosen && (
+                <Check size={16} aria-hidden="true" className="shrink-0 text-strong" />
+              )}
             </button>
           )
         })}
@@ -400,18 +508,19 @@ function SelectPanel({
 /**
  * A dropdown that picks several things, and can refuse some.
  *
- * A row is a three-state checkbox, cycling off → included → excluded → off.
- * Three states in one row rather than two parallel lists, because "not horror"
- * is the same question as "horror" asked backwards, and a second list of the
- * same fifty genres doubles the control to say so. The state is drawn (a tick,
- * a minus and a strike-through), named (`aria-checked` is `mixed` for an
- * exclusion, and the accessible name says which state the row is in) and never
- * carried by colour alone.
+ * A row cycles off → included → excluded → off. Three states in one row rather
+ * than two parallel lists, because "not horror" is the same question as
+ * "horror" asked backwards, and a second list of the same fifty genres doubles
+ * the control to say so. The state is drawn (a tick, a dash in critical, a
+ * strike-through), named (`aria-checked` is `mixed` for an exclusion, and the
+ * accessible name says which state the row is in) and never carried by colour
+ * alone. Toggling keeps the list open; changes apply live and there is no
+ * Apply button.
  *
- * The rows in force are pinned to the top — but the ordering is frozen when the
+ * The rows in force are pinned to the top, but the ordering is frozen when the
  * panel opens, so ticking one does not make the list jump under the pointer
- * mid-selection. It re-sorts the next time the panel is opened, which is when a
- * reordering is information rather than an interruption.
+ * mid-selection. It re-sorts the next time the panel is opened, which is when
+ * a reordering is information rather than an interruption.
  */
 export function MultiSelect({
   label,
@@ -420,6 +529,7 @@ export function MultiSelect({
   onChange,
   andable,
   renderOption,
+  variant,
 }: {
   label: string
   options: DropdownOption[]
@@ -429,24 +539,37 @@ export function MultiSelect({
   andable?: boolean
   /** Draws an option as something other than its plain text — a badge, say. */
   renderOption?: (option: DropdownOption) => ReactNode
+  variant?: 'bordered' | 'bare'
 }) {
   const known = new Map(options.map((option) => [option.value, option.label]))
   const chosen = [
     ...value.include.map((name) => known.get(name) ?? name),
-    ...value.exclude.map((name) => `−${known.get(name) ?? name}`),
+    ...value.exclude.map((name) => `not ${known.get(name) ?? name}`),
   ]
 
-  // The trigger says what is in force, not just that something is. "Genre" over
-  // a grid narrowed to two genres is a control that tells you nothing.
+  // The trigger summarises what is in force (§7.7): the field's own name when
+  // nothing is, the item itself for one, both for two, a count beyond that.
   const summary =
     chosen.length === 0
       ? label
-      : chosen.length === 1
-        ? chosen[0]
-        : `${chosen[0]} +${chosen.length - 1}`
+      : chosen.length <= 2
+        ? chosen.join(', ')
+        : `${chosen.length} selected`
+  const summaryNode =
+    chosen.length > 2 ? (
+      <>
+        <span className="figure">{chosen.length}</span> selected
+      </>
+    ) : undefined
 
   return (
-    <DropdownShell label={label} summary={summary} active={chosen.length > 0}>
+    <DropdownShell
+      label={label}
+      summary={summary}
+      summaryNode={summaryNode}
+      active={chosen.length > 0}
+      variant={variant}
+    >
       {() => (
         <MultiPanel
           label={label}
@@ -493,6 +616,7 @@ function MultiPanel({
 }) {
   const [search, setSearch] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
+  const menuKeys = useMenuKeys(listRef)
 
   // Frozen at open: what was already in force sorts to the top, and stays where
   // it is for as long as the panel is on screen.
@@ -521,6 +645,13 @@ function MultiPanel({
 
   const searchable = options.length > SEARCHABLE_FROM
   const anySet = value.include.length + value.exclude.length > 0
+  // "All" acts on the *visible* set, so a search narrows what it clears.
+  const visibleSet = anySet
+    ? ordered.filter(
+        (option) =>
+          value.include.includes(option.value) || value.exclude.includes(option.value),
+      )
+    : []
 
   return (
     <>
@@ -538,11 +669,38 @@ function MultiPanel({
         ref={listRef}
         role="menu"
         aria-label={label}
-        onKeyDown={menuKeys(listRef)}
-        className="scrollbar-thin max-h-64 overflow-y-auto"
+        onKeyDown={menuKeys}
+        className="flex max-h-[280px] flex-col gap-px overflow-y-auto"
       >
+        {/* The "All" row (§7.7): a three-state box in the same column as the
+            items, separated by a hairline. Checked means nothing narrows this
+            facet; a dash means some rows are in force, and clicking clears
+            them (the visible ones, when a search is narrowing the list). */}
+        <button
+          type="button"
+          data-option=""
+          data-label="All"
+          role="menuitemcheckbox"
+          aria-checked={anySet ? 'mixed' : true}
+          aria-label={anySet ? `${label}, some selected. Clear.` : `${label}, all shown.`}
+          title={anySet ? 'Clear the selection' : 'Nothing narrows this'}
+          onClick={() => {
+            if (!anySet) return
+            const clearing = new Set(visibleSet.map((option) => option.value))
+            onChange({
+              ...value,
+              include: value.include.filter((name) => !clearing.has(name)),
+              exclude: value.exclude.filter((name) => !clearing.has(name)),
+            })
+          }}
+          className="menu-item mb-1 border-b border-line pb-2 text-left"
+        >
+          <CheckboxMark state={anySet ? 'mixed' : true} />
+          <span className="min-w-0 flex-1 truncate">All</span>
+        </button>
+
         {ordered.length === 0 && <NoMatches />}
-        {ordered.map((option, index) => {
+        {ordered.map((option) => {
           const included = value.include.includes(option.value)
           const excluded = value.exclude.includes(option.value)
           return (
@@ -550,9 +708,9 @@ function MultiPanel({
               key={option.value}
               type="button"
               data-option=""
+              data-label={option.label}
               role="menuitemcheckbox"
               aria-checked={included ? true : excluded ? 'mixed' : false}
-              autoFocus={!searchable && index === 0}
               aria-label={`${option.label}${
                 included ? ', included' : excluded ? ', excluded' : ''
               }`}
@@ -564,24 +722,28 @@ function MultiPanel({
                     : `Include ${option.label}`
               }
               onClick={() => onChange(cycle(value, option.value))}
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left
-                         text-sm text-subtle transition-colors hover:bg-raised hover:text-ink"
+              className="menu-item text-left"
             >
-              {/* Drawn, not implied: a tick for in, a minus for out, an empty
-                  box for neither. */}
+              {/* Drawn, not implied: a tick for in, a dash in critical for
+                  out, an empty box for neither. The row keeps its plain look;
+                  the box is the state, and the fill stays the hover cue. */}
+              {excluded ? (
+                <span
+                  aria-hidden="true"
+                  className="grid h-4 w-4 shrink-0 place-items-center rounded-tight
+                             border border-critical bg-critical-bg text-critical"
+                >
+                  <Minus size={12} strokeWidth={3} />
+                </span>
+              ) : (
+                <CheckboxMark state={included} />
+              )}
               <span
-                aria-hidden="true"
                 className={cn(
-                  'grid h-4 w-4 shrink-0 place-items-center rounded border text-[0.7rem]',
-                  'font-bold leading-none',
-                  included && 'border-accent bg-accent text-accent-ink',
-                  excluded && 'border-danger bg-danger text-surface',
-                  !included && !excluded && 'border-line',
+                  'min-w-0 flex-1 truncate',
+                  excluded && 'text-critical line-through',
                 )}
               >
-                {included ? <CheckIcon /> : excluded ? '–' : null}
-              </span>
-              <span className={cn('truncate', excluded && 'text-danger line-through')}>
                 {renderOption ? renderOption(option) : option.label}
               </span>
             </button>
@@ -589,32 +751,20 @@ function MultiPanel({
         })}
       </div>
 
-      {(anySet || (andable && value.include.length > 1)) && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-line px-1 pt-1.5">
-          {/* Only where AND can change the answer: a title has several genres,
-              but one studio and one certificate, so "all" over those is the
-              empty set by construction — and over a single value it says
-              nothing. */}
-          {andable && value.include.length > 1 && (
-            <Segmented
-              label={`Match ${label.toLowerCase()}`}
-              value={value.all ? 'all' : 'any'}
-              onChange={(next) => onChange({ ...value, all: next === 'all' })}
-              options={[
-                { value: 'any', label: 'Any' },
-                { value: 'all', label: 'All' },
-              ]}
-            />
-          )}
-          {anySet && (
-            <button
-              type="button"
-              onClick={() => onChange({ include: [], exclude: [], all: false })}
-              className="ml-auto px-1 text-xs font-medium text-muted hover:text-danger"
-            >
-              Clear {label.toLowerCase()}
-            </button>
-          )}
+      {/* Only where AND can change the answer: a title has several genres, but
+          one studio and one certificate, so "all" over those is the empty set
+          by construction, and over a single value it says nothing. */}
+      {andable && value.include.length > 1 && (
+        <div className="mt-1 border-t border-line px-1 pt-1.5">
+          <Segmented
+            label={`Match ${label.toLowerCase()}`}
+            value={value.all ? 'all' : 'any'}
+            onChange={(next) => onChange({ ...value, all: next === 'all' })}
+            options={[
+              { value: 'any', label: 'Any' },
+              { value: 'all', label: 'All' },
+            ]}
+          />
         </div>
       )}
     </>

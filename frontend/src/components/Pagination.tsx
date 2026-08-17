@@ -88,23 +88,26 @@ export function Pagination({
   if (pageCount <= 1) return null
 
   return (
-    <nav className="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">
+    <nav className="mt-6 flex items-center justify-center gap-2" aria-label="Pagination">
       <button
         type="button"
         onClick={() => onPage(Math.max(0, page - 1))}
         disabled={page === 0}
-        className="btn-outline h-9 px-3 text-sm"
+        title={page === 0 ? 'Already on the first page' : undefined}
+        className="btn-secondary"
       >
         Previous
       </button>
-      <span className="px-3 text-sm tabular-nums text-muted">
-        Page {page + 1} of {pageCount}
+      <span className="px-2 text-control text-muted">
+        Page <span className="figure">{page + 1}</span> of{' '}
+        <span className="figure">{pageCount}</span>
       </span>
       <button
         type="button"
         onClick={() => onPage(Math.min(last, page + 1))}
         disabled={page >= last}
-        className="btn-outline h-9 px-3 text-sm"
+        title={page >= last ? 'Already on the last page' : undefined}
+        className="btn-secondary"
       >
         Next
       </button>

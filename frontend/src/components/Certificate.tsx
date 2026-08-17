@@ -22,8 +22,8 @@ export function CertificateBadge({
   return (
     <span
       className={cn(
-        'inline-flex items-center rounded-md border border-line bg-raised px-1.5 py-0.5',
-        'text-[0.7rem] font-semibold leading-none tracking-wide text-subtle',
+        'inline-flex items-center rounded-tight border border-line bg-control px-1.5 py-0.5',
+        'text-tiny font-semibold leading-none text-fg',
         className,
       )}
     >
