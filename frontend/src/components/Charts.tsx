@@ -361,26 +361,29 @@ interface ColumnChartProps<T extends StatCount> {
    */
   showValues?: boolean
   /**
-   * How much room one axis label needs, in pixels. Declares "this axis has more
-   * columns than it has room for labels", and turns on both halves of the fix.
+   * Fit every label to its column instead of letting the axis overflow.
+   * Declares "this axis has more columns than a 12px label per column can
+   * hold", and turns on both halves of the fix.
    *
-   * The 24-hour profile is what this exists for and it was **broken**, not
-   * merely crowded: it drew a bar per hour and printed a label on every third
-   * one, so twenty-four bars sat under eight numbers and nothing said which was
-   * which. Bars appeared to fall *between* the labels, which is exactly how a
-   * chart reads when its axis has come unanchored from its marks.
+   * The 24-hour profile is what this exists for, and it has been broken twice.
+   * First it printed a label on every third column, so twenty-four bars sat
+   * under eight numbers and nothing said which was which. Then it *thinned* the
+   * labels to whatever the measured width could hold, leaving an empty span
+   * under the unnamed columns — and an empty span has no line box, so those
+   * columns lost their label row, their bar dropped into the space where the
+   * number should have been, and, because the named columns kept the intrinsic
+   * width of their text, the unnamed ones were squeezed thinner as well. A
+   * chart that scales its bars to the data must not also scale them to whether
+   * they happen to be labelled.
    *
-   * The fix is not fewer bars and not smaller type. Every column gets a **tick**
-   * — drawn inside the column itself, so it is aligned with its bar by
-   * construction rather than by arithmetic that can drift — and the *labels* are
-   * thinned to whatever actually fits the measured width. On a wide card all
-   * twenty-four hours are named; on a phone every second or third is, and the
-   * unnamed ones still have a tick showing where they are. Thinning the labels
-   * while keeping a mark per bar is the only one of the three obvious options
-   * (rotate, abbreviate, thin) that does not either cost height or drop
-   * information.
+   * So now nothing is dropped. Every column keeps its bar, its tick and its
+   * label; what gives is the **type size**, computed from the measured column
+   * width and the longest formatted label, down to a floor small enough for
+   * twenty-four two-digit hours on a phone. Every column is `min-w-0` so the
+   * text can never widen one column at its neighbours' expense — the label
+   * fits the column, never the other way round.
    */
-  minLabelWidth?: number
+  fitLabels?: boolean
 }
 
 export function ColumnChart<T extends StatCount>({
@@ -392,9 +395,9 @@ export function ColumnChart<T extends StatCount>({
   activeLabel = null,
   compare,
   showValues = true,
-  minLabelWidth,
+  fitLabels = false,
 }: ColumnChartProps<T>) {
-  // Only consulted when `minLabelWidth` is set, but hooks cannot be conditional.
+  // Only consulted when `fitLabels` is set, but hooks cannot be conditional.
   const [frame, available] = useMeasuredWidth<HTMLDivElement>()
   const total = data.reduce((sum, d) => sum + d.value, 0)
   const compareTotal = compare?.data.reduce((sum, d) => sum + d.value, 0) ?? 0
@@ -404,13 +407,18 @@ export function ColumnChart<T extends StatCount>({
   // One scale across both series, or the comparison would be a lie.
   const max = Math.max(...data.map((d) => d.value), ...(compare?.data ?? []).map((d) => d.value), 1)
 
-  // How many columns share one label. 320 stands in for the first render, one
-  // frame before the observer answers: a plausible phone width, so the axis is
-  // never briefly drawn with more labels than it can hold.
-  const columnWidth = (available || 320) / Math.max(1, data.length)
-  const labelEvery = minLabelWidth
-    ? Math.max(1, Math.ceil(minLabelWidth / Math.max(1, columnWidth)))
+  // Type size that lets the longest label fit inside one column. 320 stands
+  // in for the first render, one frame before the observer answers: a
+  // plausible phone width, so the axis is never briefly drawn larger than it
+  // can hold and then snapped down. 0.62em per character is a fair average
+  // for tabular digits and short caps in the UI face; the floor keeps a phone
+  // legible rather than technically present.
+  const gap = fitLabels ? 2 : 0
+  const columnWidth = ((available || 320) - gap * (data.length - 1)) / Math.max(1, data.length)
+  const longest = fitLabels
+    ? data.reduce((n, entry) => Math.max(n, formatLabel(entry.label).length), 1)
     : 1
+  const labelSize = fitLabels ? clamp(columnWidth / (0.62 * longest), 7, 12) : undefined
 
   return (
     // `items-stretch` is load-bearing, not a default worth "tidying" away: the
@@ -423,11 +431,13 @@ export function ColumnChart<T extends StatCount>({
     //
     // Tighter gap on narrow screens: the rating chart went from five columns to
     // ten, and a fixed 8px gutter ate most of the width on a phone.
-    <div className="flex h-44 items-stretch gap-1 sm:gap-2" ref={frame}>
+    <div
+      className={cn('flex h-44 items-stretch', fitLabels ? 'gap-[2px]' : 'gap-1 sm:gap-2')}
+      ref={frame}
+    >
       {data.map((entry, index) => {
         const height = (entry.value / max) * 100
         const active = activeLabel === entry.label
-        const named = index % labelEvery === 0
         const earlier = compare?.data[index]
         const text = [
           describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`,
@@ -476,14 +486,21 @@ export function ColumnChart<T extends StatCount>({
               {/* A tick per column, drawn *inside* the column, so it is aligned
                   with its own bar by construction rather than by arithmetic
                   that can drift. Only where the axis said it is dense — a chart
-                  that names every column needs no help locating them. */}
-              {minLabelWidth ? (
+                  that names every column at full size needs no help locating
+                  them. */}
+              {fitLabels ? (
                 <span aria-hidden="true" className="h-1 w-px shrink-0 bg-line" />
               ) : null}
-              {/* An empty label still occupies its line, so thinning the labels
-                  cannot make one column taller than its neighbours. */}
-              <span className={cn('text-xs', active ? 'text-ink' : 'text-muted')}>
-                {named ? formatLabel(entry.label) : ''}
+              {/* One line-height for every label whatever its font size, so a
+                  scaled axis cannot make one column taller than its neighbours. */}
+              <span
+                className={cn(
+                  'text-xs leading-4 tabular-nums',
+                  active ? 'text-ink' : 'text-muted',
+                )}
+                style={labelSize ? { fontSize: `${labelSize}px` } : undefined}
+              >
+                {formatLabel(entry.label)}
               </span>
             </span>
           </>
@@ -493,7 +510,7 @@ export function ColumnChart<T extends StatCount>({
           return (
             <div
               key={entry.label}
-              className="flex flex-1 flex-col items-center gap-2"
+              className="flex min-w-0 flex-1 flex-col items-center gap-2"
               title={text}
             >
               {bar}
@@ -508,7 +525,7 @@ export function ColumnChart<T extends StatCount>({
             // The whole column is the hit target, not just the drawn bar — a
             // short bar is only a few pixels tall and would be unclickable.
             className={cn(
-              'group/col flex flex-1 flex-col items-center gap-2',
+              'group/col flex min-w-0 flex-1 flex-col items-center gap-2',
               CLICKABLE_MARK,
             )}
             onClick={() => onSelect(entry, index)}
@@ -1134,7 +1151,7 @@ export function StackedColumnChart<T extends StackedEntry>({
           return (
             <div
               key={entry.label}
-              className="flex flex-1 flex-col items-center gap-2"
+              className="flex min-w-0 flex-1 flex-col items-center gap-2"
               title={text}
             >
               {bar}
@@ -1146,7 +1163,7 @@ export function StackedColumnChart<T extends StackedEntry>({
             key={entry.label}
             type="button"
             className={cn(
-              'group/col flex flex-1 flex-col items-center gap-2',
+              'group/col flex min-w-0 flex-1 flex-col items-center gap-2',
               CLICKABLE_MARK,
             )}
             onClick={() => onSelect(entry, index)}
