@@ -408,6 +408,14 @@ interface FacetEntry extends StatCount {
 }
 
 /**
+ * A score out of 10, always to one decimal.
+ *
+ * Every rating on this page goes through it, so a bar, its table and the crowd's
+ * figure in the line beside it cannot each round differently.
+ */
+const ratingFigure = (value: number) => value.toFixed(1)
+
+/**
  * What qualifies an average-rating bar: how many titles it is over, and what
  * the crowd said about the same slice.
  *
@@ -417,7 +425,7 @@ interface FacetEntry extends StatCount {
  */
 const ratingMeta = (slice: RatingSlice) =>
   `${plural(slice.count, 'title')}${
-    slice.community_average != null ? ` · crowd ${slice.community_average.toFixed(1)}` : ''
+    slice.community_average != null ? ` · crowd ${ratingFigure(slice.community_average)}` : ''
   }`
 
 const facetEntries = (rows: RankedFacet[]): FacetEntry[] =>
@@ -597,17 +605,49 @@ const describeBucket = (bucket: PeriodBucket) =>
   `${spanLabel(bucket)}: ${plural(bucket.value, 'play')}`
 
 /**
- * Axis labels for the chunked series: the month is written once, where it
- * changes, and every other column carries only its day number. Twelve columns
- * of "12 Jan" is a wall of text on a phone; twelve of "12" is an axis.
+ * A month in three letters, for an axis.
+ *
+ * The locale's own short month is "Sept" in British English, which is one
+ * character too wide for a twelfth of a phone and truncates to "Se…"; three is
+ * the width every other month already is. Shared by both axes that name months,
+ * because two axes on one page that abbreviate differently read as two charts
+ * about different things.
+ */
+const monthAbbr = (date: Date) =>
+  date.toLocaleDateString(undefined, { month: 'short' }).slice(0, 3)
+
+/** How many days a chunk covers, both ends included. */
+const bucketDays = (bucket: PeriodBucket) =>
+  Math.round(
+    (parseLocalDateLabel(bucket.to).getTime() - parseLocalDateLabel(bucket.from).getTime()) /
+      86_400_000,
+  ) + 1
+
+/**
+ * Axis labels for the chunked series, and **one kind of label per axis**.
+ *
+ * Where a chunk is shorter than a month the axis names the month at each change
+ * and carries a bare day number in between, which is the ordinary convention for
+ * a date axis: the names orient you, the numbers scale between them.
+ *
+ * Where a chunk is a month or longer that convention breaks, because a day number
+ * then appears among nothing but month names and reads as one of them. It is not
+ * hypothetical: 30-day chunks stepping through a 31-day month land twice inside
+ * it, and the axis read "Sept Oct 31 Nov Dec". So a month-scale axis writes the
+ * month for every column, repeating it on the rare pair that shares one, and no
+ * day number ever stands among the names.
  */
 function chunkAxisLabels(buckets: PeriodBucket[]): Map<string, string> {
   const labels = new Map<string, string>()
+  const monthScale = buckets.length > 0 && bucketDays(buckets[0]) >= 28
   let lastMonth = ''
   for (const bucket of buckets) {
     const date = parseLocalDateLabel(bucket.from)
-    const month = date.toLocaleDateString(undefined, { month: 'short' })
-    labels.set(bucket.label, month === lastMonth ? String(date.getDate()) : month)
+    const month = monthAbbr(date)
+    labels.set(
+      bucket.label,
+      monthScale || month !== lastMonth ? month : String(date.getDate()),
+    )
     lastMonth = month
   }
   return labels
@@ -1428,9 +1468,9 @@ export function Stats() {
         />
         <StatTile
           label="Average rating"
-          value={data.average_rating != null ? `${data.average_rating.toFixed(1)} / 10` : null}
+          value={data.average_rating != null ? `${ratingFigure(data.average_rating)} / 10` : null}
           hint="Everything you rated"
-          delta={deltaFor('average_rating', (value) => value.toFixed(1))}
+          delta={deltaFor('average_rating', ratingFigure)}
         />
         <StatTile
           label="Busiest day"
@@ -1454,7 +1494,13 @@ export function Stats() {
           table={
             <DataTable
               caption="Plays by day"
-              rows={data.activity_by_day.filter((entry) => entry.value > 0)}
+              // Written the way every other date on the page is written. The raw
+              // `2026-09-01` bucket key is what the chart drills on, not what a
+              // reader reads, and this table sits directly above a list of the
+              // same days spelled "14 May 2026".
+              rows={data.activity_by_day
+                .filter((entry) => entry.value > 0)
+                .map((entry) => ({ label: formatDay(entry.label), value: entry.value }))}
               valueHeader="Plays"
             />
           }
@@ -1557,11 +1603,9 @@ export function Stats() {
           >
             <ColumnChart
               data={monthly}
-              // Three letters, matching the seasonality axis below. The locale's
-              // own short month is "Sept" in British English, which is one
-              // character too wide for a twelfth of a phone and truncated to
-              // "Se…" there; three is the width every other month already is.
-              formatLabel={(label) => monthName(label).slice(0, 3)}
+              // Three letters, matching the seasonality axis below and the
+              // chunked axis above. `monthAbbr` is the one rule; see its note.
+              formatLabel={(label) => monthAbbr(parseLocalDateLabel(label))}
               describe={(entry) =>
                 `${monthName(entry.label, true)}: ${plural(entry.value, 'play')}`
               }
@@ -2157,6 +2201,7 @@ export function Stats() {
                         value: slice.average,
                       }))}
                       valueHeader="Your average"
+                      formatValue={ratingFigure}
                     />
                   }
                 >
@@ -2170,6 +2215,10 @@ export function Stats() {
                     // Ratings are 0-10 everywhere in Tally, so the bar is a
                     // score and not a ranking.
                     scaleTo={10}
+                    // One decimal, like the crowd's figure in the line beside it.
+                    // An average printed as a count reads "7.95 / 6 / 9.5" down
+                    // the column, which is three different kinds of number.
+                    formatValue={ratingFigure}
                     meta={(entry) => ratingMeta(entry.slice)}
                     onSelect={(entry) =>
                       navigate(
@@ -2198,6 +2247,7 @@ export function Stats() {
                         value: slice.average,
                       }))}
                       valueHeader="Your average"
+                      formatValue={ratingFigure}
                     />
                   }
                 >
@@ -2211,6 +2261,10 @@ export function Stats() {
                     // Ratings are 0-10 everywhere in Tally, so the bar is a
                     // score and not a ranking.
                     scaleTo={10}
+                    // One decimal, like the crowd's figure in the line beside it.
+                    // An average printed as a count reads "7.95 / 6 / 9.5" down
+                    // the column, which is three different kinds of number.
+                    formatValue={ratingFigure}
                     meta={(entry) => ratingMeta(entry.slice)}
                     onSelect={
                       depth.by_decade.every((slice) => decadeBounds(slice.label))
@@ -2244,6 +2298,7 @@ export function Stats() {
                       value: slice.average,
                     }))}
                     valueHeader="Your average"
+                    formatValue={ratingFigure}
                   />
                 }
               >
@@ -2255,6 +2310,7 @@ export function Stats() {
                   }))}
                   emptyMessage="Nothing rated in this range."
                   scaleTo={10}
+                  formatValue={ratingFigure}
                   meta={(entry) => ratingMeta(entry.slice)}
                   // The bucket labels are the server's and carry no bounds, so
                   // the map in `drill-links` is the only thing that can turn one

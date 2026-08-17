@@ -81,9 +81,18 @@ const AXIS_HEIGHT = 18
  * wide (the 24-hour profile) then draws that column straight through them. The
  * figures still sit inside the chart, above their own gridline and with no axis
  * line anywhere; they simply do not have a bar on top of them.
+ *
+ * It is a **floor**, not the gutter itself: see `yGutterFor`.
  */
 const HEADROOM = 12
 const Y_GUTTER = 26
+
+/**
+ * One character of a 10.5px axis figure, measured in the browser rather than
+ * guessed: a tick reading "5" is 6.16px wide, "10" is 12.31 and "12.5" is 24.61,
+ * so the mono face is 6.16px per character at this size.
+ */
+const FIGURE_CHAR = 6.16
 
 /**
  * The five steps of the sequential ramp, as class names rather than as an
@@ -160,21 +169,46 @@ const clamp = (value: number, low: number, high: number) =>
  * two lines on a chart that had room for five. Counting what each step would
  * actually produce and keeping the one nearest four lines cannot fall through a
  * gap, because the gap is what it is measuring.
+ *
+ * **`integers` refuses a step that is not whole**, and the caller decides it by
+ * looking at its own series rather than at the maximum. Half a play does not
+ * exist, and the 2.5 candidate does not merely happen to win occasionally: at a
+ * maximum of 13 it scores better than every other member and the monthly axis
+ * drew `2.5 / 5 / 7.5 / 10 / 12.5` over a count of plays. Every maximum from 11
+ * to 15 did the same.
+ *
+ * The member is refused rather than removed, because `2.5 × 10^k` is a whole
+ * number for every k above zero: a weekday profile peaking at 145 wants a step
+ * of 25 and gets five gridlines, where dropping the member outright left it with
+ * two. Only the k = 0 case, the literal 2.5, is the one that cannot be a count.
  */
-function niceScale(max: number, targetTicks = 4): { ceiling: number; ticks: number[] } {
-  if (!Number.isFinite(max) || max <= 0) return { ceiling: 1, ticks: [] }
-  // A handful of plays needs whole numbers, not a step of 0.2.
+function niceScale(
+  max: number,
+  { integers = false, targetTicks = 4 }: { integers?: boolean; targetTicks?: number } = {},
+): { ceiling: number; ticks: number[] } {
+  // §8: "Empty: the axes and grid stay." So the empty case needs a scale to draw
+  // them against — with no ticks at all the frame was a baseline and nothing
+  // else, and the sentence floated in a box that no longer read as a chart. The
+  // ceiling is nominal because there is nothing to measure against it.
+  if (!Number.isFinite(max) || max <= 0) return { ceiling: 4, ticks: [1, 2, 3] }
+  // A handful of plays needs whole numbers, not a step of 0.2. The floor under
+  // the ceiling is what keeps a grid there at all: at a maximum of 1 there is no
+  // whole number below it to draw a line on, and at 2 there is exactly one.
   if (max <= 6) {
+    const ceiling = Math.max(max, 3)
     return {
-      ceiling: max,
-      ticks: Array.from({ length: Math.max(0, Math.ceil(max) - 1) }, (_, i) => i + 1),
+      ceiling,
+      ticks: Array.from({ length: Math.max(0, Math.ceil(ceiling) - 1) }, (_, i) => i + 1),
     }
   }
   const magnitude = Math.pow(10, Math.floor(Math.log10(max / targetTicks)))
-  let step = magnitude
+  // A whole-number series takes whole-number steps, and never one below 1.
+  const floor = integers ? 1 : 0
+  let step = Math.max(floor, magnitude)
   let best = Infinity
   for (const multiple of [1, 2, 2.5, 5, 10]) {
-    const candidate = multiple * magnitude
+    const candidate = Math.max(floor, multiple * magnitude)
+    if (integers && !Number.isInteger(candidate)) continue
     const count = Math.ceil(max / candidate) - 1
     if (count < 2) continue
     const score = Math.abs(count - targetTicks)
@@ -192,6 +226,21 @@ function niceScale(max: number, targetTicks = 4): { ceiling: number; ticks: numb
 
 /** An axis figure: short enough to sit under a 14px column. */
 const axisFigure = (value: number) => compactNumber(value)
+
+/**
+ * The gutter the widest tick on *this* axis actually needs.
+ *
+ * A fixed 26px was a bet against the figures, and the bet was already lost:
+ * "12.5" measures 24.61px and left 1.4px of clearance, and a five-character tick
+ * ("12.5k", which `compactNumber` produces the moment a count passes ten
+ * thousand) is 30.8px and would be drawn under the first column, which is the
+ * one thing the gutter exists to prevent. Derived from the formatted text, so it
+ * cannot fall behind a change in how a tick is written.
+ */
+function yGutterFor(ticks: number[]): number {
+  const widest = ticks.reduce((n, tick) => Math.max(n, axisFigure(tick).length), 0)
+  return Math.max(Y_GUTTER, Math.ceil(widest * FIGURE_CHAR) + 4)
+}
 
 /**
  * The plot's ground: horizontal hairlines, their figures, and the baseline.
@@ -424,6 +473,17 @@ interface BarListProps<T extends StatCount> {
    * watched. Any series on a fixed scale has to pin it.
    */
   scaleTo?: number
+  /**
+   * How the figure at the data end is written. `compactNumber` by default.
+   *
+   * A count and an average are not written the same way, and hard-coding the
+   * count's format made a column of ratings read
+   * "7.95 / 7.12 / 8.25 / 6 / 6 / 9.5 / 5" while the meta line beside each one
+   * said "crowd 7.1". A caller that knows its series holds a score asks for one
+   * decimal, and the tabular figures then line up as a column instead of as a
+   * ragged edge.
+   */
+  formatValue?: (value: number) => string
 }
 
 export function BarList<T extends StatCount>({
@@ -434,6 +494,7 @@ export function BarList<T extends StatCount>({
   activeLabel = null,
   meta,
   scaleTo,
+  formatValue = compactNumber,
 }: BarListProps<T>) {
   if (data.length === 0) {
     return <p className="py-8 text-center text-small text-dim">{emptyMessage}</p>
@@ -462,7 +523,11 @@ export function BarList<T extends StatCount>({
                 className={cn(
                   'h-full rounded-r-[2px] bg-accent transition-opacity duration-hover ease-ease',
                   active ? 'opacity-100' : 'opacity-85',
-                  onSelect && !active && 'group-hover/bar:opacity-100 group-focus-visible/bar:opacity-100',
+                  // §8: a bar goes to 100% on hover, whether or not it leads
+                  // anywhere. Gating this on `onSelect` meant the rows that only
+                  // read stayed at 85% for ever, and the group class is on both
+                  // wrappers for the same reason.
+                  !active && 'group-hover/bar:opacity-100 group-focus-visible/bar:opacity-100',
                 )}
                 // A floor so a very small share is still a mark, but **zero
                 // draws nothing**: the coverage bars include decades with no
@@ -475,13 +540,13 @@ export function BarList<T extends StatCount>({
             </div>
             {/* Direct label at the data end. */}
             <span className="figure text-right text-tiny text-strong">
-              {compactNumber(entry.value)}
+              {formatValue(entry.value)}
               {unit}
             </span>
           </>
         )
 
-        const layout = 'grid w-full grid-cols-[7.5rem_1fr_2.5rem] items-center gap-3'
+        const layout = 'grid w-full grid-cols-[7.5rem_1fr_2.5rem] items-center gap-3 group/bar'
         return (
           <li key={entry.label}>
             {onSelect ? (
@@ -489,8 +554,8 @@ export function BarList<T extends StatCount>({
                 type="button"
                 onClick={() => onSelect(entry, index)}
                 aria-pressed={active}
-                aria-label={`${entry.label}: ${entry.value}${unit}${note ? `, ${note}` : ''}`}
-                className={cn(layout, 'group/bar px-1.5 py-1', CLICKABLE_MARK)}
+                aria-label={`${entry.label}: ${formatValue(entry.value)}${unit}${note ? `, ${note}` : ''}`}
+                className={cn(layout, 'px-1.5 py-1', CLICKABLE_MARK)}
               >
                 {row}
               </button>
@@ -576,7 +641,14 @@ export function ColumnChart<T extends StatCount>({
 
   // One scale across both series, or the comparison would be a lie.
   const peak = Math.max(...data.map((d) => d.value), ...(compare?.data ?? []).map((d) => d.value), 0)
-  const { ceiling, ticks } = niceScale(peak)
+  // Whether the axis may hold a fraction is a fact about the *series*, not about
+  // its maximum: every chart drawn here counts plays or sittings, and a gridline
+  // at 2.5 plays is not a number anybody would say out loud.
+  const integers = [...data, ...(compare?.data ?? [])].every((entry) =>
+    Number.isInteger(entry.value),
+  )
+  const { ceiling, ticks } = niceScale(peak, { integers })
+  const gutter = yGutterFor(ticks)
 
   // Type size that lets the longest label fit inside one column. 320 stands in
   // for the first render, one frame before the observer answers: a plausible
@@ -586,7 +658,7 @@ export function ColumnChart<T extends StatCount>({
   // technically present.
   const gap = fitLabels ? 2 : 0
   const columnWidth =
-    ((available || 320) - Y_GUTTER - gap * (data.length - 1)) / Math.max(1, data.length)
+    ((available || 320) - gutter - gap * (data.length - 1)) / Math.max(1, data.length)
   const longest = fitLabels
     ? data.reduce((n, entry) => Math.max(n, formatLabel(entry.label).length), 1)
     : 1
@@ -634,7 +706,7 @@ export function ColumnChart<T extends StatCount>({
             'relative flex h-full items-stretch',
             fitLabels ? 'gap-[2px]' : 'gap-1 sm:gap-2',
           )}
-          style={{ paddingLeft: Y_GUTTER }}
+          style={{ paddingLeft: gutter }}
         >
           {data.map((entry, index) => {
             const height = (entry.value / ceiling) * 100
@@ -699,7 +771,13 @@ export function ColumnChart<T extends StatCount>({
               </>
             )
 
-            const shell = 'flex h-full min-w-0 flex-1 flex-col items-center'
+            // `group/col` on the shell rather than on the button branch alone: the
+            // bar's hover brightening reads `group-hover/col`, so on the charts that
+            // do not drill (the weekday and hour profiles) there was no group to
+            // hover and the mark stayed at 85% for ever, while a drilling chart beside
+            // it reached 100%. Same spec, two behaviours, for a reason a reader could
+            // not possibly infer.
+            const shell = 'group/col flex h-full min-w-0 flex-1 flex-col items-center'
 
             if (!onSelect) {
               return (
@@ -720,7 +798,7 @@ export function ColumnChart<T extends StatCount>({
                 type="button"
                 // The whole column is the hit target, not just the drawn bar: a
                 // short bar is only a few pixels tall and would be unclickable.
-                className={cn(shell, 'group/col', CLICKABLE_MARK)}
+                className={cn(shell, CLICKABLE_MARK)}
                 onClick={() => onSelect(entry, index)}
                 onMouseEnter={(event) => showTip(event, entry, earlier)}
                 title={text}
@@ -781,7 +859,14 @@ export function StackedColumnChart<T extends StackedEntry>({
 }: StackedColumnChartProps<T>) {
   const [tip, setTip] = useState<ChartTip | null>(null)
   const total = data.reduce((sum, entry) => sum + entry.value, 0)
-  const { ceiling, ticks } = niceScale(Math.max(...data.map((entry) => entry.value), 0))
+  // Plays, split two ways: whole numbers on both halves and therefore on the axis.
+  const integers = data.every(
+    (entry) => Number.isInteger(entry.first) && Number.isInteger(entry.rewatch),
+  )
+  const { ceiling, ticks } = niceScale(Math.max(...data.map((entry) => entry.value), 0), {
+    integers,
+  })
+  const gutter = yGutterFor(ticks)
 
   const showTip = (event: React.MouseEvent<HTMLElement>, entry: T) => {
     const box = event.currentTarget.getBoundingClientRect()
@@ -810,7 +895,7 @@ export function StackedColumnChart<T extends StackedEntry>({
 
         <div
           className="relative flex h-full items-stretch gap-1 sm:gap-2"
-          style={{ paddingLeft: Y_GUTTER }}
+          style={{ paddingLeft: gutter }}
         >
           {data.map((entry, index) => {
             const text =
@@ -820,7 +905,15 @@ export function StackedColumnChart<T extends StackedEntry>({
             const bar = (
               <>
                 <div
-                  className="flex w-full min-w-0 flex-1 flex-col justify-end gap-[2px]"
+                  className={cn(
+                    'flex w-full min-w-0 flex-1 flex-col justify-end',
+                    // The 2px gap separates two segments. With only one of them
+                    // drawn there is nothing to separate, and the gap then sat
+                    // *under* the surviving segment: a period of pure rewatches
+                    // floated 3px clear of the baseline, which every other mark
+                    // on the page sits exactly on.
+                    entry.first > 0 && entry.rewatch > 0 && 'gap-[2px]',
+                  )}
                   style={{ paddingTop: HEADROOM, paddingBottom: 1 }}
                 >
                   {/* Top segment first in the DOM: it is the top of the stack. */}
@@ -849,7 +942,9 @@ export function StackedColumnChart<T extends StackedEntry>({
               </>
             )
 
-            const shell = 'flex h-full min-w-0 flex-1 flex-col items-center'
+            // `group/col` on both branches, as in `ColumnChart`: a hover state that
+            // only a clickable mark can reach is the same spec behaving two ways.
+            const shell = 'group/col flex h-full min-w-0 flex-1 flex-col items-center'
             if (!onSelect) {
               return (
                 <div
@@ -866,7 +961,7 @@ export function StackedColumnChart<T extends StackedEntry>({
               <button
                 key={entry.label}
                 type="button"
-                className={cn(shell, 'group/col', CLICKABLE_MARK)}
+                className={cn(shell, CLICKABLE_MARK)}
                 onClick={() => onSelect(entry, index)}
                 onMouseEnter={(event) => showTip(event, entry)}
                 title={text}
@@ -926,15 +1021,27 @@ function heatLevel(value: number, max: number): number {
  *
  * "None" is a swatch of its own, set apart from the ramp by a gap, because it
  * is a different kind of answer rather than the bottom of the scale.
+ *
+ * **Same 8px swatch as `ChartLegend`**, because a reader meeting both on one
+ * page reads them as one device and two sizes says they are two. It sits
+ * **below** its chart where §8's series legend sits above at the right, and that
+ * difference is deliberate: a legend names which mark is which and has to be
+ * read before the chart, while a ramp is a scale, read off a shape already
+ * looked at. Seven swatches and three words would also crowd the panel header
+ * out of the title it exists to carry, and the heat charts are the two on this
+ * page whose header the title already fills.
+ *
+ * Not exported: both callers are in this file, and a key without a ramp beside
+ * it is not a thing another page should be able to draw.
  */
-export function HeatScale({ less = 'Less', more = 'More' }: { less?: string; more?: string }) {
+function HeatScale({ less = 'Less', more = 'More' }: { less?: string; more?: string }) {
   return (
     <div className="mt-3 flex items-center justify-end gap-1.5 text-tiny text-dim">
       <span>None</span>
-      <span className="h-2.5 w-2.5 rounded-[2px] bg-control" />
+      <span className="h-2 w-2 rounded-[2px] bg-control" />
       <span className="ml-2">{less}</span>
       {HEAT_BG.map((step) => (
-        <span key={step} className={cn('h-2.5 w-2.5 rounded-[2px]', step)} />
+        <span key={step} className={cn('h-2 w-2 rounded-[2px]', step)} />
       ))}
       <span>{more}</span>
     </div>
@@ -1012,6 +1119,30 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
   const width = columns.length * (cell + gap)
   const height = 7 * (cell + gap) + 18
 
+  /*
+   * A month is named only where its name fits.
+   *
+   * The label is drawn at the left edge of the month's first column, and a month
+   * that owns one or two columns therefore starts before its neighbour's name has
+   * ended. Measured at 390px: "Aug" ran to 18.5 while "Sept" began at 12 — a
+   * 6.5px overlap that renders as a pile of glyphs, not as two words — and even
+   * at 1440px the pair cleared each other by 3.5px. The 10.5px mono face made it
+   * worse than the 10px sans it replaced, by about 2.5px a label.
+   *
+   * So a name that cannot start clear of the previous one is dropped rather than
+   * shifted: shifting it would point at a column that is not where that month
+   * begins, which is worse than an unnamed band on an axis whose bands are three
+   * days apart anyway.
+   */
+  const monthLabelGap = 4
+  let nameableFrom = -Infinity
+  const drawnMonths = monthLabels.filter(({ index, label }) => {
+    const x = index * (cell + gap)
+    if (x < nameableFrom) return false
+    nameableFrom = x + label.length * FIGURE_CHAR + monthLabelGap
+    return true
+  })
+
   return (
     <div className="relative" ref={frame}>
       <div className="scroll-x pb-1">
@@ -1023,7 +1154,7 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
           aria-label="Watch activity by day"
           className="block"
         >
-          {monthLabels.map(({ index, label }) => (
+          {drawnMonths.map(({ index, label }) => (
             <text
               key={`${label}-${index}`}
               x={index * (cell + gap)}
@@ -1262,6 +1393,12 @@ export function MatrixChart({
                 const tier = heatLevel(value, ceiling)
                 const focusable = rowIndex === row && columnIndex === column
                 const text = label(rowIndex, columnIndex)
+                // A cell with no plays leads nowhere, exactly as in the calendar
+                // heatmap: the year-by-month grid draws every month of the current
+                // year, so September 2026 was a button that navigated to a history
+                // page with no rows in it. An empty cell stays readable and
+                // keyboard-reachable; it simply does not pretend to be a route.
+                const clickable = onSelect !== undefined && value > 0
                 const shared = {
                   ref: (node: HTMLElement | null) => {
                     if (node) cells.current.set(`${rowIndex}-${columnIndex}`, node)
@@ -1279,7 +1416,7 @@ export function MatrixChart({
                     // A ring rather than `CLICKABLE_MARK`'s raised background:
                     // the cell *is* its background, so raising it would erase
                     // the value. Same accent, same statement.
-                    onSelect && 'cursor-pointer hover:ring-1 hover:ring-accent',
+                    clickable && 'cursor-pointer hover:ring-1 hover:ring-accent',
                   ),
                   style: {
                     // Width comes from the grid track, so the cell can stretch;
@@ -1287,13 +1424,13 @@ export function MatrixChart({
                     height: cell,
                   },
                 }
-                return onSelect ? (
+                return clickable ? (
                   <button
                     key={columnIndex}
                     type="button"
                     {...shared}
                     ref={shared.ref as (node: HTMLButtonElement | null) => void}
-                    onClick={() => onSelect(rowIndex, columnIndex, value)}
+                    onClick={() => onSelect?.(rowIndex, columnIndex, value)}
                   />
                 ) : (
                   <div
@@ -1398,10 +1535,19 @@ export function DataTable({
   rows,
   valueHeader = 'Count',
   compare,
+  formatValue = (value) => value.toLocaleString(),
 }: {
   caption: string
   rows: StatCount[]
   valueHeader?: string
+  /**
+   * How a figure is written. Grouped digits by default.
+   *
+   * The same reason `BarList` takes one: a table of average scores set with the
+   * count's formatting reads "7.95 / 6 / 9.5", and a fallback that disagrees with
+   * the chart it stands in for is a second version of the truth.
+   */
+  formatValue?: (value: number) => string
   /**
    * A second column of the same shape, for a two-series chart.
    *
@@ -1440,13 +1586,13 @@ export function DataTable({
               <tr key={row.label} className="border-b border-line-soft last:border-0">
                 <td className="py-1.5 pr-4 text-fg">{row.label}</td>
                 <td className="figure py-1.5 text-right text-strong">
-                  {row.value.toLocaleString()}
+                  {formatValue(row.value)}
                 </td>
                 {compare && (
                   <td className="figure py-1.5 pl-4 text-right text-fg">
                     {earlier ? (
                       <>
-                        {earlier.value.toLocaleString()}
+                        {formatValue(earlier.value)}
                         {compare.rowLabel && (
                           <span className="ml-1 font-sans text-tiny text-dim">
                             ({compare.rowLabel(earlier)})
@@ -1723,22 +1869,41 @@ function Sparkline({ points }: { points: number[] }) {
   )
 }
 
+/**
+ * The numbers inside a hint sentence, set in the figure face.
+ *
+ * §4: every number read as a value is mono and tabular, and a tile's second line
+ * is full of them — "19% of your plays", "83 plays", "Of 737 plays". They were
+ * sans while `DeltaLine` directly below wrapped its own figures in mono, so one
+ * tile held two treatments of the same kind of number.
+ *
+ * Done here rather than at the 35 call sites because a rule applied by hand is a
+ * rule with exceptions: the split keeps the digit runs (with a trailing `%`, a
+ * decimal point, a thousands separator or a colon) and leaves the words alone.
+ */
+const FIGURE_RUN = /(\d[\d.,:]*%?)/g
+
+function withFigures(text: string) {
+  // A capture group makes `split` alternate text, match, text, match — so the
+  // odd indices are exactly the numbers, with no second pass over the pattern
+  // and no `lastIndex` to reset.
+  return text.split(FIGURE_RUN).map((part, index) =>
+    index % 2 === 1 ? (
+      <span key={index} className="figure">
+        {part}
+      </span>
+    ) : (
+      part
+    ),
+  )
+}
+
 interface StatTileProps {
   label: string
   /** Null, or an empty string, draws the en dash that means "no data". */
   value: string | null
+  /** A sentence under the figure. Its numbers are set in mono; see `withFigures`. */
   hint?: string
-  /**
-   * @deprecated Accepted so the pages that still pass one keep compiling, and
-   * deliberately not drawn. §7.14: "Do not put a big icon in a tile."
-   */
-  icon?: React.ReactNode
-  /**
-   * @deprecated Accepted so the pages that still pass one keep compiling, and
-   * deliberately not drawn. The accent means selected, in hand or primary
-   * (§2.4), and "this number happens to be over half" is none of those.
-   */
-  accent?: boolean
   /** Movement against a comparison window, when one is being shown. */
   delta?: StatDelta
   /**
@@ -1771,7 +1936,7 @@ export function StatTile({ label, value, hint, delta, trend, to, toLabel, span }
   const detail =
     hint || delta ? (
       <>
-        {hint && <span className="block truncate">{hint}</span>}
+        {hint && <span className="block truncate">{withFigures(hint)}</span>}
         {delta && <DeltaLine delta={delta} />}
       </>
     ) : undefined
