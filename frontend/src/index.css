@@ -262,6 +262,14 @@
     @apply rounded-modal border border-line-popover bg-chrome shadow-modal;
   }
 
+  /* The dim behind a modal: the page at ~40 %, per §7.17. It is a class rather
+     than an inline style on the one dialog because a second thing that dims
+     the page (a drawer, a sheet, a lightbox) must dim it by the same amount,
+     and two different alphas read as two different depths. */
+  .dialog-backdrop {
+    background: color-mix(in oklab, var(--backdrop) 60%, transparent);
+  }
+
   /* A floating panel: the drawer on a narrow screen, an undocked module. */
   .floating {
     @apply rounded-modal border border-line-popover shadow-float;
