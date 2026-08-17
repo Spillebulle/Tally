@@ -53,14 +53,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     staleTime: 60_000,
   })
 
+  /*
+   * The account changed, so what belongs to an account has to be re-read.
+   *
+   * The theme is the one that shows. It is a server preference, and
+   * `ThemeProvider` sits *above* `AuthProvider` in `main.tsx` - it has to,
+   * because the theme is settled before anything else renders - so signing in
+   * or out never re-renders it. Its three queries are the only thing that can
+   * tell it the identity moved. Until they were told, signing in left the
+   * account's own theme unworn until somebody reloaded the page, and signing
+   * out left the previous account's theme on the login screen and on whoever
+   * signed in next.
+   *
+   * Invalidated rather than reset: an invalidation refetches while keeping the
+   * data it already has, so the settings pane reading the same cache does not
+   * flash through a skeleton every time a preference is written.
+   */
+  const forgetAccount = useCallback(
+    () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: PREFERENCES_KEY }),
+        queryClient.invalidateQueries({ queryKey: THEME_LIBRARY_KEY }),
+        queryClient.invalidateQueries({ queryKey: THEME_RESOLVED_KEY }),
+      ]),
+    [queryClient],
+  )
+
+  // Both sign-in paths - the password form and the Plex PIN - land here.
   const refresh = useCallback(async () => {
     await refetch()
-  }, [refetch])
+    await forgetAccount()
+  }, [refetch, forgetAccount])
 
   const logout = useCallback(async () => {
     await api.auth.logout()
-    queryClient.clear()
     await refetch()
+    /*
+     * Everything the account had, emptied where it stands. The three above are
+     * part of it, and they are the reason this is not `queryClient.clear()`
+     * any more: `clear()` destroys every query object while the providers
+     * above the router stay mounted, which leaves their observers holding a
+     * query the cache no longer has. Nothing re-renders them, and no later
+     * invalidation can find them again - so the login screen went on wearing
+     * the theme, and the next account to sign in wore it too, for good.
+     * `resetQueries` empties a query in place and refetches the ones being
+     * watched, so an observer follows and nothing is orphaned.
+     */
+    await queryClient.resetQueries()
   }, [queryClient, refetch])
 
   const value = useMemo<AuthValue>(
@@ -105,8 +144,6 @@ interface ThemeValue {
   setTheme: (theme: Theme) => void
   /** The custom theme in use, or null when one of the three built-in choices is. */
   themeId: string | null
-  /** Its library row, once `['themes']` has answered. Null while a built-in is in use. */
-  customTheme: ThemeSummary | null
   /** Select a custom theme, or null for the built-in named by `theme`. */
   setThemeId: (id: string | null) => void
   /** A custom theme is chosen and its colours have not arrived yet. */
@@ -129,10 +166,16 @@ const THEME_KEY = 'tally.theme'
  * the settings page writes - so selecting a theme moves both at once. An
  * editor that changes a colour must invalidate `themeResolvedKey(id)`, or the
  * page keeps wearing the table it fetched before the edit.
+ *
+ * All three belong to an *account*, so `AuthProvider` invalidates them
+ * whenever the identity moves. They are exported for that as much as for the
+ * settings page.
  */
 export const PREFERENCES_KEY = ['preferences'] as const
 export const THEME_LIBRARY_KEY = ['themes'] as const
-export const themeResolvedKey = (id: string | null) => ['theme-resolved', id] as const
+/** Every resolved table, whichever theme: the prefix `themeResolvedKey` extends. */
+export const THEME_RESOLVED_KEY = ['theme-resolved'] as const
+export const themeResolvedKey = (id: string | null) => [...THEME_RESOLVED_KEY, id] as const
 
 function systemTheme(): 'light' | 'dark' {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -185,8 +228,18 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       try {
         return await api.settings.preferences()
       } catch (error) {
-        // Signed out is the ordinary state on the login screen, not a failure.
-        // A custom theme belongs to an account, so there is simply not one.
+        /*
+         * Signed out is the ordinary state on the login screen, not a failure.
+         * A custom theme belongs to an account, so there is simply not one,
+         * and an error card behind a sign-in form would be a lie.
+         *
+         * It stays a success, which means it is cached and stale-timed like
+         * one. That is only safe because `AuthProvider` invalidates this key
+         * the moment the identity moves; without that, this empty answer
+         * outlived the sign-in that disproved it and the account's theme
+         * never arrived. Do not lengthen `staleTime` here, or swallow
+         * anything else into a success, without checking that it is.
+         */
         if (error instanceof ApiError && error.status === 401) return {}
         throw error
       }
@@ -345,17 +398,34 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, [themeMissing, queryClient])
 
   /*
-   * Say so when the theme cannot be fetched.
+   * Say so when the theme cannot be fetched, and only then.
    *
    * Nothing else on screen changes when this fails - the built-in is a
    * complete, correct interface - so a silent failure reads as a theme that
    * simply does not work. Reported once per (theme, message) so a refetch loop
    * cannot stack toasts.
+   *
+   * A 404 is not that. It is a theme somebody deleted, which `docs/themes.md`
+   * says is noticed quietly, and `themeMissing` above already handles it the
+   * moment the library lands. When the library is the slower of the two, the
+   * 404 arrives first, and toasting it raised a card that never goes away -
+   * an error toast has no timeout - reading "could not be loaded. No such
+   * theme", which is both untrue and the server's own words rather than the
+   * user's (STYLE-GUIDE section 12). So the 404 branch only tidies the
+   * mirror, which is what it always did.
    */
   const reported = useRef<string | null>(null)
   useEffect(() => {
     if (!themeError || !themeId) {
       if (!themeError) reported.current = null
+      return
+    }
+    if (themeError instanceof ApiError && themeError.status === 404) {
+      // A theme the server no longer has must not go on stamping its lightness
+      // through the pre-paint script on every reload.
+      reported.current = null
+      clearStoredCustomTheme()
+      setHint(null)
       return
     }
     const signature = `${themeId}:${themeError.message}`
@@ -365,12 +435,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       `Your theme could not be loaded, so Tally is showing the built-in one. ${themeError.message}`,
       'error',
     )
-    // A theme the server no longer has must not go on stamping its lightness
-    // through the pre-paint script on every reload.
-    if (themeError instanceof ApiError && themeError.status === 404) {
-      clearStoredCustomTheme()
-      setHint(null)
-    }
   }, [themeError, themeId])
 
   // Read inside callbacks that must not take a dependency on either.
@@ -440,12 +504,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       resolved,
       setTheme,
       themeId,
-      customTheme,
       setThemeId,
       themeLoading,
       themeError,
     }),
-    [theme, resolved, setTheme, themeId, customTheme, setThemeId, themeLoading, themeError],
+    [theme, resolved, setTheme, themeId, setThemeId, themeLoading, themeError],
   )
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
 }

@@ -1410,7 +1410,9 @@ function ThemeCard({
  *
  * `text` is null while the row is showing the stored value, so nothing has to
  * reconcile a draft with a server answer that arrives later: committing clears
- * the draft and the stored value takes over again.
+ * the draft and the stored value takes over again. The typed field does that
+ * itself; the native picker cannot, because it has no commit of its own, so
+ * the effect below does it for it.
  */
 function SwatchRow({
   row,
@@ -1427,6 +1429,7 @@ function SwatchRow({
   onCommit: (key: string, colour: string, settle: boolean) => void
 }) {
   const [text, setText] = useState<string | null>(null)
+  const picked = useRef(false)
   const shown = text ?? value
   const parsed = parseColour(shown)
   const stored = parseColour(value)
@@ -1438,6 +1441,23 @@ function SwatchRow({
     if (colour && colour !== stored) onCommit(row.key, colour, false)
     setText(null)
   }
+
+  /*
+   * The picker's draft, given back once the server has answered.
+   *
+   * A picker edit sets the draft so the swatch can follow the pointer, and
+   * then nothing ever cleared it: the row went on showing what was picked
+   * rather than what is stored, until something remounted it. Harmless for as
+   * long as the two agree, and exactly the wrong way round the moment they do
+   * not - a row that would rather show its own draft than the truth is a row
+   * that cannot report a value the server normalised. So the draft is dropped
+   * the moment the stored value moves, which is the answer landing.
+   */
+  useEffect(() => {
+    if (!picked.current) return
+    picked.current = false
+    setText(null)
+  }, [value])
 
   return (
     <div className="py-1">
@@ -1463,6 +1483,7 @@ function SwatchRow({
               onChange={(event) => {
                 const colour = parseColour(event.target.value)
                 if (!colour) return
+                picked.current = true
                 setText(colour)
                 // The picker fires as the pointer moves, so this one settles
                 // before it is sent. The typed field commits at once instead.
@@ -1524,7 +1545,7 @@ const THEME_GROUPS: ReadonlyArray<ThemeKeyRow['group']> = THEME_KEYS.reduce<
 >((groups, row) => (groups.includes(row.group) ? groups : [...groups, row.group]), [])
 
 function AppearancePane() {
-  const { theme, resolved, setTheme, themeId, setThemeId, themeError } = useTheme()
+  const { theme, resolved, setTheme, themeId, setThemeId, themeLoading, themeError } = useTheme()
   const { notify } = useToast()
   const queryClient = useQueryClient()
 
@@ -1533,7 +1554,8 @@ function AppearancePane() {
   const timers = useRef<Record<string, number>>({})
   const [nameDraft, setNameDraft] = useState<string | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const [lost, setLost] = useState<number | null>(null)
+  /* Whose import it was, so a notice cannot outlive the theme it describes. */
+  const [lost, setLost] = useState<{ id: string; lines: number } | null>(null)
 
   const library = useQuery({
     queryKey: THEME_LIBRARY_KEY,
@@ -1558,6 +1580,26 @@ function AppearancePane() {
       : (themes.find((entry) => entry.is_builtin && baseLightness(entry.base) === resolved) ??
         null))
   const inUseId = inUse?.id ?? null
+
+  /*
+   * Nothing typed or armed about one theme may carry over to another.
+   *
+   * The delete row is the one that matters: it re-labels itself from `inUse`,
+   * so arming it and then clicking another card left "Delete for good"
+   * standing over a name it had never been armed for, one click from
+   * destroying a theme nobody confirmed. A two-step confirmation that survives
+   * a change of subject is not a confirmation. The half-typed name goes with
+   * it for the same reason - it belongs to the theme it was being typed for.
+   *
+   * The import notice is not reset here. It arrives *with* a theme change, so
+   * an effect on this edge would clear it before it was ever read; it names
+   * the theme it belongs to instead, and is shown only while that theme is on.
+   */
+  useEffect(() => {
+    setConfirmingDelete(false)
+    setNameDraft(null)
+  }, [inUseId])
+
   const readOnly = inUse?.is_builtin ?? true
   const readOnlyReason = inUse
     ? `${inUse.name} is built in, so these are read-only.`
@@ -1632,7 +1674,11 @@ function AppearancePane() {
       setThemeId(result.theme.id)
       setNameDraft(null)
       // §3.2: an import that loses something has to say so, in these words.
-      setLost(result.skipped_lines > 0 ? result.skipped_lines : null)
+      setLost(
+        result.skipped_lines > 0
+          ? { id: result.theme.id, lines: result.skipped_lines }
+          : null,
+      )
       notify(`Imported “${result.theme.name}”.`, 'success')
     },
     onError: (error: Error) => {
@@ -1727,7 +1773,7 @@ function AppearancePane() {
             </span>
           </Notice>
         )}
-        {lost !== null && (
+        {lost !== null && lost.id === themeId && (
           <Notice
             className="mb-2"
             actions={
@@ -1737,8 +1783,8 @@ function AppearancePane() {
             }
           >
             <span className="block max-w-[65ch]">
-              <span className="figure">{lost}</span> line(s) could not be read, so those colours
-              came from the theme it names as its base.
+              <span className="figure">{lost.lines}</span> line(s) could not be read, so those
+              colours came from the theme it names as its base.
             </span>
           </Notice>
         )}
@@ -1773,7 +1819,15 @@ function AppearancePane() {
             <ThemeCard
               key={entry.id}
               label={entry.name}
-              caption={`Made from ${baseName(entry.base)}.`}
+              /* A chosen theme whose table has not landed leaves the built-in
+                 colours on screen, which reads as a card that did nothing.
+                 Said on the card the user just clicked, where they are looking,
+                 and in the room the caption already takes. */
+              caption={
+                themeLoading && themeId === entry.id
+                  ? 'Fetching its colours.'
+                  : `Made from ${baseName(entry.base)}.`
+              }
               selected={themeId === entry.id}
               sample={baseLightness(entry.base) === 'light' ? 'sample-light' : 'sample-dark'}
               vars={sampleStyle(previews[index]?.data?.colours)}
@@ -1795,20 +1849,24 @@ function AppearancePane() {
             title={
               inUse
                 ? `Copies ${inUse.name} into a theme of your own.`
-                : 'Waiting for the theme library.'
+                : library.isError
+                  ? 'Your themes could not be loaded, so there is nothing to copy yet.'
+                  : 'Waiting for the theme library.'
             }
             onClick={() =>
               inUse && copy.mutate({ source: inUse.id, name: `${inUse.name} copy` })
             }
           >
             <Plus size={24} aria-hidden="true" />
-            {/* `text-small`, not `text-control`: the scale and the colour
-                palette both carry the name "control", so `text-control` emits
-                a font-size rule *and* a `color: var(--control)` rule, and the
-                colour one is second. On its own it paints a label in the
-                resting-control grey, which on `backdrop` is all but invisible.
-                Every other use in this file pairs it with a colour. */}
-            <span className="text-small">{copy.isPending ? 'Copying…' : 'New theme'}</span>
+            {/* `text-control`: 11.5 px, the control size, and a size only.
+                It once emitted `color: var(--control)` as well, because the
+                type scale and the colour palette both carried the name
+                "control" and the colour rule came second - which painted this
+                label the resting-control grey on a `backdrop` card, all but
+                invisible. `tailwind.config.js` now closes the set of colours
+                text may be, and a surface is not one of them, so the name is
+                the size alone and safe to use unpaired. */}
+            <span className="text-control">{copy.isPending ? 'Copying…' : 'New theme'}</span>
           </button>
         </div>
 
