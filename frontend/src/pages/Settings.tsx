@@ -950,23 +950,34 @@ function SyncingPane() {
             )}
           </Row>
         )}
-        <Row
-          label="Last sync"
-          hint={
-            lastRun ? (
-              <span className="figure">{formatDateTime(lastRun.started_at)}</span>
-            ) : undefined
-          }
-        >
-          {lastRun ? (
-            <>
-              <Fact>{relativeTime(lastRun.started_at)}</Fact>
-              <RunStatus status={lastRun.status} />
-            </>
-          ) : (
-            <Fact>Never</Fact>
-          )}
-        </Row>
+        {/* "Never" is a claim about the sync history, and a failed poll is not
+            evidence for it. Same rule as the settings request above: a request
+            that did not answer says so. */}
+        {syncStatus.isError ? (
+          <QueryError
+            error={syncStatus.error}
+            title="Could not load the sync status"
+            onRetry={() => void syncStatus.refetch()}
+          />
+        ) : (
+          <Row
+            label="Last sync"
+            hint={
+              lastRun ? (
+                <span className="figure">{formatDateTime(lastRun.started_at)}</span>
+              ) : undefined
+            }
+          >
+            {lastRun ? (
+              <>
+                <Fact>{relativeTime(lastRun.started_at)}</Fact>
+                <RunStatus status={lastRun.status} />
+              </>
+            ) : (
+              <Fact>Never</Fact>
+            )}
+          </Row>
+        )}
       </Group>
 
       <Group title="What syncs">
@@ -1234,8 +1245,14 @@ function AppearancePane() {
       <div className="grid max-w-[600px] grid-cols-2 gap-2 sm:grid-cols-3">
         {THEME_CARDS.map((card) => {
           const selected = theme === card.value
-          // "Follow the system" shows whichever palette is resolved just now,
-          // because that is what picking it would give you.
+          // "Follow the system" previews the *resolved* theme, which is what
+          // the viewer is looking at. While a theme is pinned, `resolved` is
+          // that pinned theme rather than the operating system's answer, so
+          // this card can agree with the Light card while the device asks for
+          // dark. Deliberate: reading `prefers-color-scheme` here would be
+          // truer for one render and then go stale, because only the "system"
+          // preference keeps a `matchMedia` listener alive. Do not swap one for
+          // the other without moving that listener into `ThemeProvider`.
           const sample =
             card.value === 'light' || (card.value === 'system' && resolved === 'light')
               ? 'sample-light'
