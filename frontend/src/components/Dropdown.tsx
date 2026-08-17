@@ -382,7 +382,7 @@ function DropdownShell({
       >
         <span className="truncate">{summaryNode ?? summary}</span>
         <ChevronDown
-          size={14}
+          size={16}
           aria-hidden="true"
           className={cn(
             'ml-auto shrink-0 text-muted transition-transform duration-open ease-ease',

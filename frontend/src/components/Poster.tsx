@@ -8,7 +8,7 @@ import {
   formatRating,
   posterFallbackGradient,
 } from '@/lib/utils'
-import { Spinner } from './ui'
+import { ErrorState, Spinner } from './ui'
 
 /**
  * Artwork with its placeholder underneath, rather than instead of it.
@@ -170,12 +170,20 @@ export function Poster({
           )}
 
           {/* Hover overlay. Everything in it is also reachable elsewhere (the
-              item page), since hover does not exist on touch. */}
+              item page), since hover does not exist on touch.
+
+              `pointer-events-none` until it is actually shown: opacity is not
+              a hit test, and while it was only faded out a tap in the poster's
+              corner landed on "Mark as watched" and scrobbled the title
+              instead of opening it. The group variants turn hit-testing back
+              on exactly when the overlay becomes visible. */}
           <div
-            className="absolute inset-0 flex items-end justify-between gap-2 bg-gradient-to-t
-                       from-black/85 via-black/25 to-transparent p-2.5 opacity-0
-                       transition-opacity duration-open
-                       group-hover/poster:opacity-100 group-focus-within/poster:opacity-100"
+            className="pointer-events-none absolute inset-0 flex items-end justify-between
+                       gap-2 bg-gradient-to-t from-black/85 via-black/25 to-transparent
+                       p-2.5 opacity-0 transition-opacity duration-open
+                       group-hover/poster:pointer-events-auto group-hover/poster:opacity-100
+                       group-focus-within/poster:pointer-events-auto
+                       group-focus-within/poster:opacity-100"
           >
             {card.rating != null && card.rating > 0 ? (
               <span className="figure flex items-center gap-1 text-tiny text-white/90">
@@ -194,7 +202,7 @@ export function Poster({
                   onQuickWatch(card)
                 }}
                 disabled={quickWatchPending}
-                className="pointer-events-auto grid h-7 w-7 place-items-center rounded-full
+                className="grid h-7 w-7 place-items-center rounded-full
                            bg-white/95 text-black transition-opacity duration-hover
                            hover:opacity-90 disabled:opacity-70"
                 title={quickWatchPending ? 'Marking as watched…' : 'Mark as watched'}
@@ -309,6 +317,18 @@ interface PosterRailProps {
   title: string
   cards: MediaCard[]
   loading?: boolean
+  /**
+   * The request failed.
+   *
+   * A rail takes `cards={data ?? []}`, so without this a 500 renders as an
+   * empty rail, which then hides itself: the page silently loses a section and
+   * says the library is empty. That is the standing "a failed request is not
+   * an empty list" rule, and the rail has to answer it itself, because the
+   * empty case is the one it swallows.
+   */
+  error?: unknown
+  /** Retry the failed request. */
+  onRetry?: () => void
   action?: React.ReactNode
   onQuickWatch?: (card: MediaCard) => void
   quickWatchPendingId?: number | null
@@ -319,10 +339,28 @@ export function PosterRail({
   title,
   cards,
   loading,
+  error,
+  onRetry,
   action,
   onQuickWatch,
   quickWatchPendingId = null,
 }: PosterRailProps) {
+  // Checked before the empty branch, always: an error that falls through to
+  // "nothing here" is the bug this exists to stop.
+  if (error) {
+    return (
+      <section>
+        <div className="mb-2 flex items-baseline justify-between gap-4">
+          <h2 className="text-heading font-semibold text-strong">{title}</h2>
+          {action}
+        </div>
+        <div className="card">
+          <ErrorState error={error} onRetry={onRetry} />
+        </div>
+      </section>
+    )
+  }
+
   if (!loading && cards.length === 0) return null
 
   return (
