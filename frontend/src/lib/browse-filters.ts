@@ -329,8 +329,19 @@ export const FILTER_GROUPS: Array<{ id: FilterGroup; label: string; hint: string
  * than with "no such studio".
  */
 export type FilterControl =
-  | { kind: 'search'; placeholder: string }
-  | { kind: 'chips' }
+  | {
+      kind: 'search'
+      placeholder: string
+      /**
+       * Takes the caret on mount.
+       *
+       * Only where searching is what the page is *for*. The shell's "/"
+       * shortcut navigates to the search destination and the field has to be
+       * ready when it arrives; without this the shell has to hunt the DOM for
+       * a field that does not exist yet, which is a race with a deadline.
+       */
+      autoFocus?: boolean
+    }
   | { kind: 'select'; lists?: keyof FilterLists }
   | {
       /**
@@ -513,6 +524,17 @@ export interface FilterPage {
    * omit `window`, whose `since`/`until` filter plays rather than titles.
    */
   omit?: readonly FilterKey[]
+  /**
+   * This page *is* the search, rather than a page you can also search within.
+   *
+   * Two things follow, and both are the same statement said to two different
+   * readers. The field takes the caret on mount, so the shell's "/" shortcut
+   * can navigate here and stop hunting the DOM for a control the route has not
+   * rendered yet. And the placeholder says the whole library rather than
+   * "these titles", which on a page holding nothing else would be a promise
+   * about a set that is not there.
+   */
+  searchIsThePage?: boolean
 }
 
 /** A plain string parameter: present or not. */
@@ -857,7 +879,13 @@ export function filterTable(page: FilterPage): FilterTable {
       read: ({ params }) => params.get('q') ?? '',
       write: (value) => ({ q: value.trim() || null }),
       toQuery: (value) => (value ? { q: value } : {}),
-      control: { kind: 'search', placeholder: 'Search these titles…' },
+      control: {
+        kind: 'search',
+        placeholder: page.searchIsThePage
+          ? 'Search your library…'
+          : 'Search these titles…',
+        autoFocus: page.searchIsThePage,
+      },
     },
 
     /**
@@ -903,7 +931,12 @@ export function filterTable(page: FilterPage): FilterTable {
           : value === 'unwatched'
             ? { unwatched: true }
             : { watch_status: value },
-      control: { kind: 'chips' },
+      // A dropdown rather than the row of chips this used to be. Seven options
+      // is two past what a segmented control may hold, and a chip in this
+      // language is a read-only figure that never opens (§7.2) — a row of them
+      // acting as radio buttons says "not a control" about the control people
+      // reach for most.
+      control: { kind: 'select' },
       choices: () => STATUS_FILTERS,
     },
 
@@ -1204,7 +1237,7 @@ export function filterTable(page: FilterPage): FilterTable {
       chip: (value) => (value == null ? null : String(value)),
     },
 
-    favorites: boolFilter('favorites', 'Favourites', '★ Favourites', { group: 'you' }),
+    favorites: boolFilter('favorites', 'Favourites', 'Favourites', { group: 'you' }),
 
     has_notes: boolFilter('has_notes', 'Notes', 'Has notes', { group: 'you' }),
 

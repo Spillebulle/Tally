@@ -9,9 +9,23 @@ import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { Artwork, Poster, PosterSkeleton } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented, Spinner } from '@/components/ui'
-import { BookmarkIcon, PlusIcon, SearchIcon } from '@/components/Icons'
+import { Bookmark, Plus, Search, X } from 'lucide-react'
 
 const PAGE_SIZE = 60
+
+/**
+ * The poster grid: cards reflow at a minimum width with a 12px gap, so a wide
+ * screen gets more columns rather than bigger cards (§6.4).
+ *
+ * Two floors rather than one. The guide's 220px is about wide screens, and on
+ * a 390px phone a 220px floor produces exactly one column: a poster the width
+ * of the window, which is the "bigger components" the rule exists to forbid.
+ * Below `sm` the floor is 150px, which is two columns on the narrowest screen
+ * Tally supports.
+ */
+const GRID =
+  'grid gap-3 grid-cols-[repeat(auto-fill,minmax(150px,1fr))] ' +
+  'sm:grid-cols-[repeat(auto-fill,minmax(220px,1fr))]'
 
 /** The type split, as one control. "Anime" is a flag, the others are a type. */
 const KINDS = [
@@ -98,7 +112,7 @@ export function Watchlist() {
       )
       return { previous }
     },
-    onSuccess: () => notify('Removed from watchlist — also removed on Plex', 'info'),
+    onSuccess: () => notify('Removed from your watchlist and from Plex.', 'info'),
     onError: (error: Error, _mediaItemId, context) => {
       if (context?.previous) {
         queryClient.setQueryData(['watchlist', query], context.previous)
@@ -147,7 +161,7 @@ export function Watchlist() {
               onClick={() => setSearchOpen((value) => !value)}
               className="btn-primary"
             >
-              <PlusIcon /> Add a title
+              <Plus size={16} aria-hidden="true" /> Add a title
             </button>
           </>
         }
@@ -167,52 +181,67 @@ export function Watchlist() {
       />
 
       {isLoading ? (
-        <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+        <div className={GRID}>
           {Array.from({ length: 12 }, (_, index) => (
             <PosterSkeleton key={index} />
           ))}
         </div>
       ) : isError ? (
-        <ErrorState error={error} onRetry={() => void refetch()} />
+        // Checked before the empty branch: a failed request is not an empty
+        // watchlist, and saying it is hides the error behind advice.
+        <div className="card">
+          <ErrorState error={error} onRetry={() => void refetch()} />
+        </div>
       ) : entries.length === 0 ? (
         // An empty page means two different things now: nothing watchlisted at
         // all, or nothing matching the filters. Telling the user to go add
         // something when they have 200 titles and a narrow filter would be daft.
-        narrowed ? (
-          <EmptyState
-            icon={<BookmarkIcon />}
-            title="Nothing on your watchlist matches"
-            description="Try widening the filters, or clear them to see everything you have saved."
-            action={
-              <button type="button" onClick={filters.clear} className="btn-outline mt-2">
-                Clear filters
-              </button>
-            }
-          />
-        ) : (
-          <EmptyState
-            icon={<BookmarkIcon />}
-            title="Your watchlist is empty"
-            description="Anything you add here shows up on your Plex watchlist too — and anything you add in Plex appears here after the next sync."
-            action={
-              <button type="button" onClick={() => setSearchOpen(true)} className="btn-primary mt-2">
-                <PlusIcon /> Find something to watch
-              </button>
-            }
-          />
-        )
+        <div className="card">
+          {narrowed ? (
+            <EmptyState
+              icon={<Bookmark size={24} />}
+              title="Nothing on your watchlist matches"
+              description="Try widening the filters, or clear them to see everything you have saved."
+              action={
+                <button type="button" onClick={filters.clear} className="btn-secondary">
+                  Clear filters
+                </button>
+              }
+            />
+          ) : (
+            <EmptyState
+              icon={<Bookmark size={24} />}
+              title="Your watchlist is empty"
+              description="Anything you add here shows up on your Plex watchlist too. Anything you add in Plex appears here after the next sync."
+              action={
+                <button
+                  type="button"
+                  onClick={() => setSearchOpen(true)}
+                  className="btn-secondary"
+                >
+                  <Plus size={16} aria-hidden="true" /> Find something to watch
+                </button>
+              }
+            />
+          )}
+        </div>
       ) : (
-        <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
+        <div className={GRID}>
           {entries.map((entry) =>
             entry.item ? (
               <div key={entry.id} className="group/entry relative">
                 <Poster card={entry.item} showProgress={false} />
+                {/* A mark over user content, so it keeps the scrim-and-white
+                    derived ink rather than a theme token (§2.6). Always
+                    visible where there is no hover to reveal it with, and
+                    `pointer-events-none` beside the fade, because opacity is
+                    not a hit test. */}
                 <button
                   type="button"
                   onClick={() => remove.mutate(entry.media_item_id)}
-                  className="absolute right-2 top-2 z-10 grid h-7 w-7 place-items-center rounded-full
+                  className="absolute right-2 top-2 z-10 grid h-6 w-6 place-items-center rounded-full
                              bg-black/70 text-white backdrop-blur-sm transition-opacity
-                             hover:bg-danger
+                             duration-open hover:bg-critical
                              lg:pointer-events-none lg:opacity-0
                              lg:group-hover/entry:pointer-events-auto
                              lg:group-hover/entry:opacity-100
@@ -221,10 +250,10 @@ export function Watchlist() {
                   title="Remove from watchlist"
                   aria-label={`Remove ${entry.item.title} from watchlist`}
                 >
-                  ×
+                  <X size={16} aria-hidden="true" />
                 </button>
                 {!entry.synced_with_plex && (
-                  <p className="mt-1 text-[10px] text-muted" title="Not yet mirrored to Plex">
+                  <p className="mt-1 text-tiny text-dim" title="Not yet mirrored to Plex">
                     Pending Plex sync
                   </p>
                 )}
@@ -272,90 +301,105 @@ function DiscoverSearch({ onClose }: { onClose: () => void }) {
   })
 
   return (
-    <div className="card mb-6 animate-fade-up p-4">
-      <form
-        onSubmit={(event) => {
-          event.preventDefault()
-          setSubmitted(term.trim())
-        }}
-        className="flex gap-2"
-      >
-        <div className="relative flex-1">
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-base text-muted" />
-          <input
-            autoFocus
-            value={term}
-            onChange={(event) => setTerm(event.target.value)}
-            placeholder="Search Plex for a film or series…"
-            aria-label="Search Plex Discover"
-            className="input pl-9"
-          />
-        </div>
-        <button type="submit" className="btn-primary" disabled={term.trim().length < 2}>
-          Search
-        </button>
-        <button type="button" onClick={onClose} className="btn-ghost">
+    <section className="panel mb-4">
+      <header className="panel-head">
+        <h2 className="panel-title">Add a title</h2>
+        <button type="button" onClick={onClose} className="btn-ghost ml-auto">
           Close
         </button>
-      </form>
+      </header>
 
-      {isFetching && (
-        <p className="mt-4 flex items-center gap-2 text-sm text-muted">
-          <Spinner /> Searching Plex…
-        </p>
-      )}
+      <div className="panel-body">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            setSubmitted(term.trim())
+          }}
+          className="flex gap-2"
+        >
+          <div className="relative min-w-0 flex-1">
+            <Search
+              size={16}
+              aria-hidden="true"
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
+            />
+            <input
+              autoFocus
+              value={term}
+              onChange={(event) => setTerm(event.target.value)}
+              placeholder="Search Plex for a film or series…"
+              aria-label="Search Plex Discover"
+              className="field pl-8"
+            />
+          </div>
+          <button
+            type="submit"
+            className="btn-secondary shrink-0"
+            disabled={term.trim().length < 2}
+            title={term.trim().length < 2 ? 'Type at least two letters.' : undefined}
+          >
+            Search
+          </button>
+        </form>
 
-      {data && data.length > 0 && (
-        <ul className="mt-4 grid gap-2 sm:grid-cols-2">
-          {data.map((card) => (
-            <li
-              key={card.id}
-              className="flex items-center gap-3 rounded-xl border border-line p-2"
-            >
-              <Artwork
-                src={card.poster_url}
-                title={card.title}
-                showTitle={false}
-                className="h-16 w-11 shrink-0 rounded-md bg-raised"
-              />
-              <div className="min-w-0 flex-1">
-                <p className="line-clamp-1 text-sm font-medium text-ink">{card.title}</p>
-                <p className="text-xs text-muted">
-                  {card.year ?? '—'} · {card.media_type === 'show' ? 'Series' : 'Film'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => add.mutate(card)}
-                disabled={add.isPending || card.on_watchlist}
-                className="btn-outline h-8 shrink-0 gap-1.5 px-2.5 text-xs"
-              >
-                {/* Adding pushes to Plex's watchlist, so show the wait. */}
-                {add.isPending && add.variables.id === card.id ? <Spinner /> : null}
-                {card.on_watchlist ? 'Added' : 'Add'}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+        {isFetching && (
+          <p className="mt-3 flex items-center gap-2 text-body text-dim">
+            <Spinner /> Searching Plex…
+          </p>
+        )}
 
-      {/* The error was never read, and "nothing found" required `data` to be
-          truthy — so a 401 "Link a Plex account first" cleared the spinner and
-          left the panel completely blank, which reads as broken rather than as
-          unauthorised. */}
-      {searchFailed && !isFetching && (
-        <p className="mt-4 text-sm text-danger">
-          {searchError instanceof Error
-            ? searchError.message
-            : 'Discover search failed.'}
-        </p>
-      )}
+        {data && data.length > 0 && (
+          <ul className="mt-3 grid gap-1 sm:grid-cols-2">
+            {data.map((card) => (
+              <li key={card.id} className="row h-auto gap-2 px-2 py-1.5">
+                <Artwork
+                  src={card.poster_url}
+                  title={card.title}
+                  showTitle={false}
+                  className="h-10 w-7 shrink-0 rounded-tight bg-control"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-control text-strong">{card.title}</p>
+                  <p className="text-tiny text-dim">
+                    <span className="figure">{card.year ?? '–'}</span> ·{' '}
+                    {card.media_type === 'show' ? 'Series' : 'Film'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => add.mutate(card)}
+                  disabled={add.isPending || card.on_watchlist}
+                  title={card.on_watchlist ? 'Already on your watchlist.' : undefined}
+                  className="btn-outline h-5 shrink-0 gap-1.5 px-2 text-tiny"
+                >
+                  {/* Adding pushes to Plex's watchlist, so show the wait. */}
+                  {add.isPending && add.variables.id === card.id ? <Spinner /> : null}
+                  {card.on_watchlist ? 'Added' : 'Add'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
 
-      {data && data.length === 0 && submitted && !isFetching && (
-        <p className="mt-4 text-sm text-muted">
-          Nothing found for “{submitted}”. Plex Discover search needs a linked Plex account.
-        </p>
-      )}
-    </div>
+        {/* The error was never read, and "nothing found" required `data` to be
+            truthy, so a 401 "Link a Plex account first" cleared the spinner and
+            left the panel completely blank, which reads as broken rather than
+            as unauthorised. */}
+        {searchFailed && !isFetching && (
+          <p className="mt-3 text-body text-critical">
+            {searchError instanceof Error
+              ? searchError.message
+              : 'Discover search failed.'}
+          </p>
+        )}
+
+        {data && data.length === 0 && submitted && !isFetching && (
+          <p className="mt-3 text-body text-dim">
+            Nothing found for “{submitted}”. Plex Discover search needs a linked Plex
+            account.
+          </p>
+        )}
+      </div>
+    </section>
   )
 }

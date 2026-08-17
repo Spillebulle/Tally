@@ -9,7 +9,7 @@ import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { Artwork } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
-import { ClockIcon, XIcon } from '@/components/Icons'
+import { Clock, X } from 'lucide-react'
 
 const PAGE_SIZE = 50
 
@@ -67,6 +67,20 @@ function dayLabel(dateString: string): string {
     month: 'long',
     day: 'numeric',
     year: date.getFullYear() === today.getFullYear() ? undefined : 'numeric',
+  })
+}
+
+/**
+ * The clock time a play happened, in the viewer's own zone.
+ *
+ * Inside a day group the date is the heading, so repeating it on every row
+ * spends the column on something the reader already knows. Sorted any other
+ * way there are no groups, and the row carries the whole stamp.
+ */
+function timeOfDay(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
   })
 }
 
@@ -193,7 +207,15 @@ export function History() {
     <div>
       <PageHeader
         title="History"
-        subtitle={isLoading ? 'Loading…' : `${compactNumber(total)} plays recorded`}
+        subtitle={
+          isLoading ? (
+            'Loading…'
+          ) : (
+            <>
+              <span className="figure">{compactNumber(total)}</span> plays recorded
+            </>
+          )
+        }
         actions={
           <Segmented
             label="Filter history"
@@ -216,50 +238,70 @@ export function History() {
       />
 
       {isLoading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 8 }, (_, index) => (
-            <div key={index} className="skeleton h-16 rounded-xl" />
+        // The same geometry as the rows they stand in for: 26px each, inside
+        // the same bordered list.
+        <ul className="card overflow-hidden">
+          {Array.from({ length: 12 }, (_, index) => (
+            <li
+              key={index}
+              className="flex h-row items-center gap-2 border-b border-line-soft px-2 last:border-b-0"
+            >
+              <span className="skeleton h-5 w-[14px] rounded-tight" />
+              <span className="skeleton h-2.5 w-40 rounded-tight" />
+              <span className="skeleton ml-auto h-2.5 w-16 rounded-tight" />
+            </li>
           ))}
-        </div>
+        </ul>
       ) : isError ? (
-        <ErrorState error={error} onRetry={() => void refetch()} />
+        // Before the empty branch, always: a 500 and an empty diary need
+        // different reactions, and the empty one tells the user to run a sync.
+        <div className="card">
+          <ErrorState error={error} onRetry={() => void refetch()} />
+        </div>
       ) : total === 0 ? (
         // An empty page means two different things: nothing watched at all, or
         // nothing matching the filters. Telling someone with 4,000 plays and a
         // narrow date window to go and run a sync would be daft.
-        narrowed ? (
-          <EmptyState
-            icon={<ClockIcon />}
-            title="No plays match those filters"
-            description="Try widening them, or clear them to see everything you have watched."
-            action={
-              <button type="button" onClick={filters.clear} className="btn-outline mt-2">
-                Clear filters
-              </button>
-            }
-          />
-        ) : (
-          <EmptyState
-            icon={<ClockIcon />}
-            title="No watch history yet"
-            description="Sync with Plex to import what you have already watched, or mark something watched from its page."
-          />
-        )
+        <div className="card">
+          {narrowed ? (
+            <EmptyState
+              icon={<Clock size={24} />}
+              title="No plays match those filters"
+              description="Try widening them, or clear them to see everything you have watched."
+              action={
+                <button type="button" onClick={filters.clear} className="btn-secondary">
+                  Clear filters
+                </button>
+              }
+            />
+          ) : (
+            <EmptyState
+              icon={<Clock size={24} />}
+              title="No watch history yet"
+              description="Sync with Plex to import what you have already watched, or mark something watched from its page."
+            />
+          )}
+        </div>
       ) : byDay ? (
-        <div className="space-y-8">
+        <div className="flex flex-col gap-4">
           {grouped.map(([day, plays]) => (
             <section key={day}>
-              <h2 className="sticky top-16 z-10 -mx-1 mb-2 bg-canvas/90 px-1 py-1.5 text-sm font-semibold text-muted backdrop-blur">
-                {dayLabel(day)}
-                <span className="ml-2 font-normal text-muted/70">
-                  {plays.length} {plays.length === 1 ? 'play' : 'plays'}
+              {/* A group header inside a list is an eyebrow (§7.16). It sticks
+                  under the 34px top bar, which is what `top-menubar` is: at a
+                  hard-coded 64px it hung a whole bar's height too low. */}
+              <h2 className="sticky top-menubar z-10 flex items-baseline gap-2 bg-window py-1.5">
+                <span className="eyebrow">{dayLabel(day)}</span>
+                <span className="text-tiny text-dim">
+                  <span className="figure">{plays.length}</span>{' '}
+                  {plays.length === 1 ? 'play' : 'plays'}
                 </span>
               </h2>
-              <ul className="space-y-2">
+              <ul className="card overflow-hidden">
                 {plays.map((event) => (
                   <HistoryRow
                     key={event.id}
                     event={event}
+                    showDate={false}
                     onRemove={() => remove.mutate(event.id)}
                   />
                 ))}
@@ -268,11 +310,12 @@ export function History() {
           ))}
         </div>
       ) : (
-        <ul className="space-y-2">
+        <ul className="card overflow-hidden">
           {events.map((event) => (
             <HistoryRow
               key={event.id}
               event={event}
+              showDate
               onRemove={() => remove.mutate(event.id)}
             />
           ))}
@@ -289,65 +332,95 @@ export function History() {
   )
 }
 
-function HistoryRow({ event, onRemove }: { event: WatchEvent; onRemove: () => void }) {
+/**
+ * One play, as a list row (§7.16): 26px, a thumbnail at the left, the name at
+ * 11.5px, and the trailing figures right-aligned and monospaced. Hairlines in
+ * `line-soft` between rows, no zebra striping and no vertical rules.
+ *
+ * It used to be a card of its own with a 56px poster, which made the diary a
+ * stack of tiles rather than a list, and a page of fifty plays four screens
+ * long.
+ */
+function HistoryRow({
+  event,
+  showDate,
+  onRemove,
+}: {
+  event: WatchEvent
+  /** The whole stamp, for a list with no day headings above it. */
+  showDate: boolean
+  onRemove: () => void
+}) {
   const card = event.item
   const title = card?.show_title ?? card?.title ?? 'Unknown title'
   const subtitle = card ? displaySubtitle(card) : null
+  const to = card ? `/item/${card.id}` : '#'
 
   return (
-    <li className="group card flex items-center gap-3 p-2.5 transition-colors hover:bg-raised/60">
-      <Link to={card ? `/item/${card.id}` : '#'} className="shrink-0">
+    <li className="group flex h-row items-center gap-2 border-b border-line-soft px-2 text-control transition-colors duration-hover ease-ease last:border-b-0 hover:bg-control-hover">
+      <Link to={to} tabIndex={-1} aria-hidden="true" className="shrink-0">
         <Artwork
           src={card?.poster_url ?? null}
           title={title}
           showTitle={false}
-          className="h-14 w-10 rounded-md bg-raised"
+          className="h-5 w-[14px] rounded-tight bg-control"
         />
       </Link>
 
-      <div className="min-w-0 flex-1">
-        <Link
-          to={card ? `/item/${card.id}` : '#'}
-          className="line-clamp-1 text-sm font-medium text-ink hover:text-accent"
-        >
-          {title}
-        </Link>
-        <p className="line-clamp-1 text-xs text-muted">{subtitle ?? '—'}</p>
-      </div>
+      <Link to={to} className="min-w-0 shrink truncate text-fg hover:text-strong">
+        {title}
+      </Link>
 
-      <div className="hidden shrink-0 text-right sm:block">
-        <p className="text-xs text-subtle">{formatDateTime(event.watched_at)}</p>
-        <p className="text-[11px] text-muted">
-          {SOURCE_LABELS[event.source]}
-          {event.player ? ` · ${event.player}` : ''}
-        </p>
-      </div>
-
-      {card?.is_anime && (
-        <span className="hidden rounded-md bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent md:inline">
-          Anime
+      {subtitle && (
+        <span className="hidden min-w-0 flex-1 truncate text-tiny text-dim sm:block">
+          {subtitle}
         </span>
       )}
 
-      <button
-        type="button"
-        onClick={onRemove}
-        className={cn(
-          'grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted',
-          'transition-all hover:bg-danger/10 hover:text-danger',
-          // Always visible and tappable where there is no hover to reveal it
-          // with. Above lg it fades in on hover, but `opacity-0` alone still
-          // hit-tests: on a touch screen that left an invisible delete button
-          // permanently armed at the end of every row.
-          'lg:pointer-events-none lg:opacity-0',
-          'lg:group-hover:pointer-events-auto lg:group-hover:opacity-100',
-          'lg:focus-visible:pointer-events-auto lg:focus-visible:opacity-100',
-        )}
-        title="Remove from history"
-        aria-label={`Remove ${title} from history`}
-      >
-        <XIcon className="text-sm" />
-      </button>
+      {/* One trailing cluster, always pushed right, with fixed widths inside
+          it. Hung off the row directly, the figure lost its column whenever
+          the row before it happened to carry an anime badge: the badge is
+          hidden below `md`, so it took the `ml-auto` with it and the time
+          landed against the title. */}
+      <span className="ml-auto flex shrink-0 items-center gap-2">
+        {card?.is_anime && <span className="badge hidden md:inline-flex">Anime</span>}
+
+        <span className="hidden w-[10rem] truncate text-right text-tiny text-dim lg:block">
+          {SOURCE_LABELS[event.source]}
+          {event.player ? ` · ${event.player}` : ''}
+        </span>
+
+        {/* The figure column: right-aligned, monospaced and a fixed width, so
+            a page of times lines up rather than shuffling by a digit. */}
+        <span
+          className={cn(
+            'figure text-right text-tiny text-dim',
+            showDate ? 'w-[5.5rem]' : 'w-[2.75rem]',
+          )}
+        >
+          {showDate ? formatDateTime(event.watched_at) : timeOfDay(event.watched_at)}
+        </span>
+
+        <button
+          type="button"
+          onClick={onRemove}
+          className={cn(
+            'grid h-5 w-5 shrink-0 place-items-center rounded-tight text-muted',
+            'transition-colors duration-hover ease-ease hover:text-critical',
+            // Always visible and tappable where there is no hover to reveal it
+            // with. Above lg it fades in on hover, but `opacity-0` alone still
+            // hit-tests: on a touch screen that left an invisible delete button
+            // permanently armed at the end of every row.
+            'lg:pointer-events-none lg:opacity-0',
+            'lg:group-hover:pointer-events-auto lg:group-hover:opacity-100',
+            'lg:focus-visible:pointer-events-auto lg:focus-visible:opacity-100',
+          )}
+          title="Remove from history"
+          aria-label={`Remove ${title} from history`}
+        >
+          <X size={16} aria-hidden="true" />
+        </button>
+      </span>
     </li>
   )
 }

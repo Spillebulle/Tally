@@ -242,6 +242,20 @@ function ContinueRow({
 /** Keep the fold useful: the rest of the dashboard should stay reachable. */
 const CONTINUE_LIMIT = 6
 
+/*
+ * Two floors, the same shape as `PosterGrid`.
+ *
+ * §7.14 puts a tile's minimum at 180px so a figure is never cramped, and that
+ * is what runs above `sm`. On a 390px phone it would mean one tile per row and
+ * six rows of scrolling before Continue watching, so the small floor is 170:
+ * two columns of 177px, which a figure and two short lines read at perfectly
+ * well. The number is a legibility floor rather than a magic constant, and
+ * auto-fit reflows on its own from there.
+ */
+const TILE_GRID =
+  'grid gap-3 grid-cols-[repeat(auto-fit,minmax(170px,1fr))] ' +
+  'sm:grid-cols-[repeat(auto-fit,minmax(180px,1fr))]'
+
 /* ── Poster rails ────────────────────────────────────────────────────────── */
 
 /**
@@ -424,7 +438,7 @@ export function Dashboard() {
           />
         </div>
       ) : (
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
+        <div className={TILE_GRID}>
           {stats.isLoading || !stats.data
             ? Array.from({ length: 6 }, (_, index) => (
                 <Skeleton key={index} className="h-[82px] rounded-card" />
