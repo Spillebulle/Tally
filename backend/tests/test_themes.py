@@ -834,3 +834,106 @@ async def test_the_endpoints_never_show_one_name_twice(authed_client):
 
     final = [row["name"] for row in (await authed_client.get("/api/themes")).json()]
     assert len(final) == len(set(final))
+
+
+# --- a base this build does not know ---------------------------------------
+#
+# §3.2's fallback is a **reader** rule: "an id the reader does not know falls
+# back to `graphite`" governs which table fills the absent tokens, not what the
+# file says. Umber ships `photoslop`, `shitstudio`, `krita` and `mediabog` and
+# Tally ships none of them, so this is the ordinary case for a file that came
+# from Umber — and rewriting the word would mean a theme that crossed to Tally
+# and back lost the preset it was authored against, silently and permanently.
+
+
+def test_an_unknown_base_survives_the_whole_library_round_trip(library):
+    """Stored as written, resolved at read time — at every step, not just one.
+
+    The encoder was tested for this from the start; the *library* was not, and
+    an import that quietly re-based a file would be invisible until somebody
+    opened their theme in the app that understands the preset.
+    """
+    data = (HEADER + "\nname = Bog Standard\nbase = mediabog\naccent = #FF0088\n").encode()
+    imported, skipped = theme_library.import_bytes(1, data, "bog.umbertheme")
+    assert skipped == 0  # an unknown base is a fallback, not a lost line
+    assert imported.base == "mediabog"
+
+    # On disk, in the file somebody can hand back to Umber.
+    stored = (library / "1" / "bog-standard.umbertheme").read_text(encoding="utf-8")
+    assert "base = mediabog" in stored
+
+    # Read back, listed, and encoded again.
+    reloaded = theme_library.load(1, "bog-standard")
+    assert reloaded.base == "mediabog"
+    assert [t.base for t in theme_library.list_themes(1)] == [
+        "graphite",
+        "paper",
+        "mediabog",
+    ]
+    assert "base = mediabog" in encode(reloaded)
+
+    # And everywhere the base is *used*, it resolves to Graphite's — the table
+    # the absent tokens came from, and the darkness the client stamps a class
+    # from. An unknown base must be Graphite's answer, never an undefined one.
+    assert reloaded.dark is True
+    assert reloaded.colours["window"] == BUILTINS["graphite"].colours["window"]
+    assert reloaded.colours["accent"] == "#FF0088"
+    assert resolve(reloaded)["--field"] == BUILTINS["graphite"].colours["dock"]
+    assert resolve(reloaded)["--accent-ink"] == BUILTINS["graphite"].colours["window"]
+
+
+def test_an_unknown_base_keeps_its_case_as_well_as_its_word(library):
+    """`base` is not case-folded, so the word goes back exactly as it came.
+
+    Lower-casing it here would be a quieter version of the same loss: the app
+    that owns the preset matches its ids with `==`.
+    """
+    data = (HEADER + "\nname = Bog\nbase = MediaBog\n").encode()
+    imported, _ = theme_library.import_bytes(1, data, "bog.umbertheme")
+    assert imported.base == "MediaBog"
+    assert theme_library.load(1, imported.id).base == "MediaBog"
+    assert imported.dark is True
+
+
+def test_an_absent_base_is_written_out_as_graphite(library):
+    """The one case where the word really is replaced, and it has to be.
+
+    A file that names no base has nothing to preserve, and §3.2 says every key
+    is written on the way out — so the fallback becomes the file's answer.
+    """
+    imported, _ = theme_library.import_bytes(1, (HEADER + "\nname = Bare\n").encode())
+    assert imported.base == "graphite"
+    assert "base = graphite" in encode(imported)
+
+
+async def test_an_unknown_base_survives_the_endpoints(authed_client):
+    text = HEADER + "\nname = Bog Standard\nbase = mediabog\naccent = #FF0088\n"
+    imported = await authed_client.post(
+        "/api/themes/import",
+        files={"file": ("bog.umbertheme", text.encode(), "text/plain")},
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["theme"]["base"] == "mediabog"
+    # The client stamps its theme class from this, so it has to be Graphite's
+    # answer rather than absent.
+    assert imported.json()["theme"]["dark"] is True
+
+    listed = (await authed_client.get("/api/themes")).json()
+    assert [row["base"] for row in listed] == ["graphite", "paper", "mediabog"]
+
+    detail = (await authed_client.get("/api/themes/bog-standard")).json()
+    assert detail["base"] == "mediabog"
+    assert detail["colours"]["window"] == BUILTINS["graphite"].colours["window"]
+
+    exported = await authed_client.get("/api/themes/bog-standard/export")
+    assert "base = mediabog" in exported.text
+
+    # And a copy of it carries the base too. `POST` is the one endpoint that
+    # chooses a base rather than being handed one, so it is the one that could
+    # quietly substitute a built-in.
+    copied = await authed_client.post(
+        "/api/themes", json={"name": "Bog Copy", "source_id": "bog-standard"}
+    )
+    assert copied.json()["base"] == "mediabog"
+    assert copied.json()["dark"] is True
+    assert copied.json()["colours"]["accent"] == "#FF0088"
