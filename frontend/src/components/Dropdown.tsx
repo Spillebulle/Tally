@@ -64,7 +64,7 @@ const SEARCHABLE_FROM = 10
 /** The list's cap before it scrolls inside itself. */
 const LIST_MAX_HEIGHT = 280
 
-/** A rough ceiling for the whole panel, for the "does it fit below?" test. */
+/** Stands in for the panel's height on the one frame before it is measured. */
 const PANEL_ESTIMATE = LIST_MAX_HEIGHT + 88
 
 /** Moves focus between the rows of a menu, for the arrow keys. */
@@ -142,35 +142,61 @@ function useMenuKeys(listRef: RefObject<HTMLElement | null>) {
   }
 }
 
-/** Where the open list sits, computed from the trigger's rectangle. */
-function panelStyle(rect: DOMRect, exactWidth: boolean): CSSProperties {
+/** The widest a bare trigger's list may grow (§7.7). */
+const BARE_MAX = 240
+
+/** The narrowest a menu may be (§7.1), so a search field is usable. */
+const MENU_MIN = 190
+
+/** Clear of the viewport edge, top and bottom. */
+const EDGE = 8
+
+/**
+ * Where the open list sits, computed from the trigger's rectangle.
+ *
+ * `height` is the panel's real measured height once it has rendered, and the
+ * estimate only on the first frame. It decides two things that a guess got
+ * wrong: whether to flip above (a four-row list fits under a trigger near the
+ * foot of the page, and used to flip anyway), and how much of the panel has to
+ * be given up when neither side has room.
+ */
+function panelStyle(rect: DOMRect, exactWidth: boolean, height: number): CSSProperties {
   const style: CSSProperties = { position: 'fixed' }
-  // A bordered trigger gets a list of its own width — floored at the menu
-  // minimum (§7.1), because a narrow filter trigger would otherwise hand its
-  // search field a 90px list. A bare trigger's list is its width or wider,
-  // up to 240.
+  // A bordered trigger gets a list of its own width, floored at the menu
+  // minimum: a narrow filter trigger would otherwise hand its search field a
+  // 90px list. A bare trigger's list is its width or wider, up to 240.
   const width = exactWidth
-    ? Math.max(rect.width, 190)
-    : Math.max(rect.width, 190)
+    ? Math.max(rect.width, MENU_MIN)
+    : Math.min(Math.max(rect.width, MENU_MIN), BARE_MAX)
   if (exactWidth) style.width = width
   else {
     style.minWidth = rect.width
-    style.maxWidth = Math.min(240, window.innerWidth - 16)
+    style.maxWidth = Math.min(BARE_MAX, window.innerWidth - 2 * EDGE)
   }
 
-  // Left edges aligned, unless that would push the list off screen.
-  if (rect.left + width > window.innerWidth - 8) {
-    style.right = Math.max(8, window.innerWidth - rect.right)
+  // Left edges aligned, unless that would push the list off screen. The test
+  // uses the width the panel may actually reach, not the floor: a bare panel
+  // rendering at 240 against a 190 test sat flush to the window edge.
+  if (rect.left + width > window.innerWidth - EDGE) {
+    style.right = Math.max(EDGE, window.innerWidth - rect.right)
   } else {
     style.left = rect.left
   }
 
-  // 4px below, or flipped 4px above when the room below has run out.
-  const fitsBelow =
-    rect.bottom + 4 + PANEL_ESTIMATE <= window.innerHeight ||
-    rect.bottom < window.innerHeight - rect.top
-  if (fitsBelow) style.top = rect.bottom + 4
-  else style.bottom = window.innerHeight - rect.top + 4
+  // 4px below, or flipped 4px above when the room below has run out. Whichever
+  // side is taken, the panel is then clamped into it: nothing here may leave
+  // the viewport, because the search field and the first rows are at the top
+  // and a panel hanging past it cannot be reached at all. Measured before
+  // this: 69px off the top of a 500px window.
+  const below = window.innerHeight - rect.bottom - 4 - EDGE
+  const above = rect.top - 4 - EDGE
+  if (height <= below || below >= above) {
+    style.top = rect.bottom + 4
+    style.maxHeight = Math.max(120, below)
+  } else {
+    style.bottom = window.innerHeight - rect.top + 4
+    style.maxHeight = Math.max(120, above)
+  }
   return style
 }
 
@@ -241,7 +267,15 @@ function DropdownShell({
 
   const place = () => {
     const rect = triggerRef.current?.getBoundingClientRect()
-    if (rect) setStyle(panelStyle(rect, variant === 'bordered'))
+    if (!rect) return
+    // The panel's own height once it exists, the estimate only on the frame
+    // before it does. `scrollHeight` rather than the rendered height, because
+    // the rendered one is already clamped by the last placement and would
+    // ratchet the panel smaller on every re-place.
+    const height = panelRef.current
+      ? panelRef.current.scrollHeight + 2
+      : PANEL_ESTIMATE
+    setStyle(panelStyle(rect, variant === 'bordered', height))
   }
 
   // The list is anchored to the trigger but lives in a portal, so it has to
@@ -252,6 +286,10 @@ function DropdownShell({
   // it — which is exactly what happened.
   useLayoutEffect(() => {
     if (!open) return
+    // Again now that the panel is on the page and can be measured, so the
+    // flip decision is made against the list it actually has rather than
+    // against a constant.
+    place()
     window.addEventListener('scroll', place, true)
     window.addEventListener('resize', place)
     return () => {
@@ -267,6 +305,18 @@ function DropdownShell({
       // Stopped here so a page listening for Escape does not also act on the
       // same press; closing this layer is the whole of what was meant.
       event.stopPropagation()
+      event.preventDefault()
+      close()
+      return
+    }
+    if (event.key === 'Tab') {
+      // Tab dismisses the layer back to its trigger, and the next Tab then
+      // carries on through the page in the ordinary order. It cannot be left
+      // to the default: the panel is portalled to the end of the document, so
+      // "the next element" from inside it is the end of the page, and from the
+      // trigger it is whatever follows on the strip while an open panel hangs
+      // over the grid. Either way the keyboard ends up somewhere the eye is
+      // not.
       event.preventDefault()
       close()
     }
@@ -321,7 +371,11 @@ function DropdownShell({
           variant === 'bordered' &&
             'h-button gap-1.5 rounded-ctl border border-line bg-transparent px-2.5 hover:border-line-dashed',
           variant === 'bordered' && open && 'border-line-dashed',
-          variant === 'bare' && 'h-dropdown gap-1 rounded-[4px] px-1 hover:text-strong',
+          variant === 'bare' &&
+            'h-dropdown gap-1 rounded-[4px] px-1 hover:bg-control-hover hover:text-strong',
+          // While open, the trigger holds its hover look (§7.7): a bordered
+          // one keeps the dashed edge, a bare one keeps the fill.
+          variant === 'bare' && open && 'bg-control-hover text-strong',
           active ? 'text-strong' : 'text-muted',
           triggerClassName,
         )}
@@ -346,7 +400,7 @@ function DropdownShell({
             style={style}
             onKeyDown={onKeyDown}
             onBlur={onBlur}
-            className="menu z-50 motion-safe:animate-rise"
+            className="menu z-50 flex flex-col motion-safe:animate-rise"
           >
             {children({ close })}
           </div>,
@@ -418,22 +472,30 @@ export function Select({
   className,
   variant,
   fullWidth,
+  placeholder,
 }: {
   label: string
   options: DropdownOption[]
   value: string
   onChange: (value: string) => void
+  /** Shown when `value` names no option. Defaults to the field's own name. */
+  placeholder?: string
   className?: string
   variant?: 'bordered' | 'bare'
   /** Fill the line: a form row, or a filter alone on its line (§7.7). */
   fullWidth?: boolean
 }) {
   const current = options.find((option) => option.value === value)
+  // A value that names no option is a stale URL or a list that has changed
+  // under a saved view. Showing `options[0]` there reads as a filter that is
+  // applied when it is not, and the user cannot tell the difference; the
+  // field's own name in muted ink says "nothing chosen", exactly as the
+  // multiple-choice trigger does.
   return (
     <DropdownShell
       label={label}
-      summary={current?.label ?? options[0]?.label ?? '–'}
-      active
+      summary={current?.label ?? placeholder ?? label}
+      active={Boolean(current)}
       variant={variant}
       fullWidth={fullWidth}
       triggerClassName={className}
@@ -474,6 +536,15 @@ function SelectPanel({
     ? options.filter((option) => option.label.toLowerCase().includes(needle))
     : options
 
+  // With no search field, the arrow keys have nothing to move *from* unless a
+  // row takes focus on mount. The chosen row is the natural one; when the
+  // value names no option (a stale URL) it is the first, or ArrowDown does
+  // nothing at all and the keyboard is stranded on the trigger.
+  const focusAt = Math.max(
+    0,
+    visible.findIndex((option) => option.value === value),
+  )
+
   return (
     <>
       {searchable && (
@@ -490,10 +561,12 @@ function SelectPanel({
         role="menu"
         aria-label={label}
         onKeyDown={menuKeys}
-        className="flex max-h-[280px] flex-col gap-px overflow-y-auto"
+        // `overscroll-contain`: wheeling past the end of the list must not
+        // hand the scroll to the page underneath, which moved 2160px.
+        className="flex max-h-[280px] min-h-0 flex-col gap-px overflow-y-auto overscroll-contain"
       >
         {visible.length === 0 && <NoMatches />}
-        {visible.map((option) => {
+        {visible.map((option, index) => {
           const chosen = option.value === value
           return (
             <button
@@ -503,7 +576,7 @@ function SelectPanel({
               data-label={option.label}
               role="menuitemradio"
               aria-checked={chosen}
-              autoFocus={!searchable && chosen}
+              autoFocus={!searchable && index === focusAt}
               onClick={() => onPick(option.value)}
               className={cn('menu-item text-left', chosen && 'menu-item-selected')}
             >
@@ -690,7 +763,9 @@ function MultiPanel({
         role="menu"
         aria-label={label}
         onKeyDown={menuKeys}
-        className="flex max-h-[280px] flex-col gap-px overflow-y-auto"
+        // `overscroll-contain`: wheeling past the end of the list must not
+        // hand the scroll to the page underneath, which moved 2160px.
+        className="flex max-h-[280px] min-h-0 flex-col gap-px overflow-y-auto overscroll-contain"
       >
         {/* The "All" row (§7.7): a three-state box in the same column as the
             items, separated by a hairline. Checked means nothing narrows this
@@ -703,6 +778,10 @@ function MultiPanel({
           role="menuitemcheckbox"
           aria-checked={anySet ? 'mixed' : true}
           aria-label={anySet ? `${label}, some selected. Clear.` : `${label}, all shown.`}
+          // Same reason as the single-choice panel: unsearchable, something has
+          // to hold focus or the arrow keys have nothing to move from. "All" is
+          // the first row, so it is the one.
+          autoFocus={!searchable}
           title={anySet ? 'Clear the selection' : 'Nothing narrows this'}
           onClick={() => {
             if (!anySet) return
