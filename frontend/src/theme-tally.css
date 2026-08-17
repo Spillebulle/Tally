@@ -115,6 +115,41 @@
   --heat-5: var(--accent);
 }
 
+/* ── Theme specimens ───────────────────────────────────────────────────────
+ *
+ * §9 asks the theme picker to be cards with a *preview*, and a preview of a
+ * theme has to show that theme's surfaces. The token tables cannot do it:
+ * `tokens.css` declares the light ladder on `:root` only, so a subtree cannot
+ * be flipped to it, and a component may not name a colour of its own.
+ *
+ * These two classes re-declare **five** tokens on a subtree, so anything
+ * inside them drawn with `bg-backdrop`, `bg-chrome`, `border-line`,
+ * `text-strong` or `bg-accent` renders in the named theme whatever the page
+ * is set to. Five, not the whole ladder: this is a specimen of what a theme
+ * looks like, not a theme, and a full second copy of the table would be a
+ * table nobody keeps in step. If a preview ever needs a sixth token, add that
+ * one rather than the rest.
+ *
+ * The values are the ones in `tokens.css`, restated because they cannot be
+ * referenced from a scope the root does not apply to. If the house ladder
+ * moves, these move with it.
+ */
+.sample-dark {
+  --backdrop: oklch(0.164 0.005 264);
+  --chrome: oklch(0.209 0.004 264);
+  --line: oklch(0.276 0.006 258);
+  --text-strong: oklch(0.928 0.003 265);
+  --accent: oklch(0.622 0.161 var(--accent-h));
+}
+
+.sample-light {
+  --backdrop: oklch(0.908 0.01 82);
+  --chrome: oklch(0.971 0.006 85);
+  --line: oklch(0.89 0.01 82);
+  --text-strong: oklch(0.342 0.004 68);
+  --accent: oklch(0.52 0.14 var(--accent-h));
+}
+
 /* ── The house typeface ────────────────────────────────────────────────────
  * Archivo, variable 100-900, width axis pinned to normal and subset to Latin
  * (42 KB). Bundled, never a CDN: the app is self-hosted and often reached
