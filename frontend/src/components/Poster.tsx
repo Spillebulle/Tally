@@ -133,7 +133,18 @@ export function Poster({
         className="block focus-visible:outline-none"
         aria-label={subtitle ? `${title}, ${subtitle}` : title}
       >
-        <Artwork src={card.poster_url} title={title} className="aspect-[2/3] w-full">
+        {/* The placeholder does not repeat the title here: §7.15 puts a caption
+            row under the picture and that row already names the card. With no
+            artwork - the normal state until a TMDB key or a Plex server fills
+            it in - the title was printed twice, once over the gradient and once
+            underneath it. Everywhere else `Artwork` stands alone and keeps its
+            label. */}
+        <Artwork
+          src={card.poster_url}
+          title={title}
+          showTitle={false}
+          className="aspect-[2/3] w-full"
+        >
           {/* Badges sit over the artwork, so they keep the scrim-and-white
               derived ink rather than theme tokens. */}
           <div className="pointer-events-none absolute left-2 top-2 flex flex-wrap gap-1.5">
