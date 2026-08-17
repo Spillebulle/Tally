@@ -1,8 +1,9 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Copy,
+  Download,
   ExternalLink,
   Info,
   KeyRound,
@@ -13,10 +14,20 @@ import {
   Server as ServerIcon,
   Sparkles,
   Sun,
+  Trash2,
+  Upload,
   type LucideIcon,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { useAuth, useTheme, useToast, type Theme } from '@/lib/app-context'
+import {
+  THEME_LIBRARY_KEY,
+  themeResolvedKey,
+  useAuth,
+  useTheme,
+  useToast,
+  type Theme,
+} from '@/lib/app-context'
+import { THEME_KEYS, baseLightness, findTheme, type ThemeKeyRow } from '@/lib/theme'
 import type { ApiKeyCreated, ApiKeyScope, Library, Server } from '@/lib/types'
 import { cn, copyText, formatDateTime, relativeTime } from '@/lib/utils'
 import { Select } from '@/components/Dropdown'
@@ -1202,6 +1213,29 @@ function LibraryPane() {
 
 /* ── Appearance ──────────────────────────────────────────────────────────── */
 
+/*
+ * The theme library (STYLE-GUIDE §3.1, §3.2, §9).
+ *
+ * Three built-in choices, then the account's own themes, then the dashed
+ * "New…" card. That card **copies what is in use**, and it is the only way to
+ * make a theme, because nothing shipped may be written to the library: a
+ * built-in is compiled in, and anything the user decides about it has to live
+ * where an update never reaches.
+ *
+ * Under the cards sits the editor: the twenty-seven stored keys grouped
+ * exactly as §2.1 and in the order §3.2 fixes, so a file reads top to bottom
+ * like the pane it came from. Twenty-seven rows is a lot of pane, so each
+ * group is an eyebrow of its own and the rows pair up into two columns once
+ * there is room for them.
+ *
+ * The editor always edits **the theme in use**, and that is the design rather
+ * than a shortcut. Settings apply live on this page, so an edit to a swatch is
+ * visible on the page it is edited on, which is the strongest argument the
+ * arrangement has for itself. Editing a theme nobody is wearing would change
+ * nothing on screen, and a change that shows nothing is indistinguishable from
+ * a request that never landed.
+ */
+
 const THEME_CARDS: Array<{ value: Theme; label: string; caption: string }> = [
   { value: 'dark', label: 'Dark', caption: 'Suits poster artwork.' },
   { value: 'light', label: 'Light', caption: 'Paper, for a bright room.' },
@@ -1211,6 +1245,62 @@ const THEME_CARDS: Array<{ value: Theme; label: string; caption: string }> = [
     caption: 'Whatever this device is set to.',
   },
 ]
+
+/**
+ * `#RRGGBB`, `RRGGBB` and `#RGB` in; `#RRGGBB` out. Anything else is refused.
+ *
+ * The refusal is the point (§3.2). A theme that quietly took black for a value
+ * it could not read is a theme with an invisible interface in it, so nothing
+ * unparsed is ever sent to the server or written into a preview: the swatch
+ * shows what the field *will* send, and a field that will send nothing says so
+ * where it stands.
+ */
+function parseColour(text: string): string | null {
+  const body = text.trim().replace(/^#/, '')
+  if (/^[0-9a-fA-F]{6}$/.test(body)) return `#${body.toLowerCase()}`
+  if (/^[0-9a-fA-F]{3}$/.test(body)) {
+    return `#${body
+      .toLowerCase()
+      .split('')
+      .map((c) => c + c)
+      .join('')}`
+  }
+  return null
+}
+
+/**
+ * The five tokens a preview may name, as file key → custom property.
+ *
+ * `.sample-dark` / `.sample-light` re-declare exactly these on a subtree, so
+ * these are the only five a preview can honestly draw. A custom theme fills
+ * them from its own table instead; anything it is missing falls through to the
+ * sample class underneath, which is why the class is still applied.
+ */
+const SAMPLE_TOKENS: ReadonlyArray<readonly [string, string]> = [
+  ['backdrop', '--backdrop'],
+  ['chrome', '--chrome'],
+  ['border', '--line'],
+  ['text_strong', '--text-strong'],
+  ['accent', '--accent'],
+]
+
+/**
+ * A theme's own five tokens as an element style.
+ *
+ * Setting a custom property from a value the API returned is not "a raw colour
+ * in a component": the component names five roles and never a colour, and the
+ * table it fills them from is the theme's. Every value is parsed first, so a
+ * colour the browser would not understand never reaches the DOM.
+ */
+function sampleStyle(colours: Record<string, string> | undefined): CSSProperties | undefined {
+  if (!colours) return undefined
+  const style: Record<string, string> = {}
+  for (const [key, property] of SAMPLE_TOKENS) {
+    const colour = parseColour(colours[key] ?? '')
+    if (colour) style[property] = colour
+  }
+  return Object.keys(style).length > 0 ? (style as CSSProperties) : undefined
+}
 
 /**
  * A card's preview, drawn in the theme the card offers rather than in the one
@@ -1226,10 +1316,19 @@ const THEME_CARDS: Array<{ value: Theme; label: string; caption: string }> = [
  * row carrying its accent mark, then a heading and a rail of cards. The bars
  * stand for text, which is why they are `bg-strong` faded with an element
  * opacity (an alpha *modifier* on a token colour would emit no CSS at all).
+ *
+ * `vars` is how a *custom* theme shows itself: the same five names, written as
+ * an element style from the theme's own table, which outranks the class.
  */
-function ThemeSample({ sample }: { sample: 'sample-dark' | 'sample-light' }) {
+function ThemeSample({
+  sample,
+  vars,
+}: {
+  sample: 'sample-dark' | 'sample-light'
+  vars?: CSSProperties
+}) {
   return (
-    <span className={cn('block border-b border-line', sample)}>
+    <span className={cn('block border-b border-line', sample)} style={vars}>
       <span className="flex h-16 bg-backdrop">
         <span className="flex w-2/5 flex-col gap-1 border-r border-line bg-chrome p-1.5">
           <span className="flex items-center gap-1">
@@ -1252,64 +1351,630 @@ function ThemeSample({ sample }: { sample: 'sample-dark' | 'sample-light' }) {
   )
 }
 
-function AppearancePane() {
-  const { theme, resolved, setTheme } = useTheme()
+/**
+ * One card in the grid (§7.15): a preview, a caption, and a 2px accent border
+ * when it is the one in use.
+ *
+ * The border is a 1px border plus a 1px inset ring rather than a 2px border,
+ * so the card does not shift by a pixel when it is picked.
+ */
+function ThemeCard({
+  label,
+  caption,
+  selected,
+  sample,
+  vars,
+  onSelect,
+}: {
+  label: string
+  caption: ReactNode
+  selected: boolean
+  sample: 'sample-dark' | 'sample-light'
+  vars?: CSSProperties
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={cn(
+        'card overflow-hidden text-left transition-colors duration-hover ease-ease',
+        selected ? 'border-accent ring-1 ring-inset ring-accent' : 'hover:border-line-dashed',
+      )}
+    >
+      <ThemeSample sample={sample} vars={vars} />
+      <span className="flex items-start justify-between gap-2 p-strip">
+        <span className="min-w-0">
+          <span className="block truncate text-body font-semibold text-strong">{label}</span>
+          {/* Wraps rather than truncates: "In use" takes the room the caption
+              would otherwise have had. */}
+          <span className="block text-tiny text-dim">{caption}</span>
+        </span>
+        {selected && <span className="shrink-0 text-tiny text-accent">In use</span>}
+      </span>
+    </button>
+  )
+}
+
+/**
+ * One of the twenty-seven: a 26 by 26 swatch, the token's name, and a typeable
+ * hex figure (§7.20).
+ *
+ * The swatch is a label over a native colour input, so a picker is one click
+ * away without a second implementation of one; the hex field is the readout
+ * and the keyboard path. Both show the same thing, and both show **what will
+ * be sent**: a typed value is parsed as it is typed, the swatch follows the
+ * parse rather than the text, and a value that will not parse is refused where
+ * it stands instead of being sent as something else.
+ *
+ * `text` is null while the row is showing the stored value, so nothing has to
+ * reconcile a draft with a server answer that arrives later: committing clears
+ * the draft and the stored value takes over again.
+ */
+function SwatchRow({
+  row,
+  value,
+  readOnly,
+  readOnlyReason,
+  onCommit,
+}: {
+  row: ThemeKeyRow
+  value: string
+  readOnly: boolean
+  /** Said in the row, never a silently disabled control (§9). */
+  readOnlyReason: string
+  onCommit: (key: string, colour: string, settle: boolean) => void
+}) {
+  const [text, setText] = useState<string | null>(null)
+  const shown = text ?? value
+  const parsed = parseColour(shown)
+  const stored = parseColour(value)
+  const swatch = parsed ?? stored
+  const id = `theme-colour-${row.key}`
+
+  const commit = () => {
+    const colour = parseColour(text ?? '')
+    if (colour && colour !== stored) onCommit(row.key, colour, false)
+    setText(null)
+  }
 
   return (
-    <Group title="Theme">
-      <div className="grid max-w-[600px] grid-cols-2 gap-2 sm:grid-cols-3">
-        {THEME_CARDS.map((card) => {
-          const selected = theme === card.value
-          // "Follow the system" previews the *resolved* theme, which is what
-          // the viewer is looking at. While a theme is pinned, `resolved` is
-          // that pinned theme rather than the operating system's answer, so
-          // this card can agree with the Light card while the device asks for
-          // dark. Deliberate: reading `prefers-color-scheme` here would be
-          // truer for one render and then go stale, because only the "system"
-          // preference keeps a `matchMedia` listener alive. Do not swap one for
-          // the other without moving that listener into `ThemeProvider`.
-          const sample =
-            card.value === 'light' || (card.value === 'system' && resolved === 'light')
-              ? 'sample-light'
-              : 'sample-dark'
-          return (
-            <button
-              key={card.value}
-              type="button"
-              onClick={() => setTheme(card.value)}
-              aria-pressed={selected}
-              className={cn(
-                'card overflow-hidden text-left transition-colors duration-hover ease-ease',
-                // The selected card's 2px accent border, drawn as a 1px border
-                // and a 1px inset ring so the card does not shift by a pixel
-                // when it is picked.
-                selected
-                  ? 'border-accent ring-1 ring-inset ring-accent'
-                  : 'hover:border-line-dashed',
-              )}
-            >
-              <ThemeSample sample={sample} />
-              <span className="flex items-start justify-between gap-2 p-strip">
-                <span className="min-w-0">
-                  <span className="block truncate text-body font-semibold text-strong">
-                    {card.label}
-                  </span>
-                  {/* Wraps rather than truncates: "In use" takes the room the
-                      caption would otherwise have had. */}
-                  <span className="block text-tiny text-dim">{card.caption}</span>
-                </span>
-                {selected && <span className="shrink-0 text-tiny text-accent">In use</span>}
-              </span>
-            </button>
-          )
-        })}
+    <div className="py-1">
+      <div className="flex items-center gap-2">
+        {readOnly || !swatch ? (
+          <span
+            aria-hidden="true"
+            title={readOnly ? readOnlyReason : undefined}
+            className="h-button w-button shrink-0 rounded-ctl border border-line-popover"
+            style={swatch ? { background: swatch } : undefined}
+          />
+        ) : (
+          <label
+            className="h-button w-button shrink-0 cursor-pointer rounded-ctl border border-line-popover"
+            style={{ background: swatch }}
+            title={`Pick a colour for ${row.label.toLowerCase()}.`}
+          >
+            <input
+              type="color"
+              className="sr-only"
+              value={swatch}
+              aria-label={`Pick a colour for ${row.label.toLowerCase()}`}
+              onChange={(event) => {
+                const colour = parseColour(event.target.value)
+                if (!colour) return
+                setText(colour)
+                // The picker fires as the pointer moves, so this one settles
+                // before it is sent. The typed field commits at once instead.
+                onCommit(row.key, colour, true)
+              }}
+            />
+          </label>
+        )}
+        <label htmlFor={id} className="min-w-0 flex-1 truncate text-control text-fg">
+          {row.label}
+        </label>
+        <input
+          id={id}
+          type="text"
+          spellCheck={false}
+          autoComplete="off"
+          className={cn(
+            'field figure w-[10ch] shrink-0 px-2 text-tiny',
+            // The refused value itself goes critical, not the field's edge: a
+            // field being typed into is focused, and `.field`'s focus border
+            // is the accent, so a critical *border* is a state that can never
+            // be seen. The sentence under the row is the signal that carries;
+            // this is the colour beside it, never the colour alone.
+            !parsed && 'text-critical',
+          )}
+          value={shown}
+          readOnly={readOnly}
+          aria-invalid={parsed ? undefined : true}
+          title={readOnly ? readOnlyReason : undefined}
+          onChange={(event) => setText(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              commit()
+            }
+            if (event.key === 'Escape') setText(null)
+          }}
+        />
       </div>
-      <Note>
-        {theme === 'system'
-          ? `This device is asking for the ${resolved} theme just now, and Tally follows it as it changes.`
-          : `Tally stays on the ${theme} theme whatever this device asks for.`}
-      </Note>
-    </Group>
+      {/* What it will send, said before it is sent. */}
+      {text !== null && !parsed && (
+        <p role="alert" className="mt-0.5 text-tiny text-critical">
+          Not a colour. Use #RRGGBB, RRGGBB or #RGB.
+        </p>
+      )}
+      {text !== null && parsed && parsed !== shown.trim().toLowerCase() && (
+        <p className="mt-0.5 text-tiny text-dim">
+          Saves as <span className="figure">{parsed}</span>.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** The §2.1 groups, in the order §3.2 fixes, taken from the table itself. */
+const THEME_GROUPS: ReadonlyArray<ThemeKeyRow['group']> = THEME_KEYS.reduce<
+  Array<ThemeKeyRow['group']>
+>((groups, row) => (groups.includes(row.group) ? groups : [...groups, row.group]), [])
+
+function AppearancePane() {
+  const { theme, resolved, setTheme, themeId, setThemeId, themeError } = useTheme()
+  const { notify } = useToast()
+  const queryClient = useQueryClient()
+
+  const nameRef = useRef<HTMLInputElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const timers = useRef<Record<string, number>>({})
+  const [nameDraft, setNameDraft] = useState<string | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [lost, setLost] = useState<number | null>(null)
+
+  const library = useQuery({
+    queryKey: THEME_LIBRARY_KEY,
+    queryFn: api.themes.list,
+    staleTime: 60_000,
+  })
+  const themes = library.data ?? []
+  const mine = themes.filter((entry) => !entry.is_builtin)
+
+  /*
+   * Which theme the editor is pointed at.
+   *
+   * A custom one when the preference names it; otherwise the built-in whose
+   * lightness is on screen, which is what the three cards above actually
+   * select. Found by lightness rather than by a hardcoded id, so an app that
+   * one day ships a third built-in still lands somewhere true.
+   */
+  const inUse =
+    (themeId ? findTheme(themes, themeId) : null) ??
+    (themeId
+      ? null
+      : (themes.find((entry) => entry.is_builtin && baseLightness(entry.base) === resolved) ??
+        null))
+  const inUseId = inUse?.id ?? null
+  const readOnly = inUse?.is_builtin ?? true
+  const readOnlyReason = inUse
+    ? `${inUse.name} is built in, so these are read-only.`
+    : 'A built-in theme is read-only.'
+
+  /* A card shows its own colours, so each custom theme's table is fetched.
+     The key is the editor's, so opening the pane fills both at once. */
+  const previews = useQueries({
+    queries: mine.map((entry) => ({
+      queryKey: ['theme', entry.id],
+      queryFn: () => api.themes.get(entry.id),
+      staleTime: 60_000,
+    })),
+  })
+
+  const detail = useQuery({
+    queryKey: ['theme', inUseId],
+    queryFn: () => api.themes.get(inUseId as string),
+    enabled: inUseId !== null,
+    staleTime: 60_000,
+  })
+
+  const refreshTheme = (id: string) => {
+    void queryClient.invalidateQueries({ queryKey: THEME_LIBRARY_KEY })
+    void queryClient.invalidateQueries({ queryKey: ['theme', id] })
+    // Without this the page goes on wearing the table it fetched before the
+    // edit, and a live setting that does not move reads as a failed request.
+    void queryClient.invalidateQueries({ queryKey: themeResolvedKey(id) })
+  }
+
+  const copy = useMutation({
+    mutationFn: ({ source, name }: { source: string; name: string }) =>
+      api.themes.create(source, name),
+    onSuccess: (created) => {
+      void queryClient.invalidateQueries({ queryKey: THEME_LIBRARY_KEY })
+      setThemeId(created.id)
+      setNameDraft(null)
+      notify(`Copied to “${created.name}”. It is yours to edit.`, 'success')
+      window.setTimeout(() => nameRef.current?.select(), 0)
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const rename = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => api.themes.update(id, { name }),
+    onSuccess: (saved, sent) => {
+      setNameDraft(null)
+      refreshTheme(saved.id)
+      // The library numbers a name somebody already used rather than replacing
+      // a theme they built, so say so when it happened.
+      if (saved.name !== sent.name) {
+        notify(`Another theme is called “${sent.name}”, so this one is “${saved.name}”.`)
+      }
+    },
+    onError: (error: Error) => {
+      setNameDraft(null)
+      notify(error.message, 'error')
+    },
+  })
+
+  const paint = useMutation({
+    mutationFn: ({ id, colours }: { id: string; colours: Record<string, string> }) =>
+      api.themes.update(id, { colours }),
+    onSuccess: (saved) => refreshTheme(saved.id),
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  const importTheme = useMutation({
+    mutationFn: (file: File) => api.themes.import(file),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: THEME_LIBRARY_KEY })
+      setThemeId(result.theme.id)
+      setNameDraft(null)
+      // §3.2: an import that loses something has to say so, in these words.
+      setLost(result.skipped_lines > 0 ? result.skipped_lines : null)
+      notify(`Imported “${result.theme.name}”.`, 'success')
+    },
+    onError: (error: Error) => {
+      setLost(null)
+      notify(error.message, 'error')
+    },
+  })
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api.themes.remove(id),
+    onSuccess: () => {
+      setConfirmingDelete(false)
+      setThemeId(null)
+      // The library listing is what drops the card, and dropping it unmounts
+      // the query for its colours. Removing that query here instead would make
+      // the observer still mounted for it refetch a file that no longer
+      // exists, which answers 404 for as long as the old listing is on screen.
+      void queryClient.invalidateQueries({ queryKey: THEME_LIBRARY_KEY })
+      notify('Theme deleted.', 'success')
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  /*
+   * A colour is written as it is chosen, because there is no Save button on
+   * this page and there is not going to be one. The picker settles first: it
+   * fires on every pointer move, and a request per pixel would be a request
+   * per pixel. A typed value has already settled by the time it is committed.
+   */
+  const commitColour = (key: string, colour: string, settle: boolean) => {
+    if (!inUseId || readOnly) return
+    window.clearTimeout(timers.current[key])
+    const send = () => paint.mutate({ id: inUseId, colours: { [key]: colour } })
+    if (settle) timers.current[key] = window.setTimeout(send, 250)
+    else send()
+  }
+
+  useEffect(() => {
+    const pending = timers.current
+    return () => {
+      for (const timer of Object.values(pending)) window.clearTimeout(timer)
+    }
+  }, [])
+
+  const commitName = () => {
+    const wanted = (nameDraft ?? '').trim()
+    if (!inUseId || readOnly || !wanted || wanted === inUse?.name) {
+      setNameDraft(null)
+      return
+    }
+    rename.mutate({ id: inUseId, name: wanted })
+  }
+
+  const colours = detail.data?.colours
+  const baseName = (base: string) =>
+    themes.find((entry) => entry.id === base)?.name ?? (base === 'paper' ? 'Paper' : 'Graphite')
+
+  return (
+    <>
+      <Group
+        title="Theme"
+        action={
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".umbertheme,text/plain"
+              className="sr-only"
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                // Cleared so choosing the same file twice still fires.
+                event.target.value = ''
+                if (file) importTheme.mutate(file)
+              }}
+            />
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => fileRef.current?.click()}
+              disabled={importTheme.isPending}
+            >
+              <Upload size={16} aria-hidden="true" />
+              {importTheme.isPending ? 'Importing…' : 'Import a file'}
+            </button>
+          </>
+        }
+      >
+        {themeError && (
+          <Notice className="mb-2">
+            <span className="block max-w-[65ch]">
+              This theme could not be loaded, so Tally is showing the built-in one instead.
+            </span>
+          </Notice>
+        )}
+        {lost !== null && (
+          <Notice
+            className="mb-2"
+            actions={
+              <button type="button" className="btn-ghost" onClick={() => setLost(null)}>
+                Got it
+              </button>
+            }
+          >
+            <span className="block max-w-[65ch]">
+              <span className="figure">{lost}</span> line(s) could not be read, so those colours
+              came from the theme it names as its base.
+            </span>
+          </Notice>
+        )}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+          {THEME_CARDS.map((card) => {
+            // "Follow the system" previews the *resolved* theme, which is what
+            // the viewer is looking at. While a theme is pinned, `resolved` is
+            // that pinned theme rather than the operating system's answer, so
+            // this card can agree with the Light card while the device asks for
+            // dark. Deliberate: reading `prefers-color-scheme` here would be
+            // truer for one render and then go stale, because only the "system"
+            // preference keeps a `matchMedia` listener alive. Do not swap one
+            // for the other without moving that listener into `ThemeProvider`.
+            const sample =
+              card.value === 'light' ||
+              (card.value === 'system' && themeId === null && resolved === 'light')
+                ? 'sample-light'
+                : 'sample-dark'
+            return (
+              <ThemeCard
+                key={card.value}
+                label={card.label}
+                caption={card.caption}
+                selected={themeId === null && theme === card.value}
+                sample={sample}
+                onSelect={() => setTheme(card.value)}
+              />
+            )
+          })}
+
+          {mine.map((entry, index) => (
+            <ThemeCard
+              key={entry.id}
+              label={entry.name}
+              caption={`Made from ${baseName(entry.base)}.`}
+              selected={themeId === entry.id}
+              sample={baseLightness(entry.base) === 'light' ? 'sample-light' : 'sample-dark'}
+              vars={sampleStyle(previews[index]?.data?.colours)}
+              onSelect={() => setThemeId(entry.id)}
+            />
+          ))}
+
+          {library.isLoading && <Skeleton className="h-[7.5rem]" />}
+
+          {/* §3.1: the dashed card copies the current theme, which is the only
+              way to make one. No fill, dashed edge, the size of its siblings. */}
+          <button
+            type="button"
+            className="dashed flex min-h-[7.5rem] flex-col items-center justify-center gap-1
+                       rounded-card border bg-transparent text-dim transition-colors
+                       duration-hover ease-ease enabled:hover:text-strong
+                       disabled:cursor-not-allowed disabled:opacity-45"
+            disabled={!inUse || copy.isPending}
+            title={
+              inUse
+                ? `Copies ${inUse.name} into a theme of your own.`
+                : 'Waiting for the theme library.'
+            }
+            onClick={() =>
+              inUse && copy.mutate({ source: inUse.id, name: `${inUse.name} copy` })
+            }
+          >
+            <Plus size={24} aria-hidden="true" />
+            {/* `text-small`, not `text-control`: the scale and the colour
+                palette both carry the name "control", so `text-control` emits
+                a font-size rule *and* a `color: var(--control)` rule, and the
+                colour one is second. On its own it paints a label in the
+                resting-control grey, which on `backdrop` is all but invisible.
+                Every other use in this file pairs it with a colour. */}
+            <span className="text-small">{copy.isPending ? 'Copying…' : 'New theme'}</span>
+          </button>
+        </div>
+
+        {library.isError && (
+          <QueryError
+            error={library.error}
+            title="Your themes could not be loaded."
+            onRetry={() => void library.refetch()}
+            compact
+          />
+        )}
+
+        <Note>
+          {themeId !== null && inUse
+            ? `“${inUse.name}” is in use, and the theme it was made from decides whether Tally is dark or light. Picking one of the first three brings the ${theme} preference back.`
+            : theme === 'system'
+              ? `This device is asking for the ${resolved} theme just now, and Tally follows it as it changes.`
+              : `Tally stays on the ${theme} theme whatever this device asks for.`}
+        </Note>
+      </Group>
+
+      {inUse && (
+        <Group title="This theme">
+          <Row
+            label="Name"
+            htmlFor={readOnly ? undefined : 'theme-name'}
+            hint={
+              readOnly
+                ? `${inUse.name} is built in, so its name and colours are read-only. Copy it to make one you can edit.`
+                : 'Up to 64 characters. It is what the card above is called.'
+            }
+          >
+            {readOnly ? (
+              <Fact>{inUse.name}</Fact>
+            ) : (
+              <input
+                id="theme-name"
+                ref={nameRef}
+                type="text"
+                className="field w-[22ch]"
+                maxLength={64}
+                value={nameDraft ?? inUse.name}
+                onChange={(event) => setNameDraft(event.target.value)}
+                onBlur={commitName}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    commitName()
+                  }
+                  if (event.key === 'Escape') setNameDraft(null)
+                }}
+              />
+            )}
+          </Row>
+          <Row
+            label="Made from"
+            hint="Which built-in fills anything the file does not carry, and whether the theme is dark or light."
+          >
+            <Fact>
+              {baseName(inUse.base)}, {baseLightness(inUse.base)}
+            </Fact>
+          </Row>
+          <Row
+            label="Export"
+            hint="Writes a .umbertheme file. It opens in Umber, and in anything else in the family."
+          >
+            {/* A plain link: the browser saves the file, and nothing here
+                claims it happened, because nothing here can know that it did. */}
+            <a
+              className="btn-outline"
+              href={api.themes.exportUrl(inUse.id)}
+              download={`${inUse.id}.umbertheme`}
+            >
+              <Download size={16} aria-hidden="true" />
+              Save the file
+            </a>
+          </Row>
+        </Group>
+      )}
+
+      {inUseId && detail.isError && (
+        <Group title="Colours">
+          <QueryError
+            error={detail.error}
+            title="These colours could not be loaded."
+            onRetry={() => void detail.refetch()}
+          />
+        </Group>
+      )}
+
+      {inUseId && !detail.isError && (
+        <>
+          {THEME_GROUPS.map((group) => (
+            <Group
+              key={group}
+              title={group}
+              action={
+                readOnly ? (
+                  <span className="text-tiny text-dim" title={readOnlyReason}>
+                    Read-only
+                  </span>
+                ) : undefined
+              }
+            >
+              <div className="grid gap-x-6 lg:grid-cols-2">
+                {THEME_KEYS.filter((row) => row.group === group).map((row) =>
+                  colours ? (
+                    <SwatchRow
+                      key={`${inUseId}:${row.key}`}
+                      row={row}
+                      value={colours[row.key] ?? ''}
+                      readOnly={readOnly}
+                      readOnlyReason={readOnlyReason}
+                      onCommit={commitColour}
+                    />
+                  ) : (
+                    <div key={row.key} className="py-1">
+                      <Skeleton className="h-button" />
+                    </div>
+                  ),
+                )}
+              </div>
+            </Group>
+          ))}
+        </>
+      )}
+
+      {inUse && !readOnly && (
+        <Group title="Danger">
+          <Row
+            label={`Delete “${inUse.name}”`}
+            hint="The file goes for good and its colours cannot be recovered. Tally goes back to the built-in themes."
+          >
+            {confirmingDelete ? (
+              <>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => setConfirmingDelete(false)}
+                >
+                  Keep it
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  disabled={remove.isPending}
+                  onClick={() => remove.mutate(inUse.id)}
+                >
+                  <Trash2 size={16} aria-hidden="true" />
+                  {remove.isPending ? 'Deleting…' : 'Delete for good'}
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => setConfirmingDelete(true)}
+              >
+                <Trash2 size={16} aria-hidden="true" />
+                Delete
+              </button>
+            )}
+          </Row>
+        </Group>
+      )}
+    </>
   )
 }
 
