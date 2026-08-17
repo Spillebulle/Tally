@@ -1,6 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="8" fill="#2a78d6"/>
-  <g stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none">
-    <path d="M9 9v14M14 9v14M19 9v14M24 9v14M7 12l19 9"/>
-  </g>
+  <style>
+    .square { fill: #3987E5; }
+    @media (prefers-color-scheme: light) { .square { fill: #2769B7; } }
+  </style>
+  <rect class="square" width="32" height="32" rx="9.6"/>
+  <g stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" fill="none"><path d="M7 9v14M13 9v14M19 9v14M25 9v14M6 11 26 21"/></g>
 </svg>

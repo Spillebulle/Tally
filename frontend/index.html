@@ -1,23 +1,27 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="description" content="Tally — track every film, series and anime you watch, in sync with Plex." />
-    <meta name="theme-color" content="#0f1013" media="(prefers-color-scheme: dark)" />
-    <meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)" />
+    <meta name="description" content="Tally is a self-hosted watch tracker. Films, series and anime, in two-way sync with Plex." />
+    <meta name="theme-color" content="#0D0E10" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#E4E0D9" media="(prefers-color-scheme: light)" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
     <title>Tally</title>
     <script>
-      // Apply the stored theme before first paint so there is no light flash.
+      // Apply the stored theme before first paint so there is no flash.
+      // Three states: dark is the 'dark' class, forced light is 'light',
+      // and following the system stamps nothing at all.
       (function () {
         try {
           var stored = localStorage.getItem('tally.theme') || 'dark'
-          var dark =
-            stored === 'dark' ||
-            (stored === 'system' &&
-              window.matchMedia('(prefers-color-scheme: dark)').matches)
-          document.documentElement.classList.toggle('dark', dark)
+          var root = document.documentElement
+          root.classList.remove('dark', 'light')
+          // 'system' stamps nothing, so prefers-color-scheme decides.
+          if (stored === 'dark' || stored === 'light') root.classList.add(stored)
         } catch (e) {}
       })()
     </script>
