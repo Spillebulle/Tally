@@ -325,6 +325,13 @@ interface PosterRailProps {
    * says the library is empty. That is the standing "a failed request is not
    * an empty list" rule, and the rail has to answer it itself, because the
    * empty case is the one it swallows.
+   *
+   * **No caller passes it yet**, so the bug above is still reachable through
+   * this component rather than fixed by it. `ItemDetail`'s "More like this"
+   * hands over `cards={data ?? []}` and nothing else; `Dashboard` guards
+   * `isError` before it composes its own panelled rail, which is why the two
+   * pages disagree. The prop is the shape the guard should move into — not a
+   * fix that has landed, and not to be described as one.
    */
   error?: unknown
   /** Retry the failed request. */

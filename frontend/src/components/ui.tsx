@@ -17,6 +17,30 @@ import type { WatchStatus } from '@/lib/types'
  * STYLE-GUIDE §7 and the traps from docs/interface.md.
  */
 
+/**
+ * Marks a layer portalled to `document.body` that sits *over* whatever opened
+ * it — a dropdown's list, in practice.
+ *
+ * A modal owns the keyboard, and it decides what is "inside" itself by asking
+ * `panel.contains(node)`. A portalled layer opened from within the dialog is
+ * visually inside it and, in the DOM, a sibling of the whole backdrop — so
+ * without a mark of its own the dialog reads the topmost layer as the page
+ * behind it. Two things went wrong from that, and both are one press spending
+ * two layers: Escape closed the list *and* the dialog, and Tab yanked focus out
+ * of the list onto the dialog's first control.
+ *
+ * So the dropdown stamps this on its panel and `Dialog` stands down while one is
+ * on screen (§7.7 gives Escape to the dropdown, §7.17 gives it to the dialog;
+ * the innermost layer answers first). It is an attribute rather than a context
+ * because the dialog has to answer "is anything above me?" about layers it
+ * never rendered and cannot see.
+ */
+export const TOP_LAYER_ATTR = 'data-top-layer'
+
+/** Is a portalled layer currently over everything? */
+export const topLayerOpen = () =>
+  document.querySelector(`[${TOP_LAYER_ATTR}]`) !== null
+
 /* ── Page header ─────────────────────────────────────────────────────────── */
 
 /**
@@ -45,6 +69,13 @@ export function PageHeader({
 }
 
 /* ── Empty and error states ──────────────────────────────────────────────── */
+
+/**
+ * Ends a fragment with a full stop, since §12 asks for sentences and a heading
+ * that becomes half of one has to earn its punctuation. Idempotent, so a title
+ * that already ends in one does not collect a second.
+ */
+const sentence = (text: string) => (/[.!?…]$/.test(text.trim()) ? text : `${text}.`)
 
 /**
  * Nothing here, and why: centred, an optional 24px icon drawn in the dashed
@@ -86,20 +117,67 @@ export function EmptyState({
  * to "Nothing here yet, run a Plex sync from Settings" whenever a request
  * errored, which confidently tells the user their library is empty and hides
  * the real problem. A 500 and an empty library need different reactions.
+ *
+ * Shorter than `EmptyState`, and that is not a lapse in the pair. An empty
+ * state is a page's whole answer and may hold the room it is given; an error is
+ * a sentence about one request, and most of these sit inside a panel or a rail
+ * that is about 200px tall when it succeeds. At `py-16` a failed rail measured
+ * 248px, so three of them made the page *taller* than the working one and
+ * mostly empty air. 184px now. §7.19 asks for a centred sentence, not a large
+ * box, and on a wider page the sentence wraps less and the box grew further
+ * still.
+ *
+ * `compact` goes further, for a failure that stands in for **one line** rather
+ * than for a region: a settings row whose single fact could not be fetched. The
+ * centred column is wrong at that size whatever its padding — it is a block
+ * where a sentence belongs — so this is a left-aligned row instead: 16px mark,
+ * one sentence, retry as a ghost button at the end. Measured in place of a 24px
+ * row, 248px as the full form against 40px as this one.
  */
 export function ErrorState({
   error,
   onRetry,
   title = 'Could not load this',
+  compact,
+  className,
 }: {
   error: unknown
   onRetry?: () => void
   title?: string
+  /** Standing in for one row rather than for a region. */
+  compact?: boolean
+  className?: string
 }) {
   const message =
     error instanceof Error && error.message ? error.message : 'Something went wrong.'
+
+  if (compact) {
+    return (
+      <div className={cn('flex items-start gap-2 py-1 text-left', className)}>
+        <TriangleAlert
+          size={16}
+          aria-hidden="true"
+          className="mt-px shrink-0 text-critical"
+        />
+        <p className="min-w-0 flex-1 text-body text-dim">
+          <span className="text-fg">{sentence(title)}</span> {sentence(message)}
+        </p>
+        {onRetry && (
+          <button type="button" onClick={onRetry} className="btn-ghost shrink-0">
+            Try again
+          </button>
+        )}
+      </div>
+    )
+  }
+
   return (
-    <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
+    <div
+      className={cn(
+        'flex flex-col items-center justify-center gap-2 px-6 py-8 text-center',
+        className,
+      )}
+    >
       <span className="mb-1 grid place-items-center text-critical" aria-hidden="true">
         <TriangleAlert size={24} />
       </span>
@@ -169,13 +247,35 @@ export function StarRating({ rating, onChange, size = 'md', readOnly }: StarRati
             fill={filled ? 'currentColor' : 'none'}
             aria-hidden="true"
             className={cn(
-              // An empty star is a mark, so it owes 3:1 (§2.6). `text-line` is
-              // 1.25:1 on chrome and 1.09:1 on control, which on an unrated
-              // title left all ten of them all but invisible — and the empty
-              // stars are the reference that makes the filled count readable.
-              filled ? 'text-strong' : 'text-placeholder',
+              // An empty star is a mark, so it owes 3:1 (§2.6), and the empty
+              // ones are the reference that makes the filled count readable.
+              // Two tokens have been tried and only this one clears it. Every
+              // figure below is sampled off a rendered pixel — the stroke is
+              // antialiased and the tokens are oklch, so anything derived from
+              // the declaration is a guess about what was painted:
+              //
+              //             backdrop  chrome  control      worst
+              //   line          1.31    1.20     1.10   dark
+              //                 1.06    1.28     1.13   light
+              //   placeholder   2.97    2.73     2.50   dark
+              //                 1.89    2.28     2.01   light   ← light is worse
+              //   muted         7.10    6.53     5.99   dark
+              //                 4.09    4.94     4.36   light
+              //
+              // `line` left all ten all but invisible on an unrated title.
+              // `placeholder` was a real improvement and still under the floor
+              // in both themes — the palette keeps that token deliberately
+              // quiet, because it is for hints and eyebrows; the token is not
+              // wrong, using it for a mark was. `muted` is the lowest rank that
+              // clears 3:1 everywhere, worst case 4.09 on the light backdrop
+              // (`dim` clears it in dark only: 2.61 on the light backdrop).
+              // An outline in `muted` against a filled star in `strong` still
+              // reads as empty — checked in both themes.
+              filled ? 'text-strong' : 'text-muted',
               interactive && 'transition-colors duration-hover',
-              interactive && !filled && 'group-hover/star:text-muted',
+              // Hover has to move somewhere, and from `muted` that is up to the
+              // filled ink: the star shows what clicking it would make it.
+              interactive && !filled && 'group-hover/star:text-strong',
             )}
           />
         )
@@ -314,6 +414,7 @@ export function Toggle({
   checked,
   onChange,
   label,
+  srLabel,
   description,
   disabled,
   disabledReason,
@@ -321,6 +422,19 @@ export function Toggle({
   checked: boolean
   onChange: (checked: boolean) => void
   label: string
+  /**
+   * The switch's accessible name, when the visible label cannot be it.
+   *
+   * A row is 26px and a repeated word is what the eye skips, so a list of
+   * library switches is labelled "Include" four times over and the library's
+   * name is the row it sits in. A screen reader has no row: it hears "Include"
+   * four times and nothing but order tells them apart. So the visible label
+   * stays short and this carries the whole name — `Include Films`, `Include
+   * Anime` — exactly as a `Select` in the same row already says "Anime in
+   * {title}". Only where the visible label is genuinely ambiguous on its own;
+   * duplicating it here would only make a screen reader repeat itself.
+   */
+  srLabel?: string
   description?: string
   disabled?: boolean
   /** Why it is disabled. Shown as the control's `title` (§7.6, §12). */
@@ -342,7 +456,7 @@ export function Toggle({
         type="button"
         role="switch"
         aria-checked={checked}
-        aria-label={label}
+        aria-label={srLabel ?? label}
         disabled={disabled}
         title={disabled ? disabledReason : undefined}
         onClick={() => onChange(!checked)}
@@ -444,6 +558,14 @@ export function Checkbox({
  *
  * `dot` colours a small status dot beside the eyebrow; whatever it signals
  * must also be said in `detail`, since a dot alone is colour alone.
+ *
+ * **The 180px minimum belongs to the grid, not to the tile.** §7.14's 180 is a
+ * minimum *track* width, which `minmax(180px, 1fr)` already says; a
+ * `min-width` here fights it, because a phone-width grid drops its floor to
+ * 170 so two tiles fit a 390px screen and a tile that refuses to shrink then
+ * eats the gap. Measured on the dashboard at 390px: tracks computed to 177,
+ * every tile held 180, the 12px gap collapsed to 9 and the row ended 3px past
+ * every panel below it. A tile is as wide as it is given.
  */
 export function Tile({
   eyebrow,
@@ -502,7 +624,7 @@ export function Tile({
         to={to}
         aria-label={toLabel ?? eyebrow}
         className={cn(
-          'card block min-w-[180px] p-3 transition-colors duration-hover ease-ease',
+          'card block p-3 transition-colors duration-hover ease-ease',
           'hover:bg-control-hover',
           className,
         )}
@@ -512,7 +634,7 @@ export function Tile({
     )
   }
 
-  return <div className={cn('card min-w-[180px] p-3', className)}>{body}</div>
+  return <div className={cn('card p-3', className)}>{body}</div>
 }
 
 /* ── Panel ───────────────────────────────────────────────────────────────── */
@@ -557,6 +679,39 @@ const DIALOG_SIZE = {
   large: 'sm:h-[640px] sm:w-[1000px]',
 } as const
 
+/** Everything inside `panel` that Tab can reach and the eye can see. */
+const focusableIn = (panel: HTMLElement | null) =>
+  Array.from(
+    panel?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])',
+    ) ?? [],
+  ).filter((node) => node.offsetParent !== null)
+
+/**
+ * Empty a field in a way React believes.
+ *
+ * `target.value = ''` is the obvious line and it does not work. React installs
+ * its own `value` setter on a mounted input and keeps a *value tracker* beside
+ * it; assigning through that setter updates the node and the tracker together,
+ * so when the `input` event arrives React compares the tracker to the field and
+ * sees no change — and swallows it. `onChange` never fires. Measured: the field
+ * read empty after Escape and the caller's old text came back on its next
+ * render, because the caller's state had never heard anything.
+ *
+ * Writing through the *prototype's* setter goes past React's override, which
+ * leaves the tracker holding the old string. The dispatched `input` then looks
+ * like a real change and the caller's `onChange` runs. Do not simplify this
+ * back.
+ */
+function clearField(target: HTMLInputElement | HTMLTextAreaElement) {
+  const proto =
+    target instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype
+  Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(target, '')
+  target.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 /**
  * The modal (§7.17): `chrome` fill, radius 10, `shadow-modal`, the page dimmed
  * to ~40% behind it. One scroll area; header and footer stay put. On a narrow
@@ -571,6 +726,12 @@ const DIALOG_SIZE = {
  * says so": pass the sentence, and Escape, the backdrop and the close mark all
  * decline and show it instead. It is a prop rather than each caller's own
  * guard, because a caller that has to remember will forget.
+ *
+ * **Nothing in the app calls this yet.** Every "dialog" on screen today is a
+ * page section or a drawer of its own, so the keyboard behaviour above is a
+ * primitive that has been measured rather than one that has shipped. Anything
+ * written about it — here, in a commit — has to say so, because "the modal owns
+ * the keyboard" reads as a fixed bug and is a promise to the first caller.
  */
 export function Dialog({
   open,
@@ -600,6 +761,13 @@ export function Dialog({
   const panelRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
   const [refused, setRefused] = useState(false)
+  // Was a portalled layer up when the current gesture began? A click has the
+  // same "one press, two layers" problem Escape had, one step further out: a
+  // dropdown closes on `pointerdown` *outside* itself, so by the time the
+  // `click` reaches the backdrop the list is already gone and the backdrop sees
+  // an ordinary dismiss. Measured: one click on the backdrop closed the list and
+  // the dialog together. Read at pointer-down, when the answer is still true.
+  const layerAtPointerDown = useRef(false)
 
   const tryClose = () => {
     if (busy) {
@@ -609,33 +777,72 @@ export function Dialog({
     onClose()
   }
 
+  // The key listener is installed once per open, so it must not reach `busy` or
+  // `onClose` through its closure — it would hold whichever ones existed when
+  // the dialog opened. It calls through this instead, refreshed after every
+  // render.
+  const tryCloseRef = useRef(tryClose)
+  useEffect(() => {
+    tryCloseRef.current = tryClose
+  })
+
+  /*
+   * Two effects, both keyed on `open` alone, and the split is the point.
+   *
+   * One effect owned the listener *and* focus-in *and* focus-return, with
+   * `busy` in its dependencies — so flipping `busy` while the dialog was open
+   * ran the cleanup, which focuses the opener (behind the backdrop), and then
+   * the body again, which moves focus to the body's first control. `busy`
+   * becoming truthy is exactly what a Save click does, so this fired on the
+   * common path: measured, clicking "Start work" moved focus off that button
+   * and onto the first field.
+   *
+   * Nothing here may depend on a value that changes while the dialog is open.
+   * If something must, it goes in a ref like `tryCloseRef` above.
+   */
+
+  // Focus in on open, back to the opener on close.
   useEffect(() => {
     if (!open) {
       setRefused(false)
       return
     }
-
     // Whatever had focus when this opened is where focus goes back to.
     openerRef.current = document.activeElement
     const panel = panelRef.current
-    const focusable = () =>
-      Array.from(
-        panel?.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])',
-        ) ?? [],
-      ).filter((node) => node.offsetParent !== null)
 
     // Into the dialog, not onto the page behind it. The body's first control
     // rather than the panel's, because the panel's first is the close mark and
     // landing there means Enter shuts the dialog the instant it opens. The
     // panel itself when there is nothing at all, so the keyboard is never left
     // outside.
-    const inBody = focusable().find((node) => node.closest('[data-dialog-body]'))
-    const first = inBody ?? focusable()[0]
+    const items = focusableIn(panel)
+    const first = items.find((node) => node.closest('[data-dialog-body]')) ?? items[0]
     if (first) first.focus()
     else panel?.focus()
 
+    return () => {
+      ;(openerRef.current as HTMLElement | null)?.focus?.()
+    }
+  }, [open])
+
+  // The keyboard and the scroll lock.
+  useEffect(() => {
+    if (!open) return
+    const panel = panelRef.current
+
     const onKey = (event: KeyboardEvent) => {
+      // A dropdown's list is portalled to the body, so it is not `inside` this
+      // panel however plainly it sits on top of it. While one is up, the
+      // innermost layer answers the keyboard: Escape closes the list and not
+      // also the dialog, and Tab dismisses the list back to its own trigger
+      // instead of being read as focus escaping the modal and hauled to the
+      // dialog's first control. This listener is on `document` in the *capture*
+      // phase, which is why the dropdown's own `stopPropagation` cannot do it:
+      // capture runs first, so the press is already spent by the time the
+      // dropdown sees it.
+      if (topLayerOpen()) return
+
       if (event.key === 'Escape') {
         const target = event.target as HTMLElement | null
         // Escape inside a field drops that field's edit first (§7.17). The
@@ -646,16 +853,15 @@ export function Dialog({
           (target as HTMLInputElement).value !== ''
         ) {
           event.stopPropagation()
-          ;(target as HTMLInputElement).value = ''
-          target.dispatchEvent(new Event('input', { bubbles: true }))
+          clearField(target as HTMLInputElement | HTMLTextAreaElement)
           return
         }
         event.preventDefault()
-        tryClose()
+        tryCloseRef.current()
         return
       }
       if (event.key !== 'Tab') return
-      const items = focusable()
+      const items = focusableIn(panel)
       if (items.length === 0) {
         event.preventDefault()
         return
@@ -684,10 +890,8 @@ export function Dialog({
     return () => {
       document.removeEventListener('keydown', onKey, true)
       document.body.style.overflow = previous
-      ;(openerRef.current as HTMLElement | null)?.focus?.()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, busy])
+  }, [open])
 
   if (!open) return null
 
@@ -695,8 +899,17 @@ export function Dialog({
     <div
       className="dialog-backdrop fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
       role="presentation"
+      // Capture, and on the whole subtree: every click is preceded by its own
+      // pointer-down, so the flag is never stale and needs no clearing.
+      onPointerDownCapture={() => {
+        layerAtPointerDown.current = topLayerOpen()
+      }}
       onClick={(event) => {
-        if (event.target === event.currentTarget) tryClose()
+        if (event.target !== event.currentTarget) return
+        // The gesture that just ended was spent closing the layer above this
+        // dialog. The innermost layer answers first, here as for Escape.
+        if (layerAtPointerDown.current) return
+        tryClose()
       }}
     >
       <div
