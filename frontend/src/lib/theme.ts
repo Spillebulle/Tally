@@ -21,9 +21,9 @@
  * not where it is written.** So `--accent-tint`, `--accent-ring`, `--grid`,
  * `--heat-1..5`, `--scrim` and `--critical-line` follow a custom accent and a
  * custom chrome on their own, without anybody computing them. They are
- * therefore never sent, and `DERIVED_VARIABLES` below refuses them if they
- * ever are: a second copy of a value the stylesheet already has right is a
- * copy that goes stale the next time the derivation changes.
+ * therefore never sent, and `THEME_VARIABLES` refuses them if they ever are:
+ * a second copy of a value the stylesheet already has right is a copy that
+ * goes stale the next time the derivation changes.
  */
 
 import type { ThemeBase, ThemeSummary } from './types'
@@ -64,27 +64,10 @@ export function baseLightness(base: string | null | undefined): 'dark' | 'light'
 
 /* ── What may be written ──────────────────────────────────────────────────*/
 
-/**
- * The names that must never arrive, because the stylesheet already derives
- * them from the names that do. Listed in `docs/themes.md`.
- *
- * Refused rather than trusted. A server that starts sending `--heat-3` is a
- * server that has computed the ramp against the wrong `--chrome` at least
- * once, and the failure would be a heatmap that quietly stops matching its own
- * accent rather than anything that looks broken.
+/*
+ * What may be written is a closed list, and it lives with `THEME_KEYS` at the
+ * foot of this file, because it is built from it: see `THEME_VARIABLES`.
  */
-const DERIVED_VARIABLES: ReadonlySet<string> = new Set([
-  '--accent-tint',
-  '--accent-ring',
-  '--grid',
-  '--heat-1',
-  '--heat-2',
-  '--heat-3',
-  '--heat-4',
-  '--heat-5',
-  '--scrim',
-  '--critical-line',
-])
 
 /**
  * A colour, conservatively.
@@ -112,7 +95,7 @@ let applied: string[] = []
 export interface ThemeApplication {
   /** How many variables were written. */
   count: number
-  /** Names refused: a derived value, or a value that is not a plain colour. */
+  /** Names refused: a name the contract does not carry, or a value that is not a plain colour. */
   refused: string[]
 }
 
@@ -120,9 +103,10 @@ export interface ThemeApplication {
  * Write a resolved theme onto the root element.
  *
  * Every previously applied name is removed first, so switching between two
- * custom themes cannot leave a variable from the first one behind. A refused
- * entry costs that one colour and nothing else, which is the same tolerance
- * §3.2 asks of the file reader: the stylesheet's own value stands.
+ * custom themes cannot leave a variable from the first one behind. A name
+ * outside `THEME_VARIABLES` is refused, and a refused entry costs that one
+ * colour and nothing else, which is the same tolerance §3.2 asks of the file
+ * reader: the stylesheet's own value stands.
  */
 export function applyTheme(table: Record<string, unknown>): ThemeApplication {
   const style = document.documentElement.style
@@ -136,7 +120,7 @@ export function applyTheme(table: Record<string, unknown>): ThemeApplication {
     // is skipped silently rather than counted as a refusal: a payload growing
     // a describing field one day is not a theme that failed to apply.
     if (!name.startsWith('--')) continue
-    if (DERIVED_VARIABLES.has(name) || typeof value !== 'string' || !COLOUR_VALUE.test(value)) {
+    if (!THEME_VARIABLES.has(name) || typeof value !== 'string' || !COLOUR_VALUE.test(value)) {
       refused.push(name)
       continue
     }
@@ -267,6 +251,34 @@ export const THEME_KEYS: readonly ThemeKeyRow[] = [
   { key: 'link_5', css: '--series-5', group: 'Link colours', label: 'Series five' },
   { key: 'link_6', css: '--series-6', group: 'Link colours', label: 'Series six' },
 ]
+
+/**
+ * Every custom property a resolved theme may write. Nothing else is applied.
+ *
+ * `docs/themes.md` enumerates exactly what the server sends: the twenty-seven
+ * mapped to their token names, plus the five `tokens.css` states literally
+ * rather than as a `color-mix`. So this is that list, and it is an
+ * **allowlist** - the thirty-two, and a refusal for everything else.
+ *
+ * It was a denylist of the values the stylesheet derives for itself, which
+ * named the ten worth naming and let anything else through: `--h-row`,
+ * `--r-card` and `--shadow-menu` all reached the root element from a payload
+ * that had no business carrying them. The contract is a fixed set of names,
+ * and a check that only refuses the mistakes somebody thought of is not that
+ * contract. Derived from `THEME_KEYS` rather than typed out again, so a key
+ * renamed in one place cannot be forgotten in the other.
+ *
+ * The five are still refused as *values to send*, per `docs/themes.md`, for
+ * being derived; they are simply refused by not being here.
+ */
+export const THEME_VARIABLES: ReadonlySet<string> = new Set([
+  ...THEME_KEYS.map((row) => row.css),
+  '--line-soft',
+  '--line-dashed',
+  '--placeholder',
+  '--field',
+  '--accent-ink',
+])
 
 /** The library entry for an id, or null. A convenience for the settings page. */
 export function findTheme(
