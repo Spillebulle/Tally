@@ -9,6 +9,7 @@ import type { ContinueWatchingItem, MediaCard, StatCount } from '@/lib/types'
 import {
   compactNumber,
   displaySubtitle,
+  episodeCode,
   formatDateTime,
   relativeTime,
 } from '@/lib/utils'
@@ -25,10 +26,23 @@ import {
 } from '@/components/ui'
 
 /*
- * The first screen: a tile grid of figures, then one panel per thing the page
- * shows (§10). Nothing here draws its own chrome - `Tile`, `Panel`, `Poster`
- * and the two states are the house primitives, and this file only composes
- * them.
+ * The first screen. §10 asks a page to say which modules it is made of, and in
+ * the order they appear these are: a page header; an empty state (§7.19) when
+ * there is nothing yet to show; a tile grid of six figures (§7.14) with one
+ * sparkline (§8); a panel (§7.5) of picture rows for Continue watching; three
+ * panels holding rails of poster cards (§7.15); and a panel of genre links.
+ *
+ * One module here departs from its spec, so it is named rather than left to be
+ * discovered: the Continue watching row is 76px tall with a 40 × 60 poster,
+ * where §7.16's picture row is 26px with a 40 × 20 thumbnail. A poster is 2:3
+ * and cropping it to a 20px strip throws away the artwork that identifies the
+ * title, and the row answers three questions rather than one - what it is, how
+ * far in, and when it was last played - each of which is a line. Everything
+ * else about it is the row spec: `control-hover` on hover, no separators, the
+ * trailing figures in `text-dim`.
+ *
+ * Nothing here draws its own chrome. `Tile`, `Panel`, `Poster` and the two
+ * states are the house primitives, and this file only composes them.
  */
 
 function greeting(): string {
@@ -40,14 +54,18 @@ function greeting(): string {
 }
 
 /**
- * A figure for a tile, or `null` for "nothing recorded".
+ * A figure for a tile, or `null` for "not known".
  *
- * §7.14: an unknown value is an en dash, never a "0". The two answers look
- * identical as digits and mean different things, and `Tile` draws the dash
- * itself when the value is null.
+ * §7.14 says an *unknown* value is an en dash, never a "0" for "no data". It
+ * does not say the reverse, and the difference matters here: once `stats.data`
+ * has arrived, all six of these counters are numbers computed over a known
+ * window, so a zero among them is the answer rather than the absence of one.
+ * Drawing a dash there had the page assert 604 plays and a longest streak of
+ * 27 days while claiming not to know the current streak it had just been told.
+ * So only `null` is unknown, and a real 0 prints as `0`.
  */
 function figure(value: number | null | undefined): string | null {
-  return value != null && value > 0 ? compactNumber(value) : null
+  return value == null ? null : compactNumber(value)
 }
 
 /** A number inside a sentence is still a figure, so it is still mono. */
@@ -67,7 +85,17 @@ function fold(series: StatCount[], buckets = 24): number[] {
   const size = Math.ceil(series.length / buckets)
   const out: number[] = []
   for (let index = 0; index < series.length; index += size) {
-    out.push(series.slice(index, index + size).reduce((sum, point) => sum + point.value, 0))
+    const slice = series.slice(index, index + size)
+    const sum = slice.reduce((total, point) => total + point.value, 0)
+    // Read as a rate, not as a sum, because the last slice is nearly always
+    // short: 366 days at 16 to a bucket is 22 full buckets and a last one of
+    // 14. A plain sum then dips by the ratio of the two widths - 14/16, or
+    // 12% - at precisely the point §8 asks for an endpoint dot, so the one
+    // marked value on the chart would be the one artefact in it. Scaling the
+    // short slice up to the full width removes that without dropping the most
+    // recent fortnight, which is the half of the shape anybody is reading it
+    // for. A full slice is unaffected: sum / size * size is the sum.
+    out.push((sum / slice.length) * size)
   }
   return out
 }
@@ -152,10 +180,27 @@ function ContinueRow({
 }) {
   const target = entry.next_episode ?? entry.item
   const poster = entry.item.poster_url ?? entry.show?.poster_url ?? null
-  const heading = entry.show?.title ?? entry.item.show_title ?? entry.item.title
-  const sub = entry.next_episode
-    ? `Up next · ${displaySubtitle(entry.next_episode)}`
-    : displaySubtitle(entry.item)
+  const series = entry.show?.title ?? entry.item.show_title ?? null
+  const code = episodeCode(target)
+
+  /*
+   * The heading names the episode, not only the series.
+   *
+   * One show can hold three part-watched episodes at once, and the API returns
+   * all three (see the report: `continue_watching` stops an "up next" card
+   * duplicating a part-watched one, but nothing dedupes part-watched episodes
+   * of the same show against each other). With the series title alone, three
+   * rows read as one title printed three times with three identical posters,
+   * told apart only by a 10.5px line underneath. The episode code goes on the
+   * heading line, where the eye lands first, and it is a figure, so it is mono.
+   */
+  const heading = series ?? target.title
+  // When the heading is the series, the second line is the episode's own name;
+  // otherwise it is the ordinary subtitle, which for a film is its year. An
+  // episode Plex gave us with no series title at all gets neither, rather than
+  // its code and title a second time.
+  const name = code ? (series ? target.title : null) : displaySubtitle(target)
+  const sub = name && entry.next_episode ? `Up next · ${name}` : name
 
   // The rail reads the resume position in both shapes; the label beside it says
   // which question it is answering, exactly as it did before. Only the numbers
@@ -187,15 +232,22 @@ function ContinueRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
+          {/* No hover colour of its own: the title is already `text-strong`, so
+              there is nowhere for it to go, and the row's `control-hover` fill
+              is the affordance. It must not be the accent - §2.4 keeps that for
+              selection and the primary, and `hover:text-strong` from a weaker
+              rest colour is the convention everywhere else in the app. */}
           <Link
             to={`/item/${target.id}`}
-            className="line-clamp-1 min-w-0 flex-1 text-body font-semibold text-strong
-                       transition-colors duration-hover hover:text-accent"
+            className="flex min-w-0 flex-1 items-baseline gap-1.5 text-body font-semibold
+                       text-strong"
           >
-            {heading}
+            <span className="truncate">{heading}</span>
+            {code && <span className="figure shrink-0 font-normal text-muted">{code}</span>}
           </Link>
+          {/* A time is a figure, so it is mono and tabular. */}
           <span
-            className="shrink-0 text-tiny text-dim"
+            className="figure shrink-0 text-tiny text-dim"
             title={
               entry.resumed_at
                 ? `Last played ${formatDateTime(entry.resumed_at)}`
@@ -256,14 +308,41 @@ const TILE_GRID =
   'grid gap-3 grid-cols-[repeat(auto-fit,minmax(170px,1fr))] ' +
   'sm:grid-cols-[repeat(auto-fit,minmax(180px,1fr))]'
 
+/*
+ * The track decides a tile's width; the tile must not argue with it.
+ *
+ * `Tile` carries its own `min-w-[180px]`, which on a 390px phone is 3px wider
+ * than the 177px track the grid computes: each tile then refused to shrink, and
+ * the row overflowed its column by exactly that much - the one row on the page
+ * that did not end where the header and every panel below it end. The floor is
+ * the grid's job in both directions (above `sm` the track minimum *is* 180, and
+ * on a viewport narrower than 180 a tile that will not shrink can only
+ * overflow), so it is cleared here.
+ *
+ * `!` because `cn` is a plain join, not tailwind-merge: both classes reach the
+ * element and without the flag the winner is whichever Tailwind happened to
+ * emit last. A one-line change in `components/ui.tsx` would be the tidier fix,
+ * and that file is not this task's to edit.
+ */
+const TILE_FLUID = '!min-w-0'
+
 /* ── Poster rails ────────────────────────────────────────────────────────── */
 
 /**
  * A panel holding a horizontally scrolling row of poster cards.
  *
- * Composed here rather than taken from `PosterRail` for one reason: that
- * component has no error branch, and a failed request must not render as an
- * empty rail that quietly disappears.
+ * Composed here rather than taken from `PosterRail`, and the reason has changed
+ * since this was written: it was that `PosterRail` had no error branch, and it
+ * now has `error` / `onRetry`, so that is no longer it. What remains is the
+ * chrome. `PosterRail` is a bare `<section>` with an `h2` above it, which is
+ * right on an item page where the rail is one part of a longer document; every
+ * section of this page is a §7.5 module with a panel header, a count beside the
+ * title and its commands right-aligned in that header, and a rail rendered as a
+ * plain heading in the middle of them reads as a different kind of thing. The
+ * card sizes are the shared ones (140/150), so that is not a difference any
+ * more either.
+ *
+ * If `PosterRail` ever takes a "render me as a panel" shape, this goes.
  */
 function RailPanel({
   title,
@@ -281,8 +360,12 @@ function RailPanel({
   const cards = query.data ?? []
 
   if (query.isError) {
+    // The commands stay. "All history" and "Browse anime" are the way off this
+    // panel and into the page that holds the same thing, which is exactly what
+    // somebody looking at a failed rail wants; dropping them took the escape
+    // hatch away at the only moment it was needed.
     return (
-      <Panel title={title}>
+      <Panel title={title} commands={commands}>
         <ErrorState error={query.error} onRetry={() => query.refetch()} />
       </Panel>
     )
@@ -307,7 +390,7 @@ function RailPanel({
         {(query.isLoading ? Array.from({ length: 8 }) : cards).map((card, index) => (
           <div
             key={query.isLoading ? index : (card as MediaCard).id}
-            className="w-[130px] shrink-0 sm:w-[140px]"
+            className="w-[140px] shrink-0 sm:w-[150px]"
           >
             {query.isLoading ? (
               <PosterSkeleton />
@@ -390,9 +473,24 @@ export function Dashboard() {
   const name = user?.display_name || user?.username || ''
   const hours = stats.data ? Math.round(stats.data.total_runtime_minutes / 60) : 0
   const plays = fold(stats.data?.activity_by_day ?? [])
+  const events = stats.data?.watch_events ?? 0
 
-  // A "0" here would say the opposite of what the tiles below say with an en
-  // dash, and the two are the same fact.
+  /*
+   * The window is stated once, in the header, and not again under every figure.
+   *
+   * §7.14 asks a tile's second line for a unit or a comparison. Four of the six
+   * said "in the past 12 months" instead, beneath a header that had just said
+   * "over the past year": seven statements of one window on the screen that
+   * goes at the top of the README, and the loudest repeated ink on it. These
+   * two derive a comparison from the same response, so nothing here waits on a
+   * second query or changes meaning when one arrives.
+   */
+  const perWeek = events / 52
+  const perWeekLabel =
+    perWeek === 0 ? '0' : perWeek >= 10 ? String(Math.round(perWeek)) : perWeek.toFixed(1)
+  const share = (part: number) => (events > 0 ? Math.round((part / events) * 100) : 0)
+
+  // The header states the window and the two figures the page is really about.
   const subtitle = stats.isError ? (
     'Your viewing figures could not be loaded.'
   ) : !stats.data ? (
@@ -428,6 +526,21 @@ export function Dashboard() {
         </div>
       )}
 
+      {/* A library with plays in it has none of these two cards; a library
+          without them has one. Either way it comes before the figures rather
+          than after three poster rails: it is the sentence that explains why
+          every figure below it reads 0, and it was last on the page and off the
+          fold, while the empty-library card two branches up was first. */}
+      {!libraryEmpty && !stats.isLoading && stats.data?.watch_events === 0 && (
+        <div className="card">
+          <EmptyState
+            icon={<Clock size={24} />}
+            title="Nothing logged yet"
+            description="Once you watch something on Plex, or mark it watched here, it will show up in your history and stats."
+          />
+        </div>
+      )}
+
       {/* At a glance. Six figures, reflowing from 180px (§7.14). */}
       {stats.isError ? (
         <div className="card">
@@ -439,43 +552,68 @@ export function Dashboard() {
         </div>
       ) : (
         <div className={TILE_GRID}>
+          {/* The skeleton is the height a tile actually renders at: 12px of
+              padding twice, a 10px eyebrow, 6px, the 24px figure, 4px and an
+              11px line. It was 82, so the page jumped 6px per tile row the
+              moment the figures landed. */}
           {stats.isLoading || !stats.data
             ? Array.from({ length: 6 }, (_, index) => (
-                <Skeleton key={index} className="h-[82px] rounded-card" />
+                <Skeleton key={index} className="h-[88px] rounded-card" />
               ))
             : [
                 {
                   eyebrow: 'Plays logged',
                   value: figure(stats.data.watch_events),
-                  detail: 'Over the past 12 months.',
+                  detail: (
+                    <>
+                      About <Num>{perWeekLabel}</Num> a week.
+                    </>
+                  ),
                   spark: <Sparkline points={plays} />,
                 },
                 {
                   eyebrow: 'Screen time',
                   value: figure(hours),
-                  detail: 'Hours, over the past 12 months.',
+                  detail: 'Hours.',
                 },
                 {
                   eyebrow: 'Films',
                   value: figure(stats.data.total_movies_watched),
-                  detail: 'Watched in the past 12 months.',
+                  detail:
+                    events > 0 ? (
+                      <>
+                        <Num>{share(stats.data.total_movies_watched)}%</Num> of your plays.
+                      </>
+                    ) : (
+                      'Plays of a film.'
+                    ),
                 },
                 {
                   eyebrow: 'Episodes',
                   value: figure(stats.data.total_episodes_watched),
-                  detail: 'Watched in the past 12 months.',
+                  detail: (
+                    <>
+                      Across <Num>{stats.data.total_shows_watched}</Num> shows.
+                    </>
+                  ),
                 },
                 {
+                  // The caption is drawn from the same response as the figure.
+                  // It used to count anime *titles in the library*, from the
+                  // summary query: a second metric under the first, in a second
+                  // unit, over no window at all, and it read "Over the past 12
+                  // months." until that query returned and then changed its
+                  // meaning under the reader.
                   eyebrow: 'Anime plays',
                   value: figure(stats.data.total_anime_watched),
-                  detail: summary.data?.library_anime ? (
-                    <>
-                      <Num>{compactNumber(summary.data.library_anime)}</Num> titles in your
-                      library.
-                    </>
-                  ) : (
-                    'Over the past 12 months.'
-                  ),
+                  detail:
+                    events > 0 ? (
+                      <>
+                        <Num>{share(stats.data.total_anime_watched)}%</Num> of your plays.
+                      </>
+                    ) : (
+                      'Plays of an anime title.'
+                    ),
                 },
                 {
                   eyebrow: 'Current streak',
@@ -495,6 +633,7 @@ export function Dashboard() {
                   value={tile.value}
                   detail={tile.detail}
                   spark={tile.spark}
+                  className={TILE_FLUID}
                 />
               ))}
         </div>
@@ -520,7 +659,13 @@ export function Dashboard() {
                 onClick={() => setShowAllContinue((value) => !value)}
                 className="btn-ghost px-2"
               >
-                {showAllContinue ? 'Show fewer' : `Show all ${continueWatching.data?.length}`}
+                {showAllContinue ? (
+                  'Show fewer'
+                ) : (
+                  <>
+                    Show all <Num>{continueWatching.data?.length}</Num>
+                  </>
+                )}
               </button>
             )
           }
@@ -569,15 +714,20 @@ export function Dashboard() {
           title="What you gravitate to"
           commands={<GoTo to="/stats">Full stats</GoTo>}
         >
+          {/* Buttons (§7.6), not chips. Each one opens a filtered grid, and
+              `.chip` says of itself in index.css that a chip is a read-only
+              figure which never opens anything - so a chip that is the page's
+              only route into a genre teaches the wrong thing about every other
+              chip in the app. `btn-outline` is the quiet control on a panel
+              body, and the count rides along inside it as a figure. */}
           <div className="flex flex-wrap gap-2">
             {stats.data.top_genres.slice(0, 10).map((genre) => (
               <Link
                 key={genre.label}
-                // /browse: the counts behind these chips include shows and
-                // episodes, and /movies would also drop anime entirely.
+                // /browse: the counts behind these include shows and episodes,
+                // and /movies would also drop anime entirely.
                 to={`/browse?genre=${encodeURIComponent(genre.label)}`}
-                className="chip transition-colors duration-hover ease-ease
-                           hover:border-line-dashed hover:text-strong"
+                className="btn-outline gap-1.5 px-2"
               >
                 {genre.label}
                 <span className="figure text-dim">{genre.value}</span>
@@ -585,16 +735,6 @@ export function Dashboard() {
             ))}
           </div>
         </Panel>
-      )}
-
-      {!libraryEmpty && !stats.isLoading && stats.data?.watch_events === 0 && (
-        <div className="card">
-          <EmptyState
-            icon={<Clock size={24} />}
-            title="Nothing logged yet"
-            description="Once you watch something on Plex, or mark it watched here, it will show up in your history and stats."
-          />
-        </div>
       )}
     </div>
   )
