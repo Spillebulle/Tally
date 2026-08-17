@@ -187,6 +187,7 @@ function DropdownShell({
   summaryNode,
   active,
   variant = 'bordered',
+  fullWidth,
   triggerClassName,
   children,
 }: {
@@ -204,6 +205,12 @@ function DropdownShell({
    * dense strip, whose list is at least its width (§7.7).
    */
   variant?: 'bordered' | 'bare'
+  /**
+   * Fill the line the control stands on, and open a list of the same width.
+   * A form row and a filter that is alone on its line both want this; §7.7
+   * calls it "full when alone on a line".
+   */
+  fullWidth?: boolean
   triggerClassName?: string
   children: (api: { close: () => void }) => ReactNode
 }) {
@@ -284,7 +291,11 @@ function DropdownShell({
   return (
     <div
       ref={wrapRef}
-      className="relative inline-flex min-w-0"
+      // `cn` is a plain join, not a tailwind-merge: a class a caller passes
+      // cannot beat one written here, it only sits beside it and loses to
+      // whichever CSS rule is later. So the width is a *prop* rather than
+      // something a `className` could be trusted to override.
+      className={cn('relative min-w-0', fullWidth ? 'flex w-full' : 'inline-flex')}
       onKeyDown={onKeyDown}
       onBlur={onBlur}
     >
@@ -304,8 +315,9 @@ function DropdownShell({
           }
         }}
         className={cn(
-          'inline-flex min-w-0 max-w-[13rem] items-center text-control',
+          'inline-flex min-w-0 items-center text-control',
           'transition-colors duration-hover ease-ease',
+          fullWidth ? 'w-full' : 'max-w-[13rem]',
           variant === 'bordered' &&
             'h-button gap-1.5 rounded-ctl border border-line bg-transparent px-2.5 hover:border-line-dashed',
           variant === 'bordered' && open && 'border-line-dashed',
@@ -405,6 +417,7 @@ export function Select({
   onChange,
   className,
   variant,
+  fullWidth,
 }: {
   label: string
   options: DropdownOption[]
@@ -412,6 +425,8 @@ export function Select({
   onChange: (value: string) => void
   className?: string
   variant?: 'bordered' | 'bare'
+  /** Fill the line: a form row, or a filter alone on its line (§7.7). */
+  fullWidth?: boolean
 }) {
   const current = options.find((option) => option.value === value)
   return (
@@ -420,6 +435,7 @@ export function Select({
       summary={current?.label ?? options[0]?.label ?? '–'}
       active
       variant={variant}
+      fullWidth={fullWidth}
       triggerClassName={className}
     >
       {({ close }) => (
@@ -530,6 +546,7 @@ export function MultiSelect({
   andable,
   renderOption,
   variant,
+  fullWidth,
 }: {
   label: string
   options: DropdownOption[]
@@ -540,6 +557,8 @@ export function MultiSelect({
   /** Draws an option as something other than its plain text — a badge, say. */
   renderOption?: (option: DropdownOption) => ReactNode
   variant?: 'bordered' | 'bare'
+  /** Fill the line: a form row, or a filter alone on its line (§7.7). */
+  fullWidth?: boolean
 }) {
   const known = new Map(options.map((option) => [option.value, option.label]))
   const chosen = [
@@ -569,6 +588,7 @@ export function MultiSelect({
       summaryNode={summaryNode}
       active={chosen.length > 0}
       variant={variant}
+      fullWidth={fullWidth}
     >
       {() => (
         <MultiPanel
