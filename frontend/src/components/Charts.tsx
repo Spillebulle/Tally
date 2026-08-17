@@ -1,83 +1,118 @@
 /**
- * Charts for the stats page.
+ * Charts for the stats page, drawn to STYLE-GUIDE §8.
  *
- * Built as plain SVG rather than a charting library: the specs here are fixed
- * (thin marks, 4px rounded data-ends, a 2px surface gap between neighbours,
- * hairline recessive gridlines) and a library would fight all of them.
+ * Hand-built SVG and CSS rather than a charting library, and that is still the
+ * right call: §8 fixes the marks (≤24px thick, radius 2 on the data end only,
+ * square at the baseline, a 2px gap between neighbours, horizontal hairline
+ * gridlines and nothing else), and a library fights every one of them.
  *
- * Colour: almost every chart plots a single series, so it uses the sequential
- * blue and needs no legend — the heading names what is plotted. Values are
- * directly labelled at the data end, which also satisfies the relief rule for
- * the lighter steps.
+ * ## Colour, and why nothing here reads `getComputedStyle`
  *
- * The comparison chart is the one exception, and it is the exception the rule
- * was always conditioned on: two series in one frame cannot be told apart by a
- * heading, so it ships a `ChartLegend`. Two series, not three — `--series-1`
- * and `--series-2` are from the validated palette and nothing here may invent a
- * colour by eye. The rewatch split is the second such frame and uses the same
- * two, stacked rather than paired.
+ * Every colour is a `var(--token)`, either through a Tailwind role class
+ * (`bg-accent`, `fill-heat-3`, `bg-series-2`) or written into a `style` as the
+ * variable itself. A variable is resolved by the browser at paint, so the
+ * charts follow a theme change with nothing to re-read and no effect to keep in
+ * step. Sampling the tokens into JavaScript would be the *weaker* version of
+ * the same rule: it re-reads only when something tells it to.
  *
- * `MatrixChart` is the one 2-D shape here and it is *sequential*, not
- * categorical: it reuses the `--heat-0…4` ramp the calendar heatmap already
- * defines rather than inventing a scale, which is also why a third categorical
- * series never had to be introduced to draw it.
+ * The rules the marks follow, from §8:
+ *
+ *  - **One series is the accent**, at 85% opacity at rest and 100% on hover.
+ *    The opacity is on the element, so "the accent at 85%" is exactly what it
+ *    says over whatever surface the chart sits on.
+ *  - **Several series take `series-1..6` in order, and never the accent.** Two
+ *    frames here hold two series: the window comparison (paired) and the
+ *    first-watch/rewatch split (stacked). Both take `series-1` and `series-2`.
+ *  - **Sequential is the heat ramp**, `heat-1..5`, and **zero is `control`**,
+ *    not the lightest step: "nothing watched" and "watched a little" are
+ *    different facts and must not be confusable.
+ *  - **Grid is horizontal hairlines only**, in `grid`, with the baseline in
+ *    `line`. No vertical grid, no axis lines, no ticks, no chart-area fill.
+ *  - **Axis labels are 10.5px mono `text-dim`**, tabular; the y labels sit
+ *    inside the plot above their gridline, the x labels below it.
+ *  - **No motion on load**, and a hover highlight that is immediate.
+ *  - **Empty keeps its axes and grid**, with a sentence in `text-dim`.
+ *
+ * Every chart also ships a `DataTable` (or `MatrixTable`) fallback, so no
+ * number on this page is reachable only through colour or hover.
  */
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { StatCount } from '@/lib/types'
 import { cn, compactNumber, localDateKey } from '@/lib/utils'
+import { Tile } from './ui'
 import { Artwork } from './Poster'
 
-interface Tooltip {
-  x: number
-  y: number
-  label: string
-  value: string
-}
+/* ── Shared pieces ───────────────────────────────────────────────────────── */
 
 /**
  * How a **clickable** chart mark reacts, so it reads as a control.
  *
- * The boxes on this page already say "I lead somewhere" on hover — a tile
- * lifts, a ranked row fills with `bg-raised`. The charts said nothing, even
- * though their bars have always navigated, so a whole class of drill-downs was
- * discoverable only by trying. This is the same statement in the same tokens.
- *
- * Three things it deliberately does at once, because hover alone is not an
- * affordance:
- *
- *  - **`bg-raised` on hover**, matching `RankedList`'s rows exactly rather than
- *    inventing a chart-only treatment.
- *  - **The same fill on focus**, so a keyboard reaches it. The ring is a focus
- *    *indicator*; it does not tell you the mark is interactive before you get
- *    there, and the two answer different questions.
- *  - **`cursor-pointer`**, which is the only one of the three a pointer user
- *    reads before committing to a click.
+ * Three statements at once, because hover alone is not an affordance: a
+ * `control-hover` fill (the same one every row in the app uses), the same fill
+ * on keyboard focus so a keyboard reaches it, and a pointer cursor, which is
+ * the only one of the three a pointer user reads *before* committing to a
+ * click. The focus ring itself is global, from `tokens.css`.
  *
  * Touch gets none of these, which is why every chart that drills also says so
- * in its card description ("Pick one to …") — that sentence is the affordance
- * on a phone, and it is not optional.
+ * in its own description ("Pick one to ..."). That sentence is the affordance
+ * on a phone and it is not optional.
  */
 const CLICKABLE_MARK =
-  'cursor-pointer rounded-lg transition-colors hover:bg-raised ' +
-  'focus-visible:bg-raised focus-visible:outline-none focus-visible:ring-2 ' +
-  'focus-visible:ring-accent'
+  'cursor-pointer rounded-ctl transition-colors duration-hover ease-ease ' +
+  'hover:bg-control-hover focus-visible:bg-control-hover'
+
+/** Height of the plot area, and of the axis label strip under it. */
+const PLOT_HEIGHT = 152
+const AXIS_HEIGHT = 18
+
+/**
+ * Room for the y figures, which sit *inside* the plot rather than in an axis
+ * column with a rule down it. Both numbers exist because the placement the
+ * guide asks for collides with the data if it is taken literally, and both were
+ * measured on the rendered page rather than guessed:
+ *
+ * `HEADROOM` is the gap above the topmost gridline. Without it that gridline is
+ * the plot's own top edge, so its figure is drawn *outside* the chart and lands
+ * on the description above it, reading as part of the sentence.
+ *
+ * `Y_GUTTER` is how far the marks are indented. The figures are drawn at the
+ * left of each band, and a chart dense enough that its first column is 20px
+ * wide (the 24-hour profile) then draws that column straight through them. The
+ * figures still sit inside the chart, above their own gridline and with no axis
+ * line anywhere; they simply do not have a bar on top of them.
+ */
+const HEADROOM = 12
+const Y_GUTTER = 26
+
+/**
+ * The five steps of the sequential ramp, as class names rather than as an
+ * index into a template string.
+ *
+ * Tailwind scans the source for literal class names, so `bg-heat-${tier}` would
+ * generate nothing at all. Written out, both arrays are also the one place the
+ * ramp is named: `heatLevel` decides which step, and nothing else knows the
+ * colours exist.
+ */
+const HEAT_BG = ['bg-heat-1', 'bg-heat-2', 'bg-heat-3', 'bg-heat-4', 'bg-heat-5'] as const
+const HEAT_FILL = [
+  'fill-heat-1',
+  'fill-heat-2',
+  'fill-heat-3',
+  'fill-heat-4',
+  'fill-heat-5',
+] as const
 
 /**
  * The width a chart has to draw in, tracked as its box changes.
  *
  * Only for the charts that cannot be sized in CSS. Anything laid out with flex
- * or grid should stretch on its own — `MatrixChart` fills its box with
- * `minmax(cell, 1fr)` tracks and `Sparkline` with a fluid `viewBox`, and
- * neither needs to measure anything. An **SVG with a computed `width`
- * attribute** is the case that does: `ActivityHeatmap` draws 26 columns of 16px
- * and therefore claimed 416px however wide the card was, which on a full-width
- * card is a third of it.
+ * or grid stretches on its own; an **SVG with a computed `width` attribute** is
+ * the case that does not, and `ActivityHeatmap` is the one such chart here.
  *
  * A `ResizeObserver` rather than a window `resize` listener, because the box
- * changes without the window doing so — a sidebar, a disclosure opening, a font
- * loading. The fallback exists for a test runner and for browsers without one,
- * and errs towards "measure once" rather than never.
+ * changes without the window doing so (a disclosure opening, a font loading).
+ * The fallback exists for a test runner and errs towards "measure once".
  *
  * The node arrives through a callback ref: the element does not exist on the
  * first render, and an effect keyed on a mutable ref would never see it appear.
@@ -105,30 +140,187 @@ function useMeasuredWidth<T extends HTMLElement>(): [(node: T | null) => void, n
 const clamp = (value: number, low: number, high: number) =>
   Math.max(low, Math.min(high, value))
 
-function TooltipBubble({ tip }: { tip: Tooltip | null }) {
-  if (!tip) return null
+/**
+ * The gridlines for a plot, and what the tallest mark is measured against.
+ *
+ * **The ceiling is the data's own maximum, not a rounded-up one.** Rounding it
+ * was tried and looked broken: a weekday profile peaking at 104 rounds to 150,
+ * so the tallest column filled two thirds of the frame and the top third was
+ * permanently empty, on a chart whose whole job is the shape of the peak. With
+ * the ceiling at the maximum the shape always fills its frame, and the axis is
+ * still read off round gridlines below it.
+ *
+ * The steps come from the 1 / 2 / 2.5 / 5 family, so every figure on the axis
+ * is a number somebody would say out loud.
+ *
+ * **Every candidate is scored rather than the first adequate one taken**, and
+ * that is the difference between three gridlines and one. Walking the family
+ * until a step is big enough falls through the family's own gaps: a maximum of
+ * 57 wants a step of about 14, the next member up is 20, and the axis then drew
+ * two lines on a chart that had room for five. Counting what each step would
+ * actually produce and keeping the one nearest four lines cannot fall through a
+ * gap, because the gap is what it is measuring.
+ */
+function niceScale(max: number, targetTicks = 4): { ceiling: number; ticks: number[] } {
+  if (!Number.isFinite(max) || max <= 0) return { ceiling: 1, ticks: [] }
+  // A handful of plays needs whole numbers, not a step of 0.2.
+  if (max <= 6) {
+    return {
+      ceiling: max,
+      ticks: Array.from({ length: Math.max(0, Math.ceil(max) - 1) }, (_, i) => i + 1),
+    }
+  }
+  const magnitude = Math.pow(10, Math.floor(Math.log10(max / targetTicks)))
+  let step = magnitude
+  let best = Infinity
+  for (const multiple of [1, 2, 2.5, 5, 10]) {
+    const candidate = multiple * magnitude
+    const count = Math.ceil(max / candidate) - 1
+    if (count < 2) continue
+    const score = Math.abs(count - targetTicks)
+    if (score < best) {
+      best = score
+      step = candidate
+    }
+  }
+  const ticks: number[] = []
+  for (let value = step; value < max; value += step) {
+    ticks.push(Number(value.toPrecision(12)))
+  }
+  return { ceiling: max, ticks }
+}
+
+/** An axis figure: short enough to sit under a 14px column. */
+const axisFigure = (value: number) => compactNumber(value)
+
+/**
+ * The plot's ground: horizontal hairlines, their figures, and the baseline.
+ *
+ * Absolutely positioned behind the marks, so the marks stay a plain flex row
+ * and cannot be pushed out of alignment by an axis. The y figures sit *inside*
+ * the plot, just above their own gridline at the left, which is the house
+ * placement and the reason there is no gutter and no y axis line.
+ */
+function PlotGround({ ticks, ceiling }: { ticks: number[]; ceiling: number }) {
   return (
-    <div
-      className="pointer-events-none absolute z-20 -translate-x-1/2 -translate-y-full
-                 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs shadow-lift"
-      style={{ left: tip.x, top: tip.y - 8 }}
-      role="status"
-    >
-      <div className="font-medium text-ink">{tip.label}</div>
-      <div className="text-muted">{tip.value}</div>
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0">
+      {ticks.map((tick) => (
+        <div
+          key={tick}
+          className="absolute inset-x-0"
+          style={{ bottom: `${(tick / ceiling) * 100}%` }}
+        >
+          <span className="figure absolute bottom-px left-0 text-tiny leading-none text-dim">
+            {axisFigure(tick)}
+          </span>
+          <div className="h-px w-full bg-grid" />
+        </div>
+      ))}
+      {/* The one axis line the guide allows, and it is the baseline. */}
+      <div className="absolute inset-x-0 bottom-0 h-px bg-line" />
     </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// The frame every chart sits in
-// ---------------------------------------------------------------------------
+/** "No data for this range", drawn over the grid rather than instead of it. */
+function PlotEmpty({ message }: { message: string }) {
+  return (
+    <p
+      className="pointer-events-none absolute inset-0 flex items-center justify-center
+                 px-4 text-center text-small text-dim"
+      role="status"
+    >
+      {message}
+    </p>
+  )
+}
+
+/* ── Tooltip ─────────────────────────────────────────────────────────────── */
+
+/** One line of a chart tooltip: a swatch, what it is, and the figure. */
+interface TipRow {
+  label: string
+  value: string
+  /** A Tailwind background role for the swatch. Omitted for a single series. */
+  swatch?: string
+}
+
+interface ChartTip {
+  x: number
+  y: number
+  /** The x value, in `text-dim` above the rows. */
+  heading: string
+  rows: TipRow[]
+}
 
 /**
- * A titled card around one chart, with its table fallback underneath.
+ * Roughly how much room the bubble needs above and beside the mark it points
+ * at, so it can be kept inside the chart's own box.
  *
- * Lives here rather than on the stats page because every chart wants it and
- * the heading is load-bearing, not decoration — see below.
+ * `.panel` clips its overflow, which it must (a card is a box), so a tooltip
+ * anchored to a mark at the top or the far right of a plot loses a corner. The
+ * charts are the one place a popover is anchored to something that can sit
+ * flush against the panel's edge, and portalling one bubble per hover would be
+ * a lot of machinery for a clamp.
+ */
+const TIP_HEIGHT = 52
+const TIP_HALF_WIDTH = 64
+
+/** Where the bubble may sit, given the box it must stay inside. */
+function tipPosition(mark: DOMRect, frame: DOMRect | undefined): { x: number; y: number } {
+  const width = frame?.width ?? mark.width
+  return {
+    x: clamp(
+      mark.left - (frame?.left ?? 0) + mark.width / 2,
+      TIP_HALF_WIDTH,
+      Math.max(TIP_HALF_WIDTH, width - TIP_HALF_WIDTH),
+    ),
+    y: Math.max(mark.top - (frame?.top ?? 0), TIP_HEIGHT),
+  }
+}
+
+/**
+ * The popover, per §7.17: the x value in `text-dim`, then one row per series as
+ * swatch, label and mono figure, sorted by value.
+ */
+function TooltipBubble({ tip }: { tip: ChartTip | null }) {
+  if (!tip) return null
+  const rows = [...tip.rows].sort((a, b) => b.value.localeCompare(a.value, undefined, { numeric: true }))
+  return (
+    <div
+      className="tooltip pointer-events-none absolute z-20 -translate-x-1/2 -translate-y-full"
+      style={{ left: tip.x, top: tip.y - 8 }}
+      role="status"
+    >
+      <div className="text-dim">{tip.heading}</div>
+      {rows.map((row) => (
+        <div key={row.label} className="mt-0.5 flex items-center gap-1.5 whitespace-nowrap">
+          {row.swatch && (
+            <span className={cn('h-2 w-2 shrink-0 rounded-[2px]', row.swatch)} aria-hidden="true" />
+          )}
+          <span className="text-fg">{row.label}</span>
+          <span className="figure ml-auto pl-2 text-strong">{row.value}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ── The frame every chart sits in ───────────────────────────────────────── */
+
+/**
+ * A panel around one chart, with its table fallback underneath.
+ *
+ * The panel header carries the title, and its right side carries the legend,
+ * which is where §7.5 puts a region's own commands. The chart then sits
+ * directly on the panel body: no inner border, no chart-area fill, no title bar
+ * of its own.
+ *
+ * Composed from the `.panel` classes rather than from `ui.tsx`'s `Panel`
+ * because of `headingLevel` alone: the stats page groups its cards under named
+ * sections a link can target, so a card inside one is an `h3` under that
+ * section's `h2`, and `Panel` always writes an `h2`. Everything else here is
+ * the same classes `Panel` composes.
  */
 export function ChartCard({
   title,
@@ -144,58 +336,47 @@ export function ChartCard({
   table?: React.ReactNode
   /** Only for a chart with more than one series; see `ChartLegend`. */
   legend?: React.ReactNode
-  /**
-   * Where this card sits in the document outline.
-   *
-   * The stats page groups its cards under named sections a link can target, so
-   * a card inside one is an `h3` under that section's `h2`. Left at 2 the
-   * outline would claim every card is a sibling of the section heading above
-   * it, which is what a screen reader's heading list actually navigates by.
-   */
   headingLevel?: 2 | 3
 }) {
   const Heading = headingLevel === 3 ? 'h3' : 'h2'
   return (
     // `min-w-0` is load-bearing wherever a card is a grid or flex item, which
     // on the stats page is most of them. A grid item's automatic minimum size
-    // is its content's min-content width, and a chart that declares a floor —
-    // the hour chart is `min-w-[520px]` inside its own `.scroll-x` — pushes
-    // that floor up through the card, through the grid track, and out to the
-    // document: measured at 375px, the whole page scrolled sideways to 578px
-    // and *every* card in that grid grew with it, including the one with no
-    // wide content in it at all. The scroller only starts scrolling once it is
-    // allowed to be narrower than what it holds.
-    <section className="card min-w-0 p-5">
-      <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-        <div className="min-w-0">
-          {/* The heading names the single plotted series, so no legend box —
-              except where there is more than one, which is what `legend` is. */}
-          <Heading className="text-base font-semibold tracking-tight text-ink">
-            {title}
-          </Heading>
-          {description && <p className="mt-0.5 text-xs text-muted">{description}</p>}
-        </div>
-        {legend}
+    // is its content's min-content width, so a chart that declares a floor
+    // pushes that floor up through the card, through the grid track and out to
+    // the document. A scroller only starts scrolling once it is allowed to be
+    // narrower than what it holds.
+    <section className="panel min-w-0">
+      <header className="panel-head">
+        <Heading className="panel-title truncate">{title}</Heading>
+        {legend && <div className="ml-auto min-w-0">{legend}</div>}
+      </header>
+      <div className="panel-body">
+        {description && <p className="mb-3 text-small text-dim">{description}</p>}
+        {children}
+        {table}
       </div>
-      {children}
-      {table}
     </section>
   )
 }
 
 /**
- * Which colour is which series.
+ * Which colour is which series: inline chips above the chart at the right, per
+ * §8. No boxed legend, and no legend at all where there is a single series,
+ * because the panel title names it.
  *
- * Exists only where a frame holds more than one, and each entry is a swatch
- * *beside its name* rather than a colour standing in for one — the same reason
- * a status dot always sits next to a written label.
+ * Each entry is a swatch *beside its name* rather than a colour standing in for
+ * one, the same reason a status dot always sits next to a written label.
  */
 export function ChartLegend({ series }: { series: Array<{ label: string; className: string }> }) {
   return (
-    <ul className="flex flex-wrap items-center gap-x-4 gap-y-1">
+    <ul className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
       {series.map((entry) => (
-        <li key={entry.label} className="flex items-center gap-1.5 text-xs text-subtle">
-          <span className={cn('h-2.5 w-2.5 shrink-0 rounded-[3px]', entry.className)} />
+        <li key={entry.label} className="flex items-center gap-1.5 text-tiny text-muted">
+          <span
+            className={cn('h-2 w-2 shrink-0 rounded-[2px]', entry.className)}
+            aria-hidden="true"
+          />
           {entry.label}
         </li>
       ))}
@@ -203,16 +384,14 @@ export function ChartLegend({ series }: { series: Array<{ label: string; classNa
   )
 }
 
-// ---------------------------------------------------------------------------
-// Horizontal bars — genre breakdown
-// ---------------------------------------------------------------------------
+/* ── Horizontal bars ─────────────────────────────────────────────────────── */
 
 /**
  * Selection hands back the whole entry, not its label.
  *
  * A label is what the axis *reads*, which is not always what the row *is*: the
  * monthly columns are labelled "Aug" but the bucket is `2026-08`, and the raw
- * key was formatted away before the chart ever saw it — so a drill-down had
+ * key was formatted away before the chart ever saw it, so a drill-down had
  * nothing to drill on. The charts are generic over the entry type for the same
  * reason: a caller may hang whatever it needs off `StatCount` and get it back
  * intact, with `formatLabel` doing the display work instead.
@@ -229,11 +408,10 @@ interface BarListProps<T extends StatCount> {
   /**
    * A second line under the label: "18 titles · 42 hours", "crowd 7.4".
    *
-   * For the figure that qualifies the bar rather than competes with it. A
-   * facet ranked by plays is unreadable without the number of titles behind
-   * it — "300 plays" is one binged series or thirty films — and folding that
-   * into the label would push it out of a 7.5rem column. It joins the
-   * accessible name too, so it is not a sighted-only aside.
+   * For the figure that qualifies the bar rather than competes with it. A facet
+   * ranked by plays is unreadable without the number of titles behind it: "300
+   * plays" is one binged series or thirty films. It joins the accessible name
+   * too, so it is not a sighted-only aside.
    */
   meta?: (entry: T) => string | null
   /**
@@ -242,9 +420,8 @@ interface BarListProps<T extends StatCount> {
    * A count has no ceiling, so the biggest row filling the track is the right
    * reading and the bars are a *ranking*. A **percentage** does have one, and
    * without this the two disagree completely: library coverage of 49% drew as a
-   * full track — because 49 was the largest figure in the list — which reads as
-   * "all of it" for a slice that is barely half watched. Any series on a fixed
-   * scale (a percentage, a 0–10 rating) has to pin it.
+   * full track, which reads as "all of it" for a slice that is barely half
+   * watched. Any series on a fixed scale has to pin it.
    */
   scaleTo?: number
 }
@@ -252,51 +429,59 @@ interface BarListProps<T extends StatCount> {
 export function BarList<T extends StatCount>({
   data,
   unit = '',
-  emptyMessage = 'No data yet',
+  emptyMessage = 'No data for this range.',
   onSelect,
   activeLabel = null,
   meta,
   scaleTo,
 }: BarListProps<T>) {
   if (data.length === 0) {
-    return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
+    return <p className="py-8 text-center text-small text-dim">{emptyMessage}</p>
   }
   const max = scaleTo ?? Math.max(...data.map((d) => d.value), 1)
 
   return (
-    <ul className="space-y-2.5">
+    <ul className="space-y-1">
       {data.map((entry, index) => {
         const active = activeLabel === entry.label
         const note = meta?.(entry) ?? null
         const row = (
           <>
             <span className="min-w-0 text-left" title={entry.label}>
-              <span className="block truncate text-sm text-subtle">{entry.label}</span>
-              {note && <span className="block truncate text-[11px] text-muted">{note}</span>}
+              <span
+                className={cn('block truncate text-control', active ? 'text-strong' : 'text-fg')}
+              >
+                {entry.label}
+              </span>
+              {note && <span className="block truncate text-tiny text-dim">{note}</span>}
             </span>
-            {/* Track is a lighter step of the same hue, so state reads across the bar. */}
-            <div className="h-3 overflow-hidden rounded-r-[4px] bg-accent/10">
+            {/* Track in `rail`, the family's colour for the unfilled part of
+                anything. Radius 2 on the data end only, square at the origin. */}
+            <div className="h-2.5 overflow-hidden rounded-r-[2px] bg-rail">
               <div
                 className={cn(
-                  'h-full rounded-r-[4px] transition-[width,background-color]',
-                  'duration-700 ease-spring',
-                  active ? 'bg-accent' : 'bg-series-1',
-                  onSelect &&
-                    !active &&
-                    'group-hover/bar:bg-accent group-focus-visible/bar:bg-accent',
+                  'h-full rounded-r-[2px] bg-accent transition-opacity duration-hover ease-ease',
+                  active ? 'opacity-100' : 'opacity-85',
+                  onSelect && !active && 'group-hover/bar:opacity-100 group-focus-visible/bar:opacity-100',
                 )}
-                style={{ width: `${Math.max(2, (entry.value / max) * 100)}%` }}
+                // A floor so a very small share is still a mark, but **zero
+                // draws nothing**: the coverage bars include decades with no
+                // watched titles at all, and a stub there says "a little" about
+                // a row whose whole point is that the answer is none.
+                style={{
+                  width: entry.value > 0 ? `${Math.max(2, (entry.value / max) * 100)}%` : 0,
+                }}
               />
             </div>
             {/* Direct label at the data end. */}
-            <span className="text-right text-sm font-medium tabular-nums text-ink">
+            <span className="figure text-right text-tiny text-strong">
               {compactNumber(entry.value)}
               {unit}
             </span>
           </>
         )
 
-        const layout = 'grid w-full grid-cols-[7.5rem_1fr_3rem] items-center gap-3'
+        const layout = 'grid w-full grid-cols-[7.5rem_1fr_2.5rem] items-center gap-3'
         return (
           <li key={entry.label}>
             {onSelect ? (
@@ -310,7 +495,7 @@ export function BarList<T extends StatCount>({
                 {row}
               </button>
             ) : (
-              <div className={layout}>{row}</div>
+              <div className={cn(layout, 'px-1.5 py-1')}>{row}</div>
             )}
           </li>
         )
@@ -319,16 +504,14 @@ export function BarList<T extends StatCount>({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Columns — rating distribution
-// ---------------------------------------------------------------------------
+/* ── Columns ─────────────────────────────────────────────────────────────── */
 
 interface ColumnChartProps<T extends StatCount> {
   data: T[]
   /**
    * Display text for the axis. The chart keeps the raw label as the entry's
-   * identity, so `onSelect` still receives the bucket it was given — the
-   * monthly chart shows "Aug" and hands back `2026-08`.
+   * identity, so `onSelect` still receives the bucket it was given: the monthly
+   * chart shows "Aug" and hands back `2026-08`.
    */
   formatLabel?: (label: string) => string
   emptyMessage?: string
@@ -344,44 +527,30 @@ interface ColumnChartProps<T extends StatCount> {
    * By index and not by label, because the two series deliberately do not share
    * labels: the whole point of a comparison is that the second window is a
    * different stretch of calendar. The caller guarantees the two are the same
-   * length and describe the same offsets — which is why the only caller builds
+   * length and describe the same offsets, which is why the only caller builds
    * both windows from one resolved range rather than from two queries that
    * happen to look similar.
    */
-  compare?: { data: T[]; describe?: (entry: T) => string }
-  /**
-   * Print the value on each column's cap. On by default — direct labelling is
-   * the house style and is what lets the lighter steps skip a tooltip.
-   *
-   * Turned off where the columns are too many and too narrow for it to be
-   * reading rather than clutter: the 24-hour profile drew 24 numbers across a
-   * strip about 20px wide each, which took a third of the frame's height and
-   * left the bars a stub. The values are still in the tooltip, the accessible
-   * name and the table.
-   */
-  showValues?: boolean
+  compare?: { data: T[]; describe?: (entry: T) => string; label?: string }
+  /** What the primary series is called, in the tooltip's rows. */
+  seriesLabel?: string
   /**
    * Fit every label to its column instead of letting the axis overflow.
-   * Declares "this axis has more columns than a 12px label per column can
+   * Declares "this axis has more columns than a 10.5px label per column can
    * hold", and turns on both halves of the fix.
    *
    * The 24-hour profile is what this exists for, and it has been broken twice.
    * First it printed a label on every third column, so twenty-four bars sat
    * under eight numbers and nothing said which was which. Then it *thinned* the
    * labels to whatever the measured width could hold, leaving an empty span
-   * under the unnamed columns — and an empty span has no line box, so those
-   * columns lost their label row, their bar dropped into the space where the
-   * number should have been, and, because the named columns kept the intrinsic
-   * width of their text, the unnamed ones were squeezed thinner as well. A
-   * chart that scales its bars to the data must not also scale them to whether
-   * they happen to be labelled.
+   * under the unnamed columns, and an empty span has no line box, so those
+   * columns lost their label row and their bars dropped into it.
    *
-   * So now nothing is dropped. Every column keeps its bar, its tick and its
-   * label; what gives is the **type size**, computed from the measured column
-   * width and the longest formatted label, down to a floor small enough for
-   * twenty-four two-digit hours on a phone. Every column is `min-w-0` so the
-   * text can never widen one column at its neighbours' expense — the label
-   * fits the column, never the other way round.
+   * So nothing is dropped. Every column keeps its bar and its label; what gives
+   * is the **type size**, computed from the measured column width and the
+   * longest formatted label, down to a floor small enough for twenty-four
+   * two-digit hours on a phone. Every column is `min-w-0`, so the text can
+   * never widen one column at its neighbours' expense.
    */
   fitLabels?: boolean
 }
@@ -389,161 +558,332 @@ interface ColumnChartProps<T extends StatCount> {
 export function ColumnChart<T extends StatCount>({
   data,
   formatLabel = (label) => label,
-  emptyMessage = 'No ratings yet',
+  emptyMessage = 'No data for this range.',
   onSelect,
   describe,
   activeLabel = null,
   compare,
-  showValues = true,
+  seriesLabel = 'Plays',
   fitLabels = false,
 }: ColumnChartProps<T>) {
   // Only consulted when `fitLabels` is set, but hooks cannot be conditional.
   const [frame, available] = useMeasuredWidth<HTMLDivElement>()
+  const [tip, setTip] = useState<ChartTip | null>(null)
+
   const total = data.reduce((sum, d) => sum + d.value, 0)
   const compareTotal = compare?.data.reduce((sum, d) => sum + d.value, 0) ?? 0
-  if (total === 0 && compareTotal === 0) {
-    return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
-  }
-  // One scale across both series, or the comparison would be a lie.
-  const max = Math.max(...data.map((d) => d.value), ...(compare?.data ?? []).map((d) => d.value), 1)
+  const blank = total === 0 && compareTotal === 0
 
-  // Type size that lets the longest label fit inside one column. 320 stands
-  // in for the first render, one frame before the observer answers: a
-  // plausible phone width, so the axis is never briefly drawn larger than it
-  // can hold and then snapped down. 0.62em per character is a fair average
-  // for tabular digits and short caps in the UI face; the floor keeps a phone
-  // legible rather than technically present.
+  // One scale across both series, or the comparison would be a lie.
+  const peak = Math.max(...data.map((d) => d.value), ...(compare?.data ?? []).map((d) => d.value), 0)
+  const { ceiling, ticks } = niceScale(peak)
+
+  // Type size that lets the longest label fit inside one column. 320 stands in
+  // for the first render, one frame before the observer answers: a plausible
+  // phone width, so the axis is never briefly drawn larger than it can hold and
+  // then snapped down. 0.62em per character is a fair average for tabular
+  // digits in the UI face; the floor keeps a phone legible rather than
+  // technically present.
   const gap = fitLabels ? 2 : 0
-  const columnWidth = ((available || 320) - gap * (data.length - 1)) / Math.max(1, data.length)
+  const columnWidth =
+    ((available || 320) - Y_GUTTER - gap * (data.length - 1)) / Math.max(1, data.length)
   const longest = fitLabels
     ? data.reduce((n, entry) => Math.max(n, formatLabel(entry.label).length), 1)
     : 1
-  const labelSize = fitLabels ? clamp(columnWidth / (0.62 * longest), 7, 12) : undefined
+  const labelSize = fitLabels ? clamp(columnWidth / (0.62 * longest), 7, 10.5) : undefined
+
+  const showTip = (event: React.MouseEvent<HTMLElement>, entry: T, earlier: T | undefined) => {
+    const box = event.currentTarget.getBoundingClientRect()
+    const parent = event.currentTarget.offsetParent?.getBoundingClientRect()
+    setTip({
+      ...tipPosition(box, parent),
+      heading: formatLabel(entry.label),
+      rows: compare
+        ? [
+            { label: seriesLabel, value: String(entry.value), swatch: 'bg-series-1' },
+            { label: compare.label ?? 'Earlier', value: String(earlier?.value ?? 0), swatch: 'bg-series-2' },
+          ]
+        : [{ label: seriesLabel, value: String(entry.value) }],
+    })
+  }
 
   return (
-    // `items-stretch` is load-bearing, not a default worth "tidying" away: the
-    // bars are sized as a percentage, and a percentage height needs a parent
-    // with a definite height to resolve against. `items-end` here made each
-    // column shrink to its content instead of filling h-44, which left the
-    // bar's flex-1 wrapper zero-tall — so every bar computed to zero and the
-    // charts rendered as a row of numbers with nothing under them. The bars are
-    // bottom-aligned by the wrapper below, not by this.
-    //
-    // Tighter gap on narrow screens: the rating chart went from five columns to
-    // ten, and a fixed 8px gutter ate most of the width on a phone.
-    <div
-      className={cn('flex h-44 items-stretch', fitLabels ? 'gap-[2px]' : 'gap-1 sm:gap-2')}
-      ref={frame}
-    >
-      {data.map((entry, index) => {
-        const height = (entry.value / max) * 100
-        const active = activeLabel === entry.label
-        const earlier = compare?.data[index]
-        const text = [
-          describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`,
-          earlier && (compare?.describe?.(earlier) ?? `${earlier.label}: ${earlier.value}`),
-        ]
-          .filter(Boolean)
-          .join(' · ')
-        const bar = (
-          <>
-            {/* Value on the cap — the primary series only. Two numbers stacked
-                over a 24px column is unreadable at twelve columns, and the
-                second series' value is in the tooltip, the aria label and the
-                table, which is where a comparison is actually read anyway. */}
-            {showValues && (
-              <span className="text-xs font-medium tabular-nums text-ink">
-                {entry.value || ''}
-              </span>
-            )}
-            <div className="flex w-full flex-1 items-end justify-center gap-[2px]">
-              <div
-                // ≤24px thick; rounded at the data end, square at the baseline.
-                className={cn(
-                  'w-full rounded-t-[4px] transition-[height,background-color]',
-                  'duration-700 ease-spring',
-                  compare ? 'max-w-[11px]' : 'max-w-[24px]',
-                  active ? 'bg-accent' : 'bg-series-1',
-                  onSelect &&
-                    !active &&
-                    'group-hover/col:bg-accent group-focus-visible/col:bg-accent',
-                )}
-                style={{ height: `${Math.max(entry.value ? 4 : 0, height)}%` }}
-              />
-              {compare && (
+    <div className="relative" ref={frame}>
+      <div
+        className="relative"
+        style={{ height: PLOT_HEIGHT + AXIS_HEIGHT }}
+        onMouseLeave={() => setTip(null)}
+      >
+        {/* The ground covers the plot only; the axis strip below it is clear,
+            and the headroom above it is where the top figure goes. */}
+        <div
+          className="absolute inset-x-0"
+          style={{ top: HEADROOM, bottom: AXIS_HEIGHT }}
+        >
+          <PlotGround ticks={ticks} ceiling={ceiling} />
+          {blank && <PlotEmpty message={emptyMessage} />}
+        </div>
+
+        <div
+          // `items-stretch` is load-bearing: the bars are sized as a percentage,
+          // and a percentage height needs a parent with a definite height to
+          // resolve against. `items-end` here makes each column shrink to its
+          // content, which leaves every bar's wrapper zero-tall and every bar
+          // computed to zero.
+          className={cn(
+            'relative flex h-full items-stretch',
+            fitLabels ? 'gap-[2px]' : 'gap-1 sm:gap-2',
+          )}
+          style={{ paddingLeft: Y_GUTTER }}
+        >
+          {data.map((entry, index) => {
+            const height = (entry.value / ceiling) * 100
+            const active = activeLabel === entry.label
+            const earlier = compare?.data[index]
+            const text = [
+              describe?.(entry) ?? `${formatLabel(entry.label)}: ${entry.value}`,
+              earlier && (compare?.describe?.(earlier) ?? `${earlier.label}: ${earlier.value}`),
+            ]
+              .filter(Boolean)
+              .join(' · ')
+
+            const bar = (
+              <>
                 <div
+                  // The padding is what aligns a full-height bar with the top
+                  // gridline: a percentage height resolves against the content
+                  // box, so the bars measure the same span the ground draws.
+                  className="flex w-full min-w-0 flex-1 items-end justify-center gap-[2px]"
+                  style={{ paddingTop: HEADROOM, paddingBottom: 1 }}
+                >
+                  <div
+                    // ≤24px thick; radius 2 at the data end, square at the
+                    // baseline. A single series is the accent at 85%, rising to
+                    // 100% when it is the one in hand.
+                    className={cn(
+                      'w-full rounded-t-[2px] transition-[height,opacity] duration-hover ease-ease',
+                      compare ? 'max-w-[11px] bg-series-1' : 'max-w-[24px] bg-accent',
+                      active || compare ? 'opacity-100' : 'opacity-85',
+                      !compare &&
+                        !active &&
+                        'group-hover/col:opacity-100 group-focus-visible/col:opacity-100',
+                    )}
+                    style={{ height: `${Math.max(entry.value ? 2 : 0, height)}%` }}
+                  />
+                  {compare && (
+                    <div
+                      className="w-full max-w-[11px] rounded-t-[2px] bg-series-2
+                                 transition-[height] duration-hover ease-ease"
+                      style={{
+                        height: `${Math.max(earlier?.value ? 2 : 0, ((earlier?.value ?? 0) / ceiling) * 100)}%`,
+                      }}
+                    />
+                  )}
+                </div>
+                {/* One line-height for every label whatever its size, so a
+                    scaled axis cannot make one column taller than its
+                    neighbours. No ticks: §8 omits them. */}
+                <span
                   className={cn(
-                    'w-full max-w-[11px] rounded-t-[4px] bg-series-2',
-                    'transition-[height] duration-700 ease-spring',
+                    'figure block w-full truncate text-center text-tiny leading-none',
+                    active ? 'text-strong' : 'text-dim',
                   )}
                   style={{
-                    height: `${Math.max(earlier?.value ? 4 : 0, ((earlier?.value ?? 0) / max) * 100)}%`,
+                    height: AXIS_HEIGHT,
+                    paddingTop: 6,
+                    ...(labelSize ? { fontSize: `${labelSize}px` } : {}),
                   }}
-                />
-              )}
-            </div>
-            <span className="flex flex-col items-center gap-1">
-              {/* A tick per column, drawn *inside* the column, so it is aligned
-                  with its own bar by construction rather than by arithmetic
-                  that can drift. Only where the axis said it is dense — a chart
-                  that names every column at full size needs no help locating
-                  them. */}
-              {fitLabels ? (
-                <span aria-hidden="true" className="h-1 w-px shrink-0 bg-line" />
-              ) : null}
-              {/* One line-height for every label whatever its font size, so a
-                  scaled axis cannot make one column taller than its neighbours. */}
-              <span
-                className={cn(
-                  'text-xs leading-4 tabular-nums',
-                  active ? 'text-ink' : 'text-muted',
-                )}
-                style={labelSize ? { fontSize: `${labelSize}px` } : undefined}
+                >
+                  {formatLabel(entry.label)}
+                </span>
+              </>
+            )
+
+            const shell = 'flex h-full min-w-0 flex-1 flex-col items-center'
+
+            if (!onSelect) {
+              return (
+                <div
+                  key={entry.label}
+                  className={shell}
+                  title={text}
+                  onMouseEnter={(event) => showTip(event, entry, earlier)}
+                >
+                  {bar}
+                </div>
+              )
+            }
+
+            return (
+              <button
+                key={entry.label}
+                type="button"
+                // The whole column is the hit target, not just the drawn bar: a
+                // short bar is only a few pixels tall and would be unclickable.
+                className={cn(shell, 'group/col', CLICKABLE_MARK)}
+                onClick={() => onSelect(entry, index)}
+                onMouseEnter={(event) => showTip(event, entry, earlier)}
+                title={text}
+                aria-label={text}
+                aria-pressed={active}
               >
-                {formatLabel(entry.label)}
-              </span>
-            </span>
-          </>
-        )
-
-        if (!onSelect) {
-          return (
-            <div
-              key={entry.label}
-              className="flex min-w-0 flex-1 flex-col items-center gap-2"
-              title={text}
-            >
-              {bar}
-            </div>
-          )
-        }
-
-        return (
-          <button
-            key={entry.label}
-            type="button"
-            // The whole column is the hit target, not just the drawn bar — a
-            // short bar is only a few pixels tall and would be unclickable.
-            className={cn(
-              'group/col flex min-w-0 flex-1 flex-col items-center gap-2',
-              CLICKABLE_MARK,
-            )}
-            onClick={() => onSelect(entry, index)}
-            title={text}
-            aria-label={text}
-            aria-pressed={active}
-          >
-            {bar}
-          </button>
-        )
-      })}
+                {bar}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <TooltipBubble tip={tip} />
     </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Calendar heatmap — activity over time
-// ---------------------------------------------------------------------------
+/* ── Stacked columns ─────────────────────────────────────────────────────── */
+
+/** One column of a stacked chart: the parts, and whatever the caller hangs on. */
+export interface StackedEntry extends StatCount {
+  /** Bottom segment. */
+  first: number
+  /** Top segment. `value` must be `first + rewatch`, or the axis lies. */
+  rewatch: number
+}
+
+interface StackedColumnChartProps<T extends StackedEntry> {
+  data: T[]
+  formatLabel?: (label: string) => string
+  describe?: (entry: T) => string
+  emptyMessage?: string
+  onSelect?: SelectEntry<T>
+  /** Names the two segments in the tooltip. */
+  labels?: { first: string; rewatch: string }
+}
+
+/**
+ * Two series stacked, not paired.
+ *
+ * Stacked because the parts genuinely sum to the whole here: a play is either a
+ * first watch or a rewatch, never both, so the column's full height is the
+ * period's plays and the split is read inside it. `ColumnChart`'s `compare`
+ * draws its two side by side for the opposite reason: two *windows* do not add
+ * up to anything, and stacking them would invent a total.
+ *
+ * Same mark spec as the other columns: ≤24px thick, radius 2 at the data end
+ * only, square at the baseline, and a 2px gap between the segments so the
+ * boundary is not carried by colour alone.
+ */
+export function StackedColumnChart<T extends StackedEntry>({
+  data,
+  formatLabel = (label) => label,
+  describe,
+  emptyMessage = 'No data for this range.',
+  onSelect,
+  labels = { first: 'First watch', rewatch: 'Rewatch' },
+}: StackedColumnChartProps<T>) {
+  const [tip, setTip] = useState<ChartTip | null>(null)
+  const total = data.reduce((sum, entry) => sum + entry.value, 0)
+  const { ceiling, ticks } = niceScale(Math.max(...data.map((entry) => entry.value), 0))
+
+  const showTip = (event: React.MouseEvent<HTMLElement>, entry: T) => {
+    const box = event.currentTarget.getBoundingClientRect()
+    const parent = event.currentTarget.offsetParent?.getBoundingClientRect()
+    setTip({
+      ...tipPosition(box, parent),
+      heading: formatLabel(entry.label),
+      rows: [
+        { label: labels.first, value: String(entry.first), swatch: 'bg-series-1' },
+        { label: labels.rewatch, value: String(entry.rewatch), swatch: 'bg-series-2' },
+      ],
+    })
+  }
+
+  return (
+    <div className="relative">
+      <div
+        className="relative"
+        style={{ height: PLOT_HEIGHT + AXIS_HEIGHT }}
+        onMouseLeave={() => setTip(null)}
+      >
+        <div className="absolute inset-x-0" style={{ top: HEADROOM, bottom: AXIS_HEIGHT }}>
+          <PlotGround ticks={ticks} ceiling={ceiling} />
+          {total === 0 && <PlotEmpty message={emptyMessage} />}
+        </div>
+
+        <div
+          className="relative flex h-full items-stretch gap-1 sm:gap-2"
+          style={{ paddingLeft: Y_GUTTER }}
+        >
+          {data.map((entry, index) => {
+            const text =
+              describe?.(entry) ??
+              `${formatLabel(entry.label)}: ${entry.first} first watches, ${entry.rewatch} rewatches`
+            const share = (part: number) => (part / ceiling) * 100
+            const bar = (
+              <>
+                <div
+                  className="flex w-full min-w-0 flex-1 flex-col justify-end gap-[2px]"
+                  style={{ paddingTop: HEADROOM, paddingBottom: 1 }}
+                >
+                  {/* Top segment first in the DOM: it is the top of the stack. */}
+                  <div
+                    className="w-full max-w-[24px] self-center rounded-t-[2px] bg-series-2
+                               transition-[height] duration-hover ease-ease"
+                    style={{ height: `${Math.max(entry.rewatch ? 2 : 0, share(entry.rewatch))}%` }}
+                  />
+                  <div
+                    className={cn(
+                      'w-full max-w-[24px] self-center bg-series-1',
+                      'transition-[height] duration-hover ease-ease',
+                      // Rounded on top only when it *is* the data end: with a
+                      // rewatch segment above it, its top is an internal edge.
+                      entry.rewatch ? '' : 'rounded-t-[2px]',
+                    )}
+                    style={{ height: `${Math.max(entry.first ? 2 : 0, share(entry.first))}%` }}
+                  />
+                </div>
+                <span
+                  className="figure block w-full truncate text-center text-tiny leading-none text-dim"
+                  style={{ height: AXIS_HEIGHT, paddingTop: 6 }}
+                >
+                  {formatLabel(entry.label)}
+                </span>
+              </>
+            )
+
+            const shell = 'flex h-full min-w-0 flex-1 flex-col items-center'
+            if (!onSelect) {
+              return (
+                <div
+                  key={entry.label}
+                  className={shell}
+                  title={text}
+                  onMouseEnter={(event) => showTip(event, entry)}
+                >
+                  {bar}
+                </div>
+              )
+            }
+            return (
+              <button
+                key={entry.label}
+                type="button"
+                className={cn(shell, 'group/col', CLICKABLE_MARK)}
+                onClick={() => onSelect(entry, index)}
+                onMouseEnter={(event) => showTip(event, entry)}
+                title={text}
+                aria-label={text}
+              >
+                {bar}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <TooltipBubble tip={tip} />
+    </div>
+  )
+}
+
+/* ── Calendar heatmap ────────────────────────────────────────────────────── */
 
 interface HeatmapProps {
   data: StatCount[]
@@ -551,33 +891,26 @@ interface HeatmapProps {
   /**
    * Drill into one day. Given the local `YYYY-MM-DD` key and its count.
    *
-   * A **secondary** way in, never the only one. A cell is 13px square, which is
-   * a third of the 44px a finger needs, and putting 180 of them in the tab
+   * A **secondary** way in, never the only one. A cell is a few pixels square,
+   * a fraction of the 44px a finger needs, and putting 180 of them in the tab
    * order would bury every control after the chart. So the cells take a click
    * for the pointer users who will try it, stay out of the tab order, and the
-   * page pairs this chart with a ranked list of the same days as real buttons —
-   * that list, not this, is the route a keyboard or a thumb takes.
+   * page pairs this chart with a ranked list of the same days as real buttons.
+   * That list, not this, is the route a keyboard or a thumb takes.
    */
   onSelect?: (dateKey: string, value: number) => void
 }
 
-/**
- * Steps in the sequential heatmap ramp. The colours themselves are
- * `--heat-0`…`--heat-4` in index.css, light and dark defined alongside every
- * other token — they used to be hex literals here, injected into the document
- * as a runtime <style> block from inside this component.
- *
- * Empty days use the surface's line colour instead, so "nothing watched" reads
- * as absence rather than as a low value.
- */
+/** Steps in the sequential ramp. The colours are `--heat-1..5`. */
 const HEAT_STEPS = 5
 
 /**
  * Which step of the ramp a value sits on, or -1 for "nothing at all".
  *
- * Absence is deliberately *not* step 0: a day with no plays and a day with one
- * are different kinds of fact, and colouring them the same removes the only
- * thing the shape is for. Callers paint -1 with the line colour instead.
+ * Absence is deliberately *not* the lowest step: a day with no plays and a day
+ * with one are different kinds of fact, and colouring them the same removes the
+ * only thing the shape is for. Callers paint -1 with `control` instead, which
+ * is what §8 asks for.
  */
 function heatLevel(value: number, max: number): number {
   if (value <= 0) return -1
@@ -588,20 +921,20 @@ function heatLevel(value: number, max: number): number {
  * The key for the sequential ramp, shared by every chart that uses it.
  *
  * One definition so the calendar heatmap and the matrix charts cannot drift
- * apart — a reader who has learned the scale on one has learned it on all of
+ * apart: a reader who has learned the scale on one has learned it on all of
  * them, and there is one place to change if the ramp ever changes.
+ *
+ * "None" is a swatch of its own, set apart from the ramp by a gap, because it
+ * is a different kind of answer rather than the bottom of the scale.
  */
 export function HeatScale({ less = 'Less', more = 'More' }: { less?: string; more?: string }) {
   return (
-    <div className="mt-3 flex items-center justify-end gap-1.5 text-[11px] text-muted">
-      <span>{less}</span>
-      <span className="h-3 w-3 rounded-[3px] bg-line/60" />
-      {Array.from({ length: HEAT_STEPS }, (_, index) => (
-        <span
-          key={index}
-          className="h-3 w-3 rounded-[3px]"
-          style={{ background: `var(--heat-${index})` }}
-        />
+    <div className="mt-3 flex items-center justify-end gap-1.5 text-tiny text-dim">
+      <span>None</span>
+      <span className="h-2.5 w-2.5 rounded-[2px] bg-control" />
+      <span className="ml-2">{less}</span>
+      {HEAT_BG.map((step) => (
+        <span key={step} className={cn('h-2.5 w-2.5 rounded-[2px]', step)} />
       ))}
       <span>{more}</span>
     </div>
@@ -614,14 +947,14 @@ export function HeatScale({ less = 'Less', more = 'More' }: { less?: string; mor
  * The floor is where a square stops reading as a value and starts reading as
  * noise; below it the chart scrolls instead of shrinking further. The ceiling
  * is what stops a fortnight of history rendering as a row of tiles the size of
- * buttons — a short window genuinely cannot fill a wide card, and stretching to
+ * buttons: a short window genuinely cannot fill a wide card, and stretching to
  * fill it anyway would make two weeks look like a year's worth of data.
  */
 const HEAT_CELL_MIN = 9
 const HEAT_CELL_MAX = 24
 
 export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
-  const [tip, setTip] = useState<Tooltip | null>(null)
+  const [tip, setTip] = useState<ChartTip | null>(null)
   // Measured on the outer box rather than on the scroller, so the SVG's own
   // width can never feed back into the number it is derived from.
   const [frame, available] = useMeasuredWidth<HTMLDivElement>()
@@ -642,8 +975,8 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
   for (let week = 0; week < weeks; week += 1) {
     const column: Array<{ date: Date; value: number; future: boolean }> = []
     for (let day = 0; day < 7; day += 1) {
-      // Local key, not toISOString(): `cursor` is a local midnight, and the
-      // UTC conversion shifted every lookup a day earlier east of Greenwich.
+      // Local key, not toISOString(): `cursor` is a local midnight, and the UTC
+      // conversion shifted every lookup a day earlier east of Greenwich.
       const iso = localDateKey(cursor)
       column.push({
         date: new Date(cursor),
@@ -669,23 +1002,19 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
   })
 
   const gap = 3
-  // Sized to the box rather than fixed at 13px. The old constant meant 26
-  // columns claimed exactly 416px however wide the card was — a third of a
-  // full-width one — which is what made this read as a chart that had not
-  // finished loading. `available || 0` before the first measurement falls back
-  // to the old constant, so a server render or a test runner draws the same
-  // chart it always did.
+  // Sized to the box rather than fixed. A fixed cell meant 26 columns claimed
+  // exactly 416px however wide the card was, which is what made this read as a
+  // chart that had not finished loading. The fallback before the first
+  // measurement keeps a server render or a test runner drawing something sane.
   const cell = available
     ? clamp(Math.floor(available / columns.length) - gap, HEAT_CELL_MIN, HEAT_CELL_MAX)
     : 13
   const width = columns.length * (cell + gap)
   const height = 7 * (cell + gap) + 18
 
-  const level = (value: number): number => heatLevel(value, max)
-
   return (
     <div className="relative" ref={frame}>
-      <div className="scroll-x scrollbar-thin pb-1">
+      <div className="scroll-x pb-1">
         <svg
           width={width}
           height={height}
@@ -699,7 +1028,8 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
               key={`${label}-${index}`}
               x={index * (cell + gap)}
               y={10}
-              className="fill-muted text-[10px]"
+              // The axis label spec: 10.5px mono, tabular, `text-dim`.
+              className="fill-dim font-mono text-tiny [font-variant-numeric:tabular-nums]"
             >
               {label}
             </text>
@@ -707,7 +1037,7 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
           {columns.map((column, columnIndex) =>
             column.map((day, dayIndex) => {
               if (day.future) return null
-              const tier = level(day.value)
+              const tier = heatLevel(day.value, max)
               const dayLabel = day.date.toLocaleDateString(undefined, {
                 weekday: 'short',
                 month: 'short',
@@ -724,14 +1054,15 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
                   y={18 + dayIndex * (cell + gap)}
                   width={cell}
                   height={cell}
-                  rx={3}
+                  rx={2}
                   className={cn(
-                    tier < 0 && 'fill-line/60',
-                    'transition-opacity hover:opacity-80',
+                    // Zero is `control`, never the ramp's lowest step.
+                    tier < 0 ? 'fill-control' : HEAT_FILL[tier],
+                    'transition-opacity duration-hover hover:opacity-80',
                     // The mark's own affordance. A rect cannot take
-                    // `CLICKABLE_MARK` — there is no background to raise — so
-                    // it says the same thing with an accent outline, which is
-                    // also the only treatment legible on a 13px square.
+                    // `CLICKABLE_MARK` (there is no background to raise), so it
+                    // says the same thing with an accent outline, which is also
+                    // the only treatment legible on a 13px square.
                     onSelect &&
                       day.value > 0 &&
                       'cursor-pointer stroke-2 stroke-transparent hover:stroke-accent',
@@ -741,28 +1072,20 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
                       ? () => onSelect(localDateKey(day.date), day.value)
                       : undefined
                   }
-                  style={
-                    tier >= 0
-                      ? {
-                          fill: `var(--heat-${tier})`,
-                        }
-                      : undefined
-                  }
                   onMouseEnter={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect()
+                    const box = event.currentTarget.getBoundingClientRect()
                     const parent =
                       event.currentTarget.ownerSVGElement?.parentElement?.parentElement?.getBoundingClientRect()
                     setTip({
-                      x: rect.left - (parent?.left ?? 0) + rect.width / 2,
-                      y: rect.top - (parent?.top ?? 0),
-                      label: dayLabel,
-                      value: valueLabel,
+                      ...tipPosition(box, parent),
+                      heading: dayLabel,
+                      rows: [{ label: 'Plays', value: day.value === 0 ? '0' : String(day.value) }],
                     })
                   }}
                   onMouseLeave={() => setTip(null)}
                 >
-                  {/* Native tooltip, so the value is reachable without a
-                      mouse — the rects carry only mouse handlers. */}
+                  {/* Native tooltip, so the value is reachable without a mouse:
+                      the rects carry only mouse handlers. */}
                   <title>{`${dayLabel}: ${valueLabel}`}</title>
                 </rect>
               )
@@ -778,9 +1101,7 @@ export function ActivityHeatmap({ data, weeks = 26, onSelect }: HeatmapProps) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Matrix — a value per (row, column) pair
-// ---------------------------------------------------------------------------
+/* ── Matrix ──────────────────────────────────────────────────────────────── */
 
 export interface MatrixChartProps {
   /** Row headers, top to bottom. Weekdays for a punch card, years for seasonality. */
@@ -801,8 +1122,8 @@ export interface MatrixChartProps {
   describe: (row: number, column: number, value: number) => string
   /**
    * Drill into one cell. Only pass this where the cell names a window the
-   * destination can actually express — see `lib/drill-links.ts`. Omitted, the
-   * cells stay readable (and keyboard-reachable) but do not pretend to lead
+   * destination can actually express; see `lib/drill-links.ts`. Omitted, the
+   * cells stay readable and keyboard-reachable but do not pretend to lead
    * anywhere.
    */
   onSelect?: (row: number, column: number, value: number) => void
@@ -817,25 +1138,22 @@ export interface MatrixChartProps {
  * A grid of value-shaded squares: weekday × hour, or year × month.
  *
  * **Why one primitive for both.** The punch card and the seasonality years grid
- * are the same figure — a categorical row axis, a cyclic column axis, one count
- * per pair — and drawing them twice would be two ramps, two keyboard models and
+ * are the same figure, a categorical row axis, a cyclic column axis, one count
+ * per pair, and drawing them twice would be two ramps, two keyboard models and
  * two sets of labels to keep honest.
  *
- * **Why HTML and not SVG**, unlike every other chart here. The marks have to be
+ * **Why HTML and not SVG**, unlike the calendar heatmap. The marks have to be
  * operable: a cell needs an accessible name, a focus ring and (for seasonality)
- * a click that navigates. `ActivityHeatmap` is SVG and pays for it — its cells
+ * a click that navigates. `ActivityHeatmap` is SVG and pays for it: its cells
  * carry mouse handlers only, so it has to be paired with a separate list of
  * real buttons to be reachable at all. 168 cells cannot be paired with a list,
  * so they are real elements from the start.
  *
  * **One tab stop, not 168.** The grid is a roving-tabindex `role="grid"`: Tab
- * enters it once and the arrow keys, Home and End move within it. Putting every
- * cell in the tab order would bury every control after the chart, which is
- * exactly the reason the calendar heatmap keeps its cells out of it — this
- * solves the same problem without giving up the marks.
+ * enters it once and the arrow keys, Home and End move within it.
  *
- * Colour is the shared sequential ramp, and an empty cell is drawn as absence
- * (the line colour) rather than as the ramp's lowest step.
+ * Colour is the shared sequential ramp, and an empty cell is `control` rather
+ * than the ramp's lowest step.
  */
 export function MatrixChart({
   rows,
@@ -846,7 +1164,7 @@ export function MatrixChart({
   onSelect,
   columnLabelEvery = 1,
   cell = 14,
-  emptyMessage = 'Nothing to plot yet',
+  emptyMessage = 'No data for this range.',
 }: MatrixChartProps) {
   // The cell the arrow keys are currently on. Clamped on every render rather
   // than reset, so a data change cannot leave focus pointing off the grid.
@@ -868,7 +1186,7 @@ export function MatrixChart({
   const ceiling = max ?? Math.max(...values.flat(), 1)
   const total = values.reduce((sum, line) => sum + line.reduce((a, b) => a + b, 0), 0)
   if (rowCount === 0 || columnCount === 0 || total === 0) {
-    return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
+    return <p className="py-8 text-center text-small text-dim">{emptyMessage}</p>
   }
 
   const gap = 3
@@ -897,19 +1215,17 @@ export function MatrixChart({
   return (
     <div>
       {/*
-        Scrolls when it cannot fit, **stretches when it can**, and neither
-        needs measuring: `minmax(cell, 1fr)` is a floor and a share at once, so
-        the tracks grow to fill a wide card and refuse to shrink past legible on
-        a narrow one — at which point this scroller takes over and the page body
-        still never scrolls sideways. The old `inline-grid` of fixed `cell`px
-        tracks claimed the same ~410px whatever the card was, so 24 hours drew
-        into a third of a full-width one and looked broken rather than compact.
+        Scrolls when it cannot fit, **stretches when it can**, and neither needs
+        measuring: `minmax(cell, 1fr)` is a floor and a share at once, so the
+        tracks grow to fill a wide card and refuse to shrink past legible on a
+        narrow one, at which point this scroller takes over and the page body
+        still never scrolls sideways.
 
         The cells become rectangles on a wide box, which is fine and deliberate:
-        the ramp is read by colour, and the row is read across. Only the
-        *height* is a fixed square-ish size.
+        the ramp is read by colour and the row is read across. Only the *height*
+        is a fixed square-ish size.
       */}
-      <div className="scroll-x scrollbar-thin pb-1">
+      <div className="scroll-x pb-1">
         <div
           role="grid"
           aria-label="Values by row and column"
@@ -926,7 +1242,7 @@ export function MatrixChart({
             <div
               key={name}
               role="columnheader"
-              className="overflow-hidden text-center text-[10px] leading-none text-muted"
+              className="figure overflow-hidden text-center text-tiny leading-none text-dim"
             >
               {index % columnLabelEvery === 0 ? name : ''}
             </div>
@@ -936,7 +1252,7 @@ export function MatrixChart({
             <div key={name} role="row" className="contents">
               <div
                 role="rowheader"
-                className="pr-2 text-right text-[11px] leading-none text-muted"
+                className="figure pr-2 text-right text-tiny leading-none text-dim"
                 style={{ lineHeight: `${cell}px` }}
               >
                 {name}
@@ -957,9 +1273,9 @@ export function MatrixChart({
                   title: text,
                   onFocus: () => setCursor([rowIndex, columnIndex]),
                   className: cn(
-                    'rounded-[3px] transition-opacity hover:opacity-80',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-                    tier < 0 && 'bg-line/60',
+                    'rounded-[2px] transition-opacity duration-hover hover:opacity-80',
+                    // Zero is `control`, never the ramp's lowest step.
+                    tier < 0 ? 'bg-control' : HEAT_BG[tier],
                     // A ring rather than `CLICKABLE_MARK`'s raised background:
                     // the cell *is* its background, so raising it would erase
                     // the value. Same accent, same statement.
@@ -969,7 +1285,6 @@ export function MatrixChart({
                     // Width comes from the grid track, so the cell can stretch;
                     // the height is what keeps the ramp reading as a grid.
                     height: cell,
-                    ...(tier >= 0 ? { background: `var(--heat-${tier})` } : {}),
                   },
                 }
                 return onSelect ? (
@@ -997,12 +1312,33 @@ export function MatrixChart({
   )
 }
 
+/* ── Table fallbacks ─────────────────────────────────────────────────────── */
+
 /**
- * A matrix as a table — the fallback `DataTable` cannot be, since that is one
- * value per label and this is one per pair.
+ * The disclosure every table fallback hangs off, so they all read as the same
+ * control rather than as several near-misses.
+ */
+function TableDisclosure({ children }: { children: React.ReactNode }) {
+  return (
+    <details className="mt-4">
+      <summary
+        className="cursor-pointer list-none text-tiny text-dim transition-colors
+                   duration-hover ease-ease hover:text-strong"
+      >
+        View as table
+      </summary>
+      <div className="scroll-x mt-2">{children}</div>
+    </details>
+  )
+}
+
+/**
+ * A matrix as a table. The `DataTable` fallback cannot be one, since that is
+ * one value per label and this is one per pair.
  *
- * Same `<details>` affordance and the same wording, so it reads as the same
- * control as every other chart's fallback rather than as a different one.
+ * §7.16: header row in `text-dim` at 10.5px and not shouted, figures
+ * right-aligned and mono, a `line-soft` hairline between rows, no zebra
+ * striping and no vertical rules.
  */
 export function MatrixTable({
   caption,
@@ -1019,168 +1355,120 @@ export function MatrixTable({
 }) {
   if (rows.length === 0 || columns.length === 0) return null
   return (
-    <details className="mt-4 text-sm">
-      <summary className="cursor-pointer text-xs font-medium text-muted hover:text-ink">
-        View as table
-      </summary>
-      <div className="scroll-x mt-2">
-        <table className="w-full text-left text-sm">
-          <caption className="sr-only">{caption}</caption>
-          <thead>
-            <tr className="border-b border-line text-xs uppercase tracking-wider text-muted">
-              <th scope="col" className="py-1.5 pr-3 font-medium">
-                {rowHeader}
+    <TableDisclosure>
+      <table className="w-full text-left text-control">
+        <caption className="sr-only">{caption}</caption>
+        <thead>
+          <tr className="border-b border-line text-tiny text-dim">
+            <th scope="col" className="py-1.5 pr-3 font-normal">
+              {rowHeader}
+            </th>
+            {columns.map((name) => (
+              <th key={name} scope="col" className="px-1.5 py-1.5 text-right font-normal">
+                {name}
               </th>
-              {columns.map((name) => (
-                <th key={name} scope="col" className="py-1.5 px-1.5 text-right font-medium">
-                  {name}
-                </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((name, rowIndex) => (
+            <tr key={name} className="border-b border-line-soft last:border-0">
+              <th scope="row" className="py-1.5 pr-3 text-left font-normal text-fg">
+                {name}
+              </th>
+              {columns.map((column, columnIndex) => (
+                <td key={column} className="figure px-1.5 py-1.5 text-right text-strong">
+                  {values[rowIndex]?.[columnIndex] ?? 0}
+                </td>
               ))}
             </tr>
-          </thead>
-          <tbody>
-            {rows.map((name, rowIndex) => (
-              <tr key={name} className="border-b border-line/60 last:border-0">
-                <th scope="row" className="py-1.5 pr-3 text-left font-normal text-subtle">
-                  {name}
-                </th>
-                {columns.map((column, columnIndex) => (
-                  <td
-                    key={column}
-                    className="px-1.5 py-1.5 text-right tabular-nums text-ink"
-                  >
-                    {values[rowIndex]?.[columnIndex] ?? 0}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </details>
+          ))}
+        </tbody>
+      </table>
+    </TableDisclosure>
   )
-}
-
-// ---------------------------------------------------------------------------
-// Stacked columns — two series that sum to something meaningful
-// ---------------------------------------------------------------------------
-
-/** One column of a stacked chart: the parts, and whatever the caller hangs on. */
-export interface StackedEntry extends StatCount {
-  /** Bottom segment. */
-  first: number
-  /** Top segment. `value` must be `first + rewatch`, or the axis lies. */
-  rewatch: number
-}
-
-interface StackedColumnChartProps<T extends StackedEntry> {
-  data: T[]
-  formatLabel?: (label: string) => string
-  describe?: (entry: T) => string
-  emptyMessage?: string
-  onSelect?: SelectEntry<T>
 }
 
 /**
- * Two series stacked, not paired.
- *
- * Stacked because the parts genuinely sum to the whole here — a play is either
- * a first watch or a rewatch, never both — so the column's full height is the
- * period's plays and the split is read inside it. `ColumnChart`'s `compare`
- * draws its two side by side for the opposite reason: two *windows* do not add
- * up to anything, and stacking them would invent a total.
- *
- * Same mark spec as the other columns: ≤24px thick, 4px rounded at the data end
- * only, square at the baseline, and a 2px gap between the two segments so the
- * boundary is not carried by colour alone.
+ * Accessible fallback for every chart: the same numbers as a table, so nothing
+ * is gated behind colour or hover.
  */
-export function StackedColumnChart<T extends StackedEntry>({
-  data,
-  formatLabel = (label) => label,
-  describe,
-  emptyMessage = 'Nothing watched in this range',
-  onSelect,
-}: StackedColumnChartProps<T>) {
-  const total = data.reduce((sum, entry) => sum + entry.value, 0)
-  if (total === 0) {
-    return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
-  }
-  const max = Math.max(...data.map((entry) => entry.value), 1)
-
+export function DataTable({
+  caption,
+  rows,
+  valueHeader = 'Count',
+  compare,
+}: {
+  caption: string
+  rows: StatCount[]
+  valueHeader?: string
+  /**
+   * A second column of the same shape, for a two-series chart.
+   *
+   * Aligned by index, exactly as `ColumnChart`'s `compare` is and for the same
+   * reason (the two windows do not share labels), so `rowLabel` gets to say
+   * what the earlier row was called. Without this a comparison chart would have
+   * a fallback that showed only half of what was drawn, which is not a
+   * fallback.
+   */
+  compare?: { header: string; rows: StatCount[]; rowLabel?: (row: StatCount) => string }
+}) {
+  if (rows.length === 0) return null
   return (
-    // `items-stretch` for the same reason as `ColumnChart`: the segments are
-    // sized as a percentage and a percentage height needs a parent with a
-    // definite one. `items-end` here leaves every bar zero-tall.
-    <div className="flex h-44 items-stretch gap-1 sm:gap-2">
-      {data.map((entry, index) => {
-        const text =
-          describe?.(entry) ??
-          `${formatLabel(entry.label)}: ${entry.first} first watches, ${entry.rewatch} rewatches`
-        const share = (part: number) => (part / max) * 100
-        const bar = (
-          <>
-            <span className="text-xs font-medium tabular-nums text-ink">
-              {entry.value || ''}
-            </span>
-            <div className="flex w-full flex-1 flex-col justify-end gap-[2px]">
-              {/* Top segment first in the DOM: it is the top of the stack. */}
-              <div
-                className="w-full max-w-[24px] self-center rounded-t-[4px] bg-series-2
-                           transition-[height] duration-700 ease-spring"
-                style={{ height: `${Math.max(entry.rewatch ? 4 : 0, share(entry.rewatch))}%` }}
-              />
-              <div
-                className={cn(
-                  'w-full max-w-[24px] self-center transition-[height,background-color]',
-                  'duration-700 ease-spring bg-series-1',
-                  // The stack keeps its two validated series, so the hover
-                  // statement is the raised background on the button rather
-                  // than a colour swap that would collide with `--series-2`.
-                  // Rounded on top only when it *is* the data end — with a
-                  // rewatch segment above it, its top is an internal boundary.
-                  entry.rewatch ? '' : 'rounded-t-[4px]',
-                )}
-                style={{ height: `${Math.max(entry.first ? 4 : 0, share(entry.first))}%` }}
-              />
-            </div>
-            <span className="text-xs text-muted">{formatLabel(entry.label)}</span>
-          </>
-        )
-
-        if (!onSelect) {
-          return (
-            <div
-              key={entry.label}
-              className="flex min-w-0 flex-1 flex-col items-center gap-2"
-              title={text}
-            >
-              {bar}
-            </div>
-          )
-        }
-        return (
-          <button
-            key={entry.label}
-            type="button"
-            className={cn(
-              'group/col flex min-w-0 flex-1 flex-col items-center gap-2',
-              CLICKABLE_MARK,
+    <TableDisclosure>
+      <table className="w-full text-left text-control">
+        <caption className="sr-only">{caption}</caption>
+        <thead>
+          <tr className="border-b border-line text-tiny text-dim">
+            <th scope="col" className="py-1.5 pr-4 font-normal">
+              Label
+            </th>
+            <th scope="col" className="py-1.5 text-right font-normal">
+              {valueHeader}
+            </th>
+            {compare && (
+              <th scope="col" className="py-1.5 pl-4 text-right font-normal">
+                {compare.header}
+              </th>
             )}
-            onClick={() => onSelect(entry, index)}
-            title={text}
-            aria-label={text}
-          >
-            {bar}
-          </button>
-        )
-      })}
-    </div>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
+            const earlier = compare?.rows[index]
+            return (
+              <tr key={row.label} className="border-b border-line-soft last:border-0">
+                <td className="py-1.5 pr-4 text-fg">{row.label}</td>
+                <td className="figure py-1.5 text-right text-strong">
+                  {row.value.toLocaleString()}
+                </td>
+                {compare && (
+                  <td className="figure py-1.5 pl-4 text-right text-fg">
+                    {earlier ? (
+                      <>
+                        {earlier.value.toLocaleString()}
+                        {compare.rowLabel && (
+                          <span className="ml-1 font-sans text-tiny text-dim">
+                            ({compare.rowLabel(earlier)})
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      /* An en dash for "no data", never a zero. */
+                      <span className="text-dim">–</span>
+                    )}
+                  </td>
+                )}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </TableDisclosure>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Ranked rows with artwork
-// ---------------------------------------------------------------------------
+/* ── Ranked rows with artwork ────────────────────────────────────────────── */
 
 export interface RankedRow {
   key: string | number
@@ -1214,75 +1502,90 @@ export interface RankedRow {
  * truncates to three words, there is nowhere to put the year, and nothing to
  * tell two episodes of the same series apart. These rows are also a route to a
  * *title* rather than to a filtered view, so the poster is the thing a reader
- * actually recognises them by — the same argument the grids make.
+ * actually recognises them by.
  *
- * The bar is kept, as a track behind the count, so the ranking is still a shape
- * and not only an ordering.
+ * The bar is kept, as a 3px rail behind the count, so the ranking is still a
+ * shape and not only an ordering.
  */
 export function RankedList({
   rows,
   unit,
-  emptyMessage = 'Nothing yet',
+  emptyMessage = 'Nothing yet.',
 }: {
   rows: RankedRow[]
-  /** Singular unit for the accessible name: "play" → "12 plays". */
+  /** Singular unit for the accessible name: "play" gives "12 plays". */
   unit: string
   emptyMessage?: string
 }) {
   if (rows.length === 0) {
-    return <p className="py-8 text-center text-sm text-muted">{emptyMessage}</p>
+    return <p className="py-8 text-center text-small text-dim">{emptyMessage}</p>
   }
   const max = Math.max(...rows.map((row) => row.value), 1)
 
   return (
-    <ol className="space-y-1">
+    <ol>
       {rows.map((row, index) => {
-        const figure =
-          row.valueLabel ?? `${row.value} ${row.value === 1 ? unit : `${unit}s`}`
-        const name = `${row.title}${row.subtitle ? ` — ${row.subtitle}` : ''}: ${figure}${
+        const figure = row.valueLabel ?? `${row.value} ${row.value === 1 ? unit : `${unit}s`}`
+        const name = `${row.title}${row.subtitle ? `, ${row.subtitle}` : ''}: ${figure}${
           row.meta ? `, ${row.meta}` : ''
         }`
         const body = (
           <>
-            <span className="w-5 shrink-0 text-right text-xs tabular-nums text-muted">
-              {index + 1}
-            </span>
+            <span className="figure w-4 shrink-0 text-right text-tiny text-dim">{index + 1}</span>
             <Artwork
               src={row.posterUrl}
               title={row.title}
               showTitle={false}
-              className="h-14 w-[38px] shrink-0 rounded-md"
+              className="h-9 w-6 shrink-0 rounded-[3px]"
             />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium text-ink">{row.title}</span>
+              <span className="block truncate text-control text-strong">{row.title}</span>
               {row.subtitle && (
-                <span className="block truncate text-xs text-muted">{row.subtitle}</span>
+                <span className="block truncate text-tiny text-dim">{row.subtitle}</span>
               )}
-              {/* The bar is a shape for the ranking, never the only statement
-                  of the number — that is spelled out beside it. */}
-              <span className="mt-1.5 block h-1.5 overflow-hidden rounded-full bg-accent/10">
-                <span
-                  className="block h-full rounded-full bg-series-1"
-                  style={{ width: `${Math.max(4, (row.value / max) * 100)}%` }}
-                />
-              </span>
             </span>
-            <span className="shrink-0 text-right">
-              <span className="block text-sm font-semibold tabular-nums text-ink">
+            {/*
+              The bar is a shape for the ranking, never the only statement of
+              the number: that is spelled out beside it.
+
+              A fixed 64px track beside the figure rather than a full-width one
+              under the title, and that was measured. Stretched across the row a
+              3px rail is indistinguishable from a hairline separator, and a
+              list where every row holds the same value drew four full-width
+              rails that read as ruled lines rather than as a ranking at all.
+            */}
+            <span
+              className="hidden h-[3px] w-16 shrink-0 overflow-hidden rounded-full bg-rail sm:block"
+              aria-hidden="true"
+            >
+              <span
+                className="block h-full rounded-full bg-accent opacity-85"
+                style={{ width: `${Math.max(4, (row.value / max) * 100)}%` }}
+              />
+            </span>
+            {/* Sized to its own content rather than to a fixed column: the
+                caption under the figure runs from "since 2019" to "first seen
+                30 Nov 2025", and a fixed width wrapped the long ones onto two
+                lines in a row that is already two lines tall. */}
+            <span className="shrink-0 whitespace-nowrap text-right">
+              <span className="figure block text-control text-strong">
                 {row.valueLabel ?? compactNumber(row.value)}
               </span>
-              {row.meta && <span className="block text-[11px] text-muted">{row.meta}</span>}
+              {row.meta && <span className="block text-tiny text-dim">{row.meta}</span>}
             </span>
           </>
         )
-        const layout = 'flex w-full items-center gap-3 rounded-xl p-1.5'
+        const layout = 'flex w-full items-center gap-2.5 rounded-ctl px-1.5 py-1'
         return (
           <li key={row.key}>
             {row.to ? (
               <Link
                 to={row.to}
                 aria-label={name}
-                className={cn(layout, 'transition-colors hover:bg-raised')}
+                className={cn(
+                  layout,
+                  'transition-colors duration-hover ease-ease hover:bg-control-hover',
+                )}
               >
                 {body}
               </Link>
@@ -1296,9 +1599,7 @@ export function RankedList({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Stat tiles
-// ---------------------------------------------------------------------------
+/* ── Stat tiles ──────────────────────────────────────────────────────────── */
 
 /**
  * How this figure moved against the window it is being compared with.
@@ -1316,261 +1617,190 @@ export interface StatDelta {
 }
 
 /**
- * Direction, in a glyph and in words.
+ * Direction, in the sign and in words.
  *
  * Deliberately *not* coloured green and red. Those two colours would assert
  * that watching more is good and watching less is bad, which this app has no
- * business claiming — a quiet month is not a regression. The arrow and the sign
- * carry the direction, so nothing here depends on colour vision either.
+ * business claiming: a quiet month is not a regression. Semantic colour marks
+ * state, and this is not state.
+ *
+ * The direction is carried by the **written sign** rather than by an arrow.
+ * Archivo has no arrow glyph, and a Unicode arrow used as an icon is exactly
+ * what §11 rules out; a signed figure says the same thing, in the mono face
+ * every other figure on this page is set in.
  */
-function DeltaBadge({ delta }: { delta: StatDelta }) {
+function DeltaLine({ delta }: { delta: StatDelta }) {
   const direction = delta.pct == null ? 0 : Math.sign(delta.pct)
-  const arrow = direction > 0 ? '↑' : direction < 0 ? '↓' : '→'
-  // Five tiles across leaves about 140px of text. "↓ 7.8%, was 77 in the
-  // period before" truncates to "↓ 7.8%, was 77 in…", which is the same
-  // mistake the hints here already avoid — so the phrase naming the comparison
-  // window lives in the title and in the accessible name instead. The control
-  // that turned the comparison on is three inches up the page and says it once.
-  const short =
-    delta.pct == null
-      ? `was ${delta.previous}`
-      : `${Math.abs(delta.pct)}% · was ${delta.previous}`
+  // Five tiles across leaves about 140px of text, so the phrase naming the
+  // comparison window lives in the title and in the accessible name instead.
+  // The control that turned the comparison on is at the top of the page and
+  // says it once.
+  // A negative percentage already carries its sign; only a rise needs one, and
+  // no movement at all is written plainly rather than as a "±0%" that looks
+  // like a tolerance.
+  const signed = delta.pct == null ? null : `${direction > 0 ? '+' : ''}${delta.pct}%`
   const full =
     delta.pct == null
       ? `was ${delta.previous} ${delta.against}`
       : `${direction > 0 ? 'up' : direction < 0 ? 'down' : 'unchanged at'} ${Math.abs(delta.pct)}%, was ${delta.previous} ${delta.against}`
   return (
-    <p className="mt-1 truncate text-xs text-subtle" title={full}>
-      <span aria-hidden="true">{arrow} </span>
+    <span className="mt-0.5 block truncate text-tiny text-dim" title={full}>
       <span className="sr-only">{full}</span>
-      <span aria-hidden="true">{short}</span>
-    </p>
+      <span aria-hidden="true">
+        {signed && <span className="figure">{signed}</span>}
+        {signed && ' · '}
+        was <span className="figure">{delta.previous}</span>
+      </span>
+    </span>
   )
 }
 
 /**
  * The tile's optional shape: where this figure has been over the window.
  *
- * Drawn from a plain list of numbers with no axis, no labels and no scale of
- * its own — it says "rising", "spiky", "flat", and nothing a reader could
- * misread as a precise value. It is **redundant** by construction: the figure
- * above it and the delta below it carry every number, so the tile loses no
- * information without it. That is why it is `aria-hidden` rather than given an
- * accessible name that would repeat what is already read out.
+ * §8's sparkline exactly: 48 by 16, the accent line at 1.25px, an area fill at
+ * `--area-alpha` fading to nothing at the baseline, an endpoint dot, and
+ * nothing else. No axes, no labels, no scale of its own, so it says "rising",
+ * "spiky", "flat" and nothing a reader could misread as a value.
+ *
+ * It is **redundant** by construction: the figure above it and the delta below
+ * it carry every number, so the tile loses nothing without it. That is why it
+ * is `aria-hidden` rather than given a name repeating what is already read out.
  *
  * A single point cannot be a trend, so fewer than two is drawn as nothing.
- *
- * **It fills the tile.** It used to carry `width={72}` as an attribute, so the
- * shape sat in the left third of a tile two hundred-odd pixels wide and read as
- * a chart that had failed to load. The viewBox stays 72×20 — it is only a
- * coordinate space — and the element is sized in CSS instead, which means it
- * follows the tile through every breakpoint with nothing to keep in step.
- *
- * `preserveAspectRatio="none"` is the point and is safe *here* specifically: a
- * sparkline has no axis, no labels and no scale a reader could misread, so
- * stretching it horizontally changes nothing it claims. `vector-effect:
- * non-scaling-stroke` keeps the line 1.5px whatever the stretch, which is the
- * one thing that would otherwise give it away.
  */
 function Sparkline({ points }: { points: number[] }) {
   if (points.length < 2) return null
-  const width = 72
-  const height = 20
+  const width = 48
+  const height = 16
   const max = Math.max(...points, 1)
   const step = width / (points.length - 1)
   // A 1px inset top and bottom so a flat maximum is not clipped by the edge.
+  const at = (value: number, index: number) => ({
+    x: index * step,
+    y: height - 1 - (value / max) * (height - 2),
+  })
   const path = points
     .map((value, index) => {
-      const x = index * step
-      const y = height - 1 - (value / max) * (height - 2)
+      const { x, y } = at(value, index)
       return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
     })
     .join(' ')
+  const last = at(points[points.length - 1], points.length - 1)
+  // Unique per instance, because two sparklines on one page would otherwise
+  // share a gradient id and the second would silently take the first's.
+  const gradient = `spark-${points.length}-${Math.round(max)}-${Math.round(last.y * 10)}`
+
   return (
     <svg
+      width={width}
+      height={height}
       viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-      className="mt-1.5 block h-5 w-full text-series-1"
+      className="block"
       aria-hidden="true"
       focusable="false"
     >
-      <path
-        d={`${path} L${width},${height} L0,${height} Z`}
-        className="fill-series-1/10 stroke-none"
-      />
+      <defs>
+        <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
+          {/* The one gradient the family allows: the accent fading to nothing
+              at the baseline. Both stops name the token, so the fill follows a
+              theme change with nothing to re-read. */}
+          <stop offset="0%" stopColor="var(--accent)" stopOpacity="var(--area-alpha)" />
+          <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={`${path} L${width},${height} L0,${height} Z`} fill={`url(#${gradient})`} />
       <path
         d={path}
         fill="none"
-        stroke="currentColor"
-        strokeWidth={1.5}
+        stroke="var(--accent)"
+        strokeWidth={1.25}
         strokeLinecap="round"
         strokeLinejoin="round"
-        vectorEffect="non-scaling-stroke"
       />
+      <circle cx={last.x} cy={last.y} r={2} fill="var(--accent)" />
     </svg>
   )
 }
 
 interface StatTileProps {
   label: string
-  value: string
+  /** Null, or an empty string, draws the en dash that means "no data". */
+  value: string | null
   hint?: string
+  /**
+   * @deprecated Accepted so the pages that still pass one keep compiling, and
+   * deliberately not drawn. §7.14: "Do not put a big icon in a tile."
+   */
   icon?: React.ReactNode
+  /**
+   * @deprecated Accepted so the pages that still pass one keep compiling, and
+   * deliberately not drawn. The accent means selected, in hand or primary
+   * (§2.4), and "this number happens to be over half" is none of those.
+   */
   accent?: boolean
   /** Movement against a comparison window, when one is being shown. */
   delta?: StatDelta
   /**
-   * Where this figure has been, as a sparkline under the delta.
-   *
-   * Optional and off by default, so every existing tile — the dashboard's
-   * included — renders exactly as it did. Purely supplementary: see
-   * `Sparkline`.
+   * Where this figure has been, as a sparkline beside it. Optional and off by
+   * default. Purely supplementary; see `Sparkline`.
    */
   trend?: number[]
-  /** Makes the whole tile a link. A tile is 44px-plus, so this is a real target. */
+  /** Makes the whole tile a link. A tile is well past 44px, so this is a real target. */
   to?: string
   /** Required with `to`: what the destination is, for a screen reader. */
   toLabel?: string
+  /**
+   * How many columns of the tile grid this one takes, once the grid has more
+   * than one. Two is for the figure a grid leads with; the figure itself stays
+   * the same 24px, so this buys width for a longer value and a fuller second
+   * line, never a bigger number.
+   */
+  span?: 1 | 2
 }
 
-export function StatTile({
-  label,
-  value,
-  hint,
-  icon,
-  accent,
-  delta,
-  trend,
-  to,
-  toLabel,
-}: StatTileProps) {
-  const body = (
-    <>
-      {icon && (
-        <span
-          className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl
-                     bg-accent-soft text-base text-accent"
-        >
-          {icon}
-        </span>
+/**
+ * A stat, composed from `ui.tsx`'s `Tile` rather than drawn again here.
+ *
+ * The tile owns the geometry (§7.14: eyebrow, a 24px mono figure, a second
+ * line, an optional trailing sparkline); this wrapper owns what the stats and
+ * dashboard pages need on top of it, which is the delta line, the sparkline
+ * itself and the link.
+ */
+export function StatTile({ label, value, hint, delta, trend, to, toLabel, span }: StatTileProps) {
+  const detail =
+    hint || delta ? (
+      <>
+        {hint && <span className="block truncate">{hint}</span>}
+        {delta && <DeltaLine delta={delta} />}
+      </>
+    ) : undefined
+
+  const tile = (
+    <Tile
+      eyebrow={label}
+      value={value}
+      detail={detail}
+      spark={trend && trend.length > 1 ? <Sparkline points={trend} /> : undefined}
+      className={cn(
+        'h-full',
+        to && 'transition-colors duration-hover ease-ease group-hover/tile:bg-control-hover',
       )}
-      {/*
-        `flex-1` as well as `min-w-0`, and the pair is load-bearing. Without it
-        this column sizes to its own content, so the sparkline's `w-full` was
-        100% of "as wide as the word PLAYS" — about 76px in a 270px tile, which
-        is exactly what made the trend line look like a chart that had failed to
-        load. `min-w-0` alone lets it shrink; `flex-1` is what makes it fill.
-      */}
-      <div className="min-w-0 flex-1">
-        <p className="label">{label}</p>
-        <p className="mt-1 truncate text-2xl font-semibold tracking-tight text-ink">
-          {value}
-        </p>
-        {hint && <p className="mt-0.5 truncate text-xs text-muted">{hint}</p>}
-        {delta && <DeltaBadge delta={delta} />}
-        {trend && <Sparkline points={trend} />}
-      </div>
-    </>
+    />
   )
 
-  const shell = cn(
-    'card flex items-start gap-3 p-4 transition-transform duration-300 ease-spring hover:-translate-y-0.5',
-    accent && 'ring-1 ring-accent/25',
-  )
+  const wide = span === 2 ? 'sm:col-span-2' : undefined
 
   if (to) {
     return (
       <Link
         to={to}
-        aria-label={toLabel ?? `${label}: ${value}`}
-        className={cn(shell, 'hover:border-line-accent-soft focus-visible:border-accent')}
+        aria-label={toLabel ?? `${label}: ${value ?? 'no data'}`}
+        className={cn('group/tile block rounded-card', wide)}
       >
-        {body}
+        {tile}
       </Link>
     )
   }
-  return <div className={shell}>{body}</div>
-}
-
-/**
- * Accessible fallback for every chart: the same numbers as a table, so nothing
- * is gated behind colour or hover.
- */
-export function DataTable({
-  caption,
-  rows,
-  valueHeader = 'Count',
-  compare,
-}: {
-  caption: string
-  rows: StatCount[]
-  valueHeader?: string
-  /**
-   * A second column of the same shape, for a two-series chart.
-   *
-   * Aligned by index, exactly as `ColumnChart`'s `compare` is and for the same
-   * reason — the two windows do not share labels — so `rowLabel` gets to say
-   * what the earlier row was called. Without this a comparison chart would have
-   * a fallback that showed only half of what was drawn, which is not a
-   * fallback.
-   */
-  compare?: { header: string; rows: StatCount[]; rowLabel?: (row: StatCount) => string }
-}) {
-  if (rows.length === 0) return null
-  return (
-    <details className="mt-4 text-sm">
-      <summary className="cursor-pointer text-xs font-medium text-muted hover:text-ink">
-        View as table
-      </summary>
-      <div className="scroll-x mt-2">
-        <table className="w-full text-left text-sm">
-          <caption className="sr-only">{caption}</caption>
-          <thead>
-            <tr className="border-b border-line text-xs uppercase tracking-wider text-muted">
-              <th scope="col" className="py-1.5 pr-4 font-medium">
-                Label
-              </th>
-              <th scope="col" className="py-1.5 text-right font-medium">
-                {valueHeader}
-              </th>
-              {compare && (
-                <th scope="col" className="py-1.5 pl-4 text-right font-medium">
-                  {compare.header}
-                </th>
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, index) => {
-              const earlier = compare?.rows[index]
-              return (
-                <tr key={row.label} className="border-b border-line/60 last:border-0">
-                  <td className="py-1.5 pr-4 text-subtle">{row.label}</td>
-                  <td className="py-1.5 text-right tabular-nums text-ink">
-                    {row.value.toLocaleString()}
-                  </td>
-                  {compare && (
-                    <td className="py-1.5 pl-4 text-right tabular-nums text-subtle">
-                      {earlier ? (
-                        <>
-                          {earlier.value.toLocaleString()}
-                          {compare.rowLabel && (
-                            <span className="ml-1 text-xs text-muted">
-                              ({compare.rowLabel(earlier)})
-                            </span>
-                          )}
-                        </>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                  )}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    </details>
-  )
+  return wide ? <div className={wide}>{tile}</div> : tile
 }
