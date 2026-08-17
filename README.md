@@ -1,8 +1,12 @@
 <div align="center">
 
-# Tally
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/banner.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/banner-paper.png">
+  <img src="docs/images/banner.png" alt="Tally: the mark, a blue rounded square with four tally strokes crossed by a fifth, beside the word TALLY" width="560">
+</picture>
 
-**Track every film, series and anime you watch — kept in step with Plex.**
+**Track every film, series and anime you watch, kept in step with Plex.**
 
 A self-hosted watch tracker that imports your Plex history, follows what you are
 watching now, and syncs ratings and your watchlist in *both* directions.
