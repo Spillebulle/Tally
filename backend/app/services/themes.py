@@ -407,6 +407,21 @@ class Theme:
 
     id: str
     name: str
+    #: **The word the file used, never the one this build fell back to.**
+    #:
+    #: §3.2's "an id the reader does not know falls back to `graphite`" is a
+    #: *reader* rule: it settles which table fills the absent tokens and which
+    #: lightness the theme has, not what the file says. Umber ships four presets
+    #: Tally does not (`photoslop`, `shitstudio`, `krita`, `mediabog`), so an
+    #: unknown base is the ordinary case for a file that came from there — and a
+    #: theme that crossed to Tally and back having lost the preset it was
+    #: authored against would be a silent, permanent loss.
+    #:
+    #: So it is stored as written and resolved at the point of use: `is_dark`
+    #: and `base_colours` both fall back to Graphite, `encode` writes the word
+    #: back out, and nothing in between rewrites it. The one exception is a file
+    #: that names no base at all — there is nothing to preserve, and every key
+    #: is written on the way out, so the fallback becomes the file's answer.
     base: str
     colours: dict[str, str] = field(default_factory=dict)
     builtin: bool = False
