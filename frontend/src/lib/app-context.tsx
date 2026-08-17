@@ -85,24 +85,42 @@ function systemTheme(): 'light' | 'dark' {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
+/*
+ * Three states, and the third one stamps nothing.
+ *
+ * `tokens.css` reads dark from a bare `:root`, forced light from `.light`, and
+ * lets `prefers-color-scheme` decide when neither class is present. So
+ * "system" is the *absence* of a class, not a class of its own, and the
+ * pre-paint script in index.html does exactly the same thing. The two have to
+ * agree or the first paint flashes the other theme.
+ *
+ * `resolved` is what the user is actually looking at. It is kept live while
+ * the preference is "system" so a control can label itself correctly the
+ * moment the operating system flips at dusk.
+ */
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(
-    () => (localStorage.getItem(THEME_KEY) as Theme | null) ?? 'dark',
-  )
+  const [theme, setThemeState] = useState<Theme>(() => {
+    const stored = localStorage.getItem(THEME_KEY)
+    return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'dark'
+  })
   const [resolved, setResolved] = useState<'light' | 'dark'>(() =>
     theme === 'system' ? systemTheme() : theme,
   )
 
   useEffect(() => {
-    const apply = () => {
-      const next = theme === 'system' ? systemTheme() : theme
-      setResolved(next)
-      document.documentElement.classList.toggle('dark', next === 'dark')
-    }
-    apply()
+    const root = document.documentElement
+    root.classList.remove('dark', 'light')
+    // 'system' stamps nothing at all, so prefers-color-scheme decides.
+    if (theme === 'dark' || theme === 'light') root.classList.add(theme)
 
-    if (theme !== 'system') return
+    if (theme !== 'system') {
+      setResolved(theme)
+      return
+    }
+
     const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const apply = () => setResolved(media.matches ? 'dark' : 'light')
+    apply()
     media.addEventListener('change', apply)
     return () => media.removeEventListener('change', apply)
   }, [theme])
@@ -136,9 +154,21 @@ interface ToastValue {
   toasts: Toast[]
   notify: (message: string, tone?: Toast['tone']) => void
   dismiss: (id: number) => void
+  dismissAll: () => void
 }
 
 const ToastContext = createContext<ToastValue | null>(null)
+
+/*
+ * Six seconds, except for an error.
+ *
+ * A toast that reports something going wrong is the only record the user has
+ * of it, and it is exactly the one they are least likely to be looking at when
+ * it appears. So an error stays until it is dismissed (STYLE-GUIDE section
+ * 7.17); everything else is a receipt for something the user just did and can
+ * leave on its own.
+ */
+const TOAST_MS = 6000
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -147,16 +177,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((current) => current.filter((toast) => toast.id !== id))
   }, [])
 
+  const dismissAll = useCallback(() => setToasts([]), [])
+
   const notify = useCallback(
     (message: string, tone: Toast['tone'] = 'info') => {
       const id = Date.now() + Math.random()
       setToasts((current) => [...current, { id, message, tone }])
-      window.setTimeout(() => dismiss(id), 4200)
+      if (tone !== 'error') window.setTimeout(() => dismiss(id), TOAST_MS)
     },
     [dismiss],
   )
 
-  const value = useMemo(() => ({ toasts, notify, dismiss }), [toasts, notify, dismiss])
+  const value = useMemo(
+    () => ({ toasts, notify, dismiss, dismissAll }),
+    [toasts, notify, dismiss, dismissAll],
+  )
   return <ToastContext.Provider value={value}>{children}</ToastContext.Provider>
 }
 
