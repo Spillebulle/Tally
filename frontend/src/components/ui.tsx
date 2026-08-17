@@ -1,5 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
+import { Link } from 'react-router-dom'
 import { Check, Star, TriangleAlert, X } from 'lucide-react'
 import { cn, formatRating, RATING_SCALE, STATUS_DOT, STATUS_LABELS } from '@/lib/utils'
 import type { WatchStatus } from '@/lib/types'
@@ -65,7 +72,7 @@ export function EmptyState({
           {icon}
         </span>
       )}
-      <h3 className="text-body font-semibold text-fg">{title}</h3>
+      <h3 className="text-body font-semibold text-strong">{title}</h3>
       {description && <p className="max-w-sm text-balance text-body text-dim">{description}</p>}
       {action && <div className="mt-2">{action}</div>}
     </div>
@@ -113,7 +120,7 @@ export function ErrorState({
 export function StatusBadge({ status }: { status: WatchStatus | null }) {
   if (!status) return null
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-tight bg-control px-1.5 py-px text-tiny text-fg">
+    <span className="inline-flex items-center gap-1.5 rounded-tight bg-control px-1.5 py-px text-tiny text-muted">
       {/* Dot is redundant with the text label, never the only cue. */}
       <span className={cn('h-1.5 w-1.5 rounded-full', STATUS_DOT[status])} aria-hidden="true" />
       {STATUS_LABELS[status]}
@@ -162,7 +169,11 @@ export function StarRating({ rating, onChange, size = 'md', readOnly }: StarRati
             fill={filled ? 'currentColor' : 'none'}
             aria-hidden="true"
             className={cn(
-              filled ? 'text-strong' : 'text-line',
+              // An empty star is a mark, so it owes 3:1 (§2.6). `text-line` is
+              // 1.25:1 on chrome and 1.09:1 on control, which on an unrated
+              // title left all ten of them all but invisible — and the empty
+              // stars are the reference that makes the filled count readable.
+              filled ? 'text-strong' : 'text-placeholder',
               interactive && 'transition-colors duration-hover',
               interactive && !filled && 'group-hover/star:text-muted',
             )}
@@ -255,14 +266,19 @@ export function Segmented<T extends string>({
 
 /* ── Spinner ─────────────────────────────────────────────────────────────── */
 
-/** A last resort (§7.18): 16px, `text-dim`, sized by the text around it. */
-export function Spinner({ className }: { className?: string }) {
+/**
+ * A last resort (§7.18): 16px and `text-dim`.
+ *
+ * Sized in pixels rather than `1em`, which inherited whatever font-size it
+ * landed in — 12px inside a poster's caption, 10.5px in a chip.
+ */
+export function Spinner({ className, size = 16 }: { className?: string; size?: number }) {
   return (
     <svg
       className={cn('animate-spin', className)}
       viewBox="0 0 24 24"
-      width="1em"
-      height="1em"
+      width={size}
+      height={size}
       aria-hidden="true"
     >
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" fill="none" opacity="0.2" />
@@ -290,12 +306,15 @@ export function Toggle({
   label,
   description,
   disabled,
+  disabledReason,
 }: {
   checked: boolean
   onChange: (checked: boolean) => void
   label: string
   description?: string
   disabled?: boolean
+  /** Why it is disabled. Shown as the control's `title` (§7.6, §12). */
+  disabledReason?: string
 }) {
   return (
     <label
@@ -303,6 +322,7 @@ export function Toggle({
         'flex items-start justify-between gap-4 py-2',
         disabled && 'opacity-45',
       )}
+      title={disabled ? disabledReason : undefined}
     >
       <span className="min-w-0">
         <span className="block text-control text-fg">{label}</span>
@@ -314,6 +334,7 @@ export function Toggle({
         aria-checked={checked}
         aria-label={label}
         disabled={disabled}
+        title={disabled ? disabledReason : undefined}
         onClick={() => onChange(!checked)}
         className={cn(
           'relative mt-px h-[18px] w-[34px] shrink-0 rounded-full transition-colors duration-hover ease-ease',
@@ -373,12 +394,15 @@ export function Checkbox({
   onChange,
   label,
   disabled,
+  disabledReason,
   className,
 }: {
   checked: CheckboxState
   onChange: (checked: boolean) => void
   label?: ReactNode
   disabled?: boolean
+  /** Why it is disabled. Shown as the control's `title` (§7.6, §12). */
+  disabledReason?: string
   className?: string
 }) {
   return (
@@ -387,6 +411,7 @@ export function Checkbox({
       role="checkbox"
       aria-checked={checked === 'mixed' ? 'mixed' : checked}
       disabled={disabled}
+      title={disabled ? disabledReason : undefined}
       onClick={() => onChange(checked !== true)}
       className={cn(
         'inline-flex min-h-[18px] items-center gap-2 text-control text-fg',
@@ -416,6 +441,8 @@ export function Tile({
   detail,
   spark,
   dot,
+  to,
+  toLabel,
   className,
 }: {
   eyebrow: string
@@ -424,10 +451,14 @@ export function Tile({
   /** A trailing sparkline, drawn by the caller (Charts owns the drawing). */
   spark?: ReactNode
   dot?: 'good' | 'caution' | 'critical' | 'accent'
+  /** Make the whole tile a link. §7.14: hover is `control-hover`, nothing else. */
+  to?: string
+  /** What the link leads to, for a screen reader. Defaults to the eyebrow. */
+  toLabel?: string
   className?: string
 }) {
-  return (
-    <div className={cn('card min-w-[180px] p-3', className)}>
+  const body = (
+    <>
       <div className="flex items-center gap-1.5">
         {dot && (
           <span
@@ -452,8 +483,26 @@ export function Tile({
         {spark && <span className="shrink-0">{spark}</span>}
       </div>
       {detail && <div className="mt-1 text-small text-muted">{detail}</div>}
-    </div>
+    </>
   )
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        aria-label={toLabel ?? eyebrow}
+        className={cn(
+          'card block min-w-[180px] p-3 transition-colors duration-hover ease-ease',
+          'hover:bg-control-hover',
+          className,
+        )}
+      >
+        {body}
+      </Link>
+    )
+  }
+
+  return <div className={cn('card min-w-[180px] p-3', className)}>{body}</div>
 }
 
 /* ── Panel ───────────────────────────────────────────────────────────────── */
@@ -500,9 +549,18 @@ const DIALOG_SIZE = {
 
 /**
  * The modal (§7.17): `chrome` fill, radius 10, `shadow-modal`, the page dimmed
- * to ~40% behind it. One scroll area; header and footer stay put. Escape and
- * the close mark close it. On a narrow screen it becomes the bottom sheet,
- * with a 32 by 4 drag handle.
+ * to ~40% behind it. One scroll area; header and footer stay put. On a narrow
+ * screen it becomes the bottom sheet, with a 32 by 4 drag handle.
+ *
+ * A modal owns the keyboard while it is open, and that is not decoration:
+ * without it Tab walks the page *underneath* the backdrop, which is a list of
+ * controls the user cannot see and did not ask for. So focus moves in on open,
+ * is contained while open, and goes back to whatever opened it on close.
+ *
+ * `busy` is the guide's "a modal that holds work in flight refuses to close and
+ * says so": pass the sentence, and Escape, the backdrop and the close mark all
+ * decline and show it instead. It is a prop rather than each caller's own
+ * guard, because a caller that has to remember will forget.
  */
 export function Dialog({
   open,
@@ -510,6 +568,7 @@ export function Dialog({
   title,
   subtitle,
   size = 'standard',
+  busy,
   footer,
   footerNote,
   children,
@@ -520,45 +579,122 @@ export function Dialog({
   /** One line of `text-muted` under the title. */
   subtitle?: ReactNode
   size?: keyof typeof DIALOG_SIZE
+  /** Work in flight: the sentence to show when a close is refused. */
+  busy?: string
   /** Right-aligned buttons, primary rightmost. */
   footer?: ReactNode
   /** A note at the footer's left, in `text-dim`. */
   footerNote?: ReactNode
   children: ReactNode
 }) {
-  useEffect(() => {
-    if (!open) return
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+  const panelRef = useRef<HTMLDivElement>(null)
+  const openerRef = useRef<Element | null>(null)
+  const [refused, setRefused] = useState(false)
+
+  const tryClose = () => {
+    if (busy) {
+      setRefused(true)
+      return
     }
-    document.addEventListener('keydown', onKey)
+    onClose()
+  }
+
+  useEffect(() => {
+    if (!open) {
+      setRefused(false)
+      return
+    }
+
+    // Whatever had focus when this opened is where focus goes back to.
+    openerRef.current = document.activeElement
+    const panel = panelRef.current
+    const focusable = () =>
+      Array.from(
+        panel?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((node) => node.offsetParent !== null)
+
+    // Into the dialog, not onto the page behind it. The body's first control
+    // rather than the panel's, because the panel's first is the close mark and
+    // landing there means Enter shuts the dialog the instant it opens. The
+    // panel itself when there is nothing at all, so the keyboard is never left
+    // outside.
+    const inBody = focusable().find((node) => node.closest('[data-dialog-body]'))
+    const first = inBody ?? focusable()[0]
+    if (first) first.focus()
+    else panel?.focus()
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        const target = event.target as HTMLElement | null
+        // Escape inside a field drops that field's edit first (§7.17). The
+        // second press then reaches the dialog.
+        if (
+          target &&
+          (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') &&
+          (target as HTMLInputElement).value !== ''
+        ) {
+          event.stopPropagation()
+          ;(target as HTMLInputElement).value = ''
+          target.dispatchEvent(new Event('input', { bubbles: true }))
+          return
+        }
+        event.preventDefault()
+        tryClose()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const items = focusable()
+      if (items.length === 0) {
+        event.preventDefault()
+        return
+      }
+      const firstItem = items[0]
+      const lastItem = items[items.length - 1]
+      const active = document.activeElement
+      // Wrapped at both ends, and pulled back in if focus is somehow outside:
+      // the page behind a backdrop is not somewhere Tab may go.
+      if (!panel?.contains(active)) {
+        event.preventDefault()
+        ;(event.shiftKey ? lastItem : firstItem).focus()
+      } else if (event.shiftKey && active === firstItem) {
+        event.preventDefault()
+        lastItem.focus()
+      } else if (!event.shiftKey && active === lastItem) {
+        event.preventDefault()
+        firstItem.focus()
+      }
+    }
+
+    document.addEventListener('keydown', onKey, true)
     // The page behind must not scroll while the dialog holds the screen.
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
       document.body.style.overflow = previous
+      ;(openerRef.current as HTMLElement | null)?.focus?.()
     }
-  }, [open, onClose])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, busy])
 
   if (!open) return null
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
+      className="dialog-backdrop fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
       role="presentation"
       onClick={(event) => {
-        if (event.target === event.currentTarget) onClose()
+        if (event.target === event.currentTarget) tryClose()
       }}
-      // The dimmer: `backdrop` at 60% alpha, which reads as the page dimmed to
-      // ~40%. No token carries this alpha and an opacity modifier on a token
-      // emits nothing, so it is mixed here.
-      style={{ background: 'color-mix(in oklab, var(--backdrop) 60%, transparent)' }}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        tabIndex={-1}
         className={cn(
           'dialog flex max-h-[92vh] w-full flex-col overflow-hidden',
           'max-sm:rounded-b-none sm:max-w-[92vw] motion-safe:animate-rise',
@@ -577,15 +713,25 @@ export function Dialog({
           </div>
           <button
             type="button"
-            onClick={onClose}
-            title="Close"
+            onClick={tryClose}
+            title={busy ?? 'Close'}
             aria-label="Close"
             className="btn-icon -mr-2 -mt-1 text-dim"
           >
             <X size={16} />
           </button>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">{children}</div>
+        <div
+          data-dialog-body=""
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-6"
+        >
+          {refused && busy && (
+            <div role="alert" className="notice mb-3">
+              {busy}
+            </div>
+          )}
+          {children}
+        </div>
         {(footer || footerNote) && (
           <footer className="flex shrink-0 items-center gap-3 border-t border-line px-6 py-3">
             <div className="min-w-0 flex-1 text-tiny text-dim">{footerNote}</div>
@@ -680,9 +826,12 @@ export function Notice({
  * does not exist on touch, so nothing a user *needs* may live only here; the
  * tooltip repeats or expands what the control already conveys.
  *
- * Not portalled: it sits above its trigger and is small enough that clipping
- * has not been met in practice. If a clipped case appears, portal it the way
- * the dropdown list is.
+ * Portalled, like the dropdown's list. It sits above its trigger, and the two
+ * places a tooltip most obviously belongs — an icon button in a poster rail,
+ * and one in the filter strip — are both `.scroll-x` containers, which
+ * `index.css` documents as clipping vertically with no z-index able to escape
+ * it. Positioned in the same way: from the trigger's rectangle, flipped below
+ * when there is no room above.
  */
 export function Tooltip({
   content,
@@ -696,26 +845,42 @@ export function Tooltip({
   children: ReactNode
   className?: string
 }) {
-  const [shown, setShown] = useState(false)
+  const [style, setStyle] = useState<CSSProperties | null>(null)
+  const wrapRef = useRef<HTMLSpanElement>(null)
   const timer = useRef<number>()
+
+  const place = () => {
+    const rect = wrapRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const above = rect.top > 40
+    setStyle({
+      position: 'fixed',
+      left: Math.min(Math.max(8, rect.left + rect.width / 2), window.innerWidth - 8),
+      transform: 'translateX(-50%)',
+      ...(above
+        ? { bottom: window.innerHeight - rect.top + 4 }
+        : { top: rect.bottom + 4 }),
+    })
+  }
 
   const showSoon = () => {
     window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setShown(true), 400)
+    timer.current = window.setTimeout(place, 400)
   }
   const showNow = () => {
     window.clearTimeout(timer.current)
-    setShown(true)
+    place()
   }
   const hide = () => {
     window.clearTimeout(timer.current)
-    setShown(false)
+    setStyle(null)
   }
 
   useEffect(() => () => window.clearTimeout(timer.current), [])
 
   return (
     <span
+      ref={wrapRef}
       className={cn('relative inline-flex', className)}
       onMouseEnter={showSoon}
       onMouseLeave={hide}
@@ -723,17 +888,18 @@ export function Tooltip({
       onBlur={hide}
     >
       {children}
-      {shown && (
-        <span
-          role="tooltip"
-          className="tooltip absolute bottom-full left-1/2 z-40 mb-1 flex
-                     -translate-x-1/2 items-center gap-1.5 whitespace-nowrap
-                     motion-safe:animate-rise"
-        >
-          {content}
-          {shortcut && <kbd className="keycap">{shortcut}</kbd>}
-        </span>
-      )}
+      {style &&
+        createPortal(
+          <span
+            role="tooltip"
+            style={style}
+            className="tooltip z-50 flex items-center gap-1.5 whitespace-nowrap motion-safe:animate-rise"
+          >
+            {content}
+            {shortcut && <kbd className="keycap">{shortcut}</kbd>}
+          </span>,
+          document.body,
+        )}
     </span>
   )
 }
