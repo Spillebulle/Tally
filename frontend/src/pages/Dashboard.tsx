@@ -187,12 +187,15 @@ function ContinueRow({
    * The heading names the episode, not only the series.
    *
    * One show can hold three part-watched episodes at once, and the API returns
-   * all three (see the report: `continue_watching` stops an "up next" card
-   * duplicating a part-watched one, but nothing dedupes part-watched episodes
-   * of the same show against each other). With the series title alone, three
-   * rows read as one title printed three times with three identical posters,
-   * told apart only by a 10.5px line underneath. The episode code goes on the
-   * heading line, where the eye lands first, and it is a figure, so it is mono.
+   * all three: `routers/library.continue_watching` stops an "up next" card
+   * duplicating a part-watched episode, but nothing dedupes part-watched
+   * episodes of the same show against each other. Reported as a backend defect
+   * rather than worked around here, because a row per part-watched episode may
+   * well be the right answer - what was not right is that with the series title
+   * alone, three of them read as one title printed three times with three
+   * identical posters, told apart only by an 11px line underneath. The episode
+   * code goes on the heading line, where the eye lands first, and it is a
+   * figure, so it is mono.
    */
   const heading = series ?? target.title
   // When the heading is the series, the second line is the episode's own name;
