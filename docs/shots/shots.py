@@ -30,6 +30,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+if sys.platform == "win32":
+    import ctypes
+    import ctypes.wintypes as wintypes
+else:
+    import signal
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 BACKEND_DIR = REPO_ROOT / "backend"
@@ -45,6 +51,87 @@ ALL_PAGES = [
 
 def log(msg: str) -> None:
     print(f"[shots] {msg}", flush=True)
+
+
+if sys.platform == "win32":
+    # `subprocess.Popen` does not tie a Windows child's lifetime to its
+    # parent, and `finally: stop_backend(...)` only runs on a Python-level
+    # exit -- a SIGKILL or a CI timeout on *this* script skips it entirely
+    # and leaves uvicorn holding the port. A Job Object with
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE fixes that at the OS level: Windows
+    # closes every handle a process holds as part of tearing it down, no
+    # matter how it died, and closing the last handle to a job kills every
+    # process still in it. So the backend dies with this script even when no
+    # Python code gets to run.
+    _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _PROCESS_ALL_ACCESS = 0x1F0FFF
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", _IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    def _create_kill_on_close_job() -> int | None:
+        """A Job Object handle that kills its members when it closes, or
+        ``None`` if the platform refused to give us one (e.g. this script is
+        itself already confined to a job by an outer process that did not
+        allow nesting/breakaway -- rare, but not worth failing the whole run
+        over; see README.md's force-kill note for the manual recovery path)."""
+        kernel32 = ctypes.windll.kernel32
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            job,
+            _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(job)
+            return None
+        return job
+
+    def _assign_to_job(job: int, pid: int) -> bool:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(_PROCESS_ALL_ACCESS, False, pid)
+        if not handle:
+            return False
+        try:
+            return bool(kernel32.AssignProcessToJobObject(job, handle))
+        finally:
+            kernel32.CloseHandle(handle)
 
 
 def run(cmd: str, *, cwd: Path, timeout: int | None = None) -> None:
@@ -107,6 +194,16 @@ def start_backend(data_dir: Path, port: int, log_file: Path) -> subprocess.Popen
     env.setdefault("LOG_LEVEL", "INFO")
 
     log_handle = open(log_file, "w", encoding="utf-8")
+    popen_kwargs: dict = {}
+    if sys.platform != "win32":
+        # New session, so the backend (and anything it spawns) is a separate
+        # process group that stop_backend can signal as a unit with killpg().
+        # This is the POSIX half of the fix below -- it makes the *normal*
+        # shutdown path (SIGTERM, an exception, Ctrl-C) thorough, but POSIX
+        # has no equivalent of Windows' kill-on-job-close: a SIGKILL aimed at
+        # this script itself still orphans the backend here, because no
+        # Python code runs to send the killpg(). See README.md.
+        popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(
         [
             str(VENV_PYTHON), "-m", "uvicorn", "app.main:app",
@@ -116,8 +213,25 @@ def start_backend(data_dir: Path, port: int, log_file: Path) -> subprocess.Popen
         env=env,
         stdout=log_handle,
         stderr=subprocess.STDOUT,
+        **popen_kwargs,
     )
     proc._log_handle = log_handle  # keep a reference so it isn't GC'd early
+
+    if sys.platform == "win32":
+        job = _create_kill_on_close_job()
+        if job and _assign_to_job(job, proc.pid):
+            # Keep the handle referenced for the rest of this process's life
+            # (never explicitly closed) so Windows only reclaims it -- and
+            # kills whatever is still running inside it -- when *this*
+            # script's own handles are torn down, a hard kill included.
+            proc._job_handle = job
+            log("Backend placed in a kill-on-close Job Object")
+        else:
+            log(
+                "WARNING: could not create/assign a Job Object for the backend; "
+                "a hard kill of this script will orphan uvicorn. See "
+                "README.md's force-kill note for how to find and clear it."
+            )
     return proc
 
 
@@ -133,12 +247,27 @@ def stop_backend(proc: subprocess.Popen | None, port: int) -> None:
     """
     if proc is not None and proc.poll() is None:
         log("Stopping backend...")
-        proc.terminate()
+        if sys.platform != "win32":
+            # Signal the whole process group `start_backend` put the backend
+            # in, not just the one pid, so anything uvicorn itself spawned
+            # goes down too.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            proc.terminate()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             log("Backend did not exit in time; killing it")
-            proc.kill()
+            if sys.platform != "win32":
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                proc.kill()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
