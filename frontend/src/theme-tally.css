@@ -98,6 +98,26 @@
   --heat-3: color-mix(in oklab, var(--accent) 62%, var(--chrome));
   --heat-4: color-mix(in oklab, var(--accent) 81%, var(--chrome));
   --heat-5: var(--accent);
+
+  /*
+   * Series 1 and 3 are swapped from the house order.
+   *
+   * §8 says the six categorical colours were chosen to be told apart from each
+   * other *and from every accent in the family*, and it says never to use the
+   * accent as one of several series. At hue 255 Tally breaks that by accident:
+   * the house `--series-1` is #3F7BE8, which is hue 261 at the same lightness
+   * as our #3987E5 accent - 6 degrees apart, indistinguishable in a chart. So a
+   * two-series frame's first series read as the accent, and a single-series
+   * chart next to it read as series one.
+   *
+   * Swapping in the violet (hue 304, fifty degrees off) fixes it without
+   * touching the palette: the *set* of six is unchanged, so the colour-vision
+   * separation that was validated for it still holds, and only the order
+   * differs. Blue therefore appears only in a chart with three or more series,
+   * where it is third and no longer the one a reader pairs with the accent.
+   */
+  --series-1: #a96be8;
+  --series-3: #3f7be8;
 }
 
 /* ══ LIGHT, following the system ═══════════════════════════════════════════ */
@@ -113,6 +133,10 @@
     --heat-3: color-mix(in oklab, var(--accent) 56%, var(--chrome));
     --heat-4: color-mix(in oklab, var(--accent) 78%, var(--chrome));
     --heat-5: var(--accent);
+
+    /* The same swap as the dark block. See the note there. */
+    --series-1: #7742ae;
+    --series-3: #2a5ab4;
   }
 }
 
@@ -129,6 +153,10 @@
   --heat-3: color-mix(in oklab, var(--accent) 56%, var(--chrome));
   --heat-4: color-mix(in oklab, var(--accent) 78%, var(--chrome));
   --heat-5: var(--accent);
+
+  /* The same swap as the dark block. See the note there. */
+  --series-1: #7742ae;
+  --series-3: #2a5ab4;
 }
 
 /* ── Theme specimens ───────────────────────────────────────────────────────
