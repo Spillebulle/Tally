@@ -132,8 +132,6 @@ the server owner's account. The first account created is the administrator.
   or exported.
 - **No editing of metadata.** Titles, artwork and genres come from Plex and the
   metadata providers; Tally does not let you correct them.
-- **Continue watching can list one show more than once** when several episodes
-  of it are part-watched.
 - **No notifications.** Nothing emails, pushes or posts to Discord.
 - **The database is SQLite**, so Tally expects one instance at a time. There is
   no clustering and no Postgres option.
