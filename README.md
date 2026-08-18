@@ -107,6 +107,8 @@ open underneath, with the month still on screen.
 Days are counted in your own zone, so a film started at half past eleven belongs
 to that evening.
 
+<img src="docs/images/history-calendar.png" alt="A month of watching as a calendar: April 2026, each day with plays drawn as the poster of the last thing watched on it and the number of plays in its corner, with the empty days left plain." width="864">
+
 ## Anime, separated
 
 <img align="right" width="300" src="docs/images/anime.png" alt="Two rows of the anime grid: twelve posters, each with a small ANIME mark in its top corner and a green tick on the ones already watched.">
