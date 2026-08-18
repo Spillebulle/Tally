@@ -44,23 +44,35 @@ def to_card(
     item: MediaItem,
     state: UserMediaState | None = None,
     *,
+    show: MediaItem | None = None,
     show_title: str | None = None,
     on_watchlist: bool = False,
     watched_episodes: int | None = None,
     total_episodes: int | None = None,
 ) -> MediaCard:
+    """One row as a grid payload.
+
+    `show` is the episode's parent, when the caller has already loaded it. It
+    fills `show_title` and — the reason it exists — `show_poster_url`, because
+    an episode's own `thumb` on Plex is the **still from that episode**: a 16:9
+    frame, which a portrait card can only centre-crop. A page that draws plays
+    as artwork wants the series poster, and only the parent row knows it (it may
+    be an external TMDB URL rather than the proxy path `show_id` would imply).
+    Callers that only have the parent's title keep passing `show_title`.
+    """
     return MediaCard(
         id=item.id,
         media_type=item.media_type,
         title=item.title,
         year=item.year,
         poster_url=poster_for(item),
+        show_poster_url=poster_for(show) if show is not None else None,
         is_anime=item.is_anime,
         is_personal_media=item.is_personal_media,
         season_number=item.season_number,
         episode_number=item.episode_number,
         show_id=item.show_id,
-        show_title=show_title,
+        show_title=show_title or (show.title if show is not None else None),
         status=state.status if state else None,
         rating=state.rating if state else None,
         progress_percent=progress_percent(state),
@@ -176,6 +188,20 @@ async def states_for(
         )
     )
     return {state.media_item_id: state for state in result.scalars()}
+
+
+async def shows_for(db: AsyncSession, show_ids: list[int]) -> dict[int, MediaItem]:
+    """The parent rows for a batch of episodes, by id.
+
+    Whole rows rather than `show_titles_for`'s two columns, because a caller
+    drawing artwork needs the parent's `poster_url` as well as its title — see
+    `to_card`'s `show` argument.
+    """
+    ids = [i for i in show_ids if i]
+    if not ids:
+        return {}
+    result = await db.execute(select(MediaItem).where(MediaItem.id.in_(ids)))
+    return {show.id: show for show in result.scalars()}
 
 
 async def show_titles_for(db: AsyncSession, show_ids: list[int]) -> dict[int, str]:

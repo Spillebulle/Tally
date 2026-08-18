@@ -139,6 +139,22 @@ export function displaySubtitle(card: MediaCard): string | null {
   return card.year ? String(card.year) : null
 }
 
+/**
+ * The picture a card is recognised by.
+ *
+ * For an episode that is the *series'* poster, not the episode's own artwork -
+ * which on Plex is the still from that episode, a 16:9 frame a portrait card
+ * can only centre-crop. It is the same judgement `displayTitle` makes one line
+ * up: the thing on screen is the series, and the episode is what it says
+ * underneath.
+ *
+ * `show_poster_url` is only filled where an endpoint loaded the parent row, so
+ * everywhere else this is exactly `poster_url` and nothing changes.
+ */
+export function displayArtwork(card: MediaCard): string | null {
+  return card.show_poster_url ?? card.poster_url
+}
+
 /** Deterministic gradient for items with no poster, seeded by title. */
 export function posterFallbackGradient(seed: string): string {
   let hash = 0

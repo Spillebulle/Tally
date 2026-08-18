@@ -129,7 +129,7 @@ from ..schemas import (
     YearProfile,
 )
 from ..serializers import poster_for
-from ..timezones import resolve as resolve_timezone
+from ..timezones import zone_for
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -1893,13 +1893,11 @@ async def _rankings(
 def _zone_for(user: User, tz: str | None) -> tuple[tzinfo, str]:
     """The zone in force, and the name to report it under.
 
-    `?tz=` beats the stored preference, and an unloadable name falls back to
-    UTC rather than 500ing — so the response has to say which zone it actually
-    used, or a silent fallback looks like correct data in the wrong hours.
+    The rule itself lives in `timezones.zone_for`, because `/api/history/calendar`
+    buckets by local day for exactly the same reason this page does and a second
+    copy of "which zone won" is a second thing to keep in step.
     """
-    tz_name = tz or (user.preferences or {}).get("timezone")
-    zone = resolve_timezone(tz_name)
-    return zone, "UTC" if zone is UTC else str(tz_name)
+    return zone_for(user.preferences, tz)
 
 
 @router.get("", response_model=StatsOut)

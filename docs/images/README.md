@@ -13,12 +13,13 @@ rest are missing and the README has a place waiting for each.
 |---|---|---|---|
 | `banner.png` | The mark beside the wordmark, on the dark backdrop. 1354 x 461. | Centred, `width="560"`, in a `<picture>` with the light file below. | Present |
 | `banner-paper.png` | The same banner on the light backdrop. 1354 x 461. | The light half of that `<picture>`. | Present |
-| `dashboard.png` | The whole thing working: the shelf of what you are part-way through, recent plays, the sidebar and the header. | Full width, directly under the honesty note. | Missing |
-| `continue-watching.png` | The Continue watching shelf on its own, a few cards with episode progress on them. | `<img align="right" width="300">` beside the Continue watching section. | Missing |
-| `anime.png` | The anime grid, showing it as a section of its own rather than a filter. | `<img align="right" width="300">` beside the Anime section. | Missing |
-| `stats.png` | The statistics page: the activity heatmap and a chart or two beneath it. | `<img align="right" width="300">` beside the Stats section. | Missing |
-| `filters.png` | The filter bar with the disclosure open and two or three chips showing. | `<img align="right" width="300">` beside the Filters section. | Missing |
-| `settings-themes.png` | The Appearance pane: the theme cards, one custom theme among them, and the swatch editor beneath. | `<img align="right" width="300">` beside the Themes section. | Missing |
+| `dashboard.png` | The whole thing working: the shelf of what you are part-way through, recent plays, the sidebar and the header. | Full width, directly under the honesty note. | Present |
+| `continue-watching.png` | The Continue watching shelf on its own, a few cards with episode progress on them. | `<img align="right" width="300">` beside the Continue watching section. | Present |
+| `anime.png` | The anime grid, showing it as a section of its own rather than a filter. | `<img align="right" width="300">` beside the Anime section. | Present |
+| `stats.png` | The statistics page: the activity heatmap and a chart or two beneath it. | `<img align="right" width="300">` beside the Stats section. | Present |
+| `filters.png` | The filter bar with the disclosure open and two or three chips showing. | `<img align="right" width="300">` beside the Filters section. | Present |
+| `settings-themes.png` | The Appearance pane: the theme cards, one custom theme among them, and the swatch editor beneath. | `<img align="right" width="300">` beside the Themes section. | Present, without a custom theme: the instance they were taken from has none, and one cannot be invented for a picture |
+| `history-calendar.png` | The month calendar: a poster per day and the play counts on them. | `<img align="right" width="300">` beside the History section, which currently has none. | Missing |
 
 Every one of them needs alt text that names what is in it ("The Continue
 watching shelf: four cards, each with a progress bar across the poster"), never
@@ -52,6 +53,26 @@ committed as documentation.
 
 So these files are taken from a **real instance with a real library**, and the
 harness stays what it is for.
+
+## Why `history-calendar.png` is still missing
+
+The same rule, one step further on. The three History views arrived in 0.6.0 and
+the instance the other pictures came from was still running 0.5.0, so the
+calendar's endpoint answered 404 and the poster grid drew episodes as their own
+stills rather than the series poster - which is the very thing 0.6.0 fixed. A
+picture of a feature has to be a picture of the version that has it. Take it
+once the instance is updated.
+
+## Two things that spoil a crop
+
+* **A `position: fixed` bar is painted once, where it sits in the viewport.** A
+  full-page screenshot cropped further down the page therefore has the status
+  bar baked across the middle of it. Hide fixed elements before a module crop -
+  they are not part of the module.
+* **A poster wall is a big PNG.** Two rows of the anime grid came out at 1.1 MB.
+  `magick in.png -strip -colors 256 -define png:compression-level=9 out.png`
+  brought it to 310 KB with no banding a reader would see at 300px wide. Check
+  the result rather than assuming; quantisation is visible on a gradient.
 
 ## Taking them from a real instance
 

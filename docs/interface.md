@@ -129,7 +129,7 @@ the avatar. Tally's numbers are the web column:
 
 | Token | Width | Where in Tally |
 |---|---|---|
-| `w-art-row` | 48 | Landscape only. Tally has no landscape still for a card, so **nothing uses it** |
+| `w-art-row` | 48 | A picture inline in a list row. Landscape where there is one; Tally has none, so History's diary spends it on **height** and gets a 32 x 48 poster |
 | `w-art-tile` | 120 | A picture beside text: Continue watching, the Discover picker, the hero on a phone |
 | `w-art-card` | 180 | The browse card. Every grid and every rail |
 | `w-art-hero` | 320 | The item page's poster. One per page |
@@ -153,11 +153,29 @@ Shape is `aspect-art` (portrait 2/3, from `--art-ratio`) or `aspect-wide`
   which is what stops the standard size becoming one window-wide poster on a
   phone - and the reason the control hides itself below `sm`, where all three
   sizes resolve to the two columns there is room for.
-- **A picture that cannot have a rung does not appear.** Portrait art never
-  goes in a text row, because a row with a picture is sized *by* the picture.
-  That is why the History diary and the Stats leaderboards have no thumbnail:
-  they carried posters at 14 x 20 and 24 x 36, three rungs under the bottom of
-  the ladder and, in the guide's words about faces, a smudge doing no work.
+- **A picture in a row gets the row's rung, and the row is sized by it.** The
+  History diary and the Stats leaderboards carried posters at 14 x 20 and
+  24 x 36 - three rungs under the bottom of the ladder and, in the guide's
+  words about faces, a smudge doing no work. The lesson is not "no picture", it
+  is `--art-row`: 48, the one width meant to sit inline in a list. With no
+  landscape still to spend it on, History's row spends it on height and comes
+  out 32 x 48, which grows the row from `h-row` (32) to 48 - a picture is never
+  squeezed into a row built for text. The Stats leaderboards still carry none,
+  because those rows are ranked *figures* and a picture would be decoration in
+  a column of numbers.
+- **A picture that cannot have a rung still does not appear.** Below about
+  500px a calendar cell is 48px wide, so `MonthCalendar` drops the artwork and
+  keeps the number and the count. Same rule, other direction.
+- **A seven-column grid is capped, not reflowed.** `.month-grid` is the one
+  grid that cannot choose its column count, so the width has to give instead:
+  it is capped at seven `--art-tile` columns plus their gaps, which is what
+  stops a wide page stretching a `1fr` track into a fifth width nobody
+  sanctioned. Everything else uses `.poster-grid`, which reflows.
+- **An episode is drawn as its series.** `displayArtwork` prefers
+  `show_poster_url`, the same judgement `displayTitle` makes one line above it:
+  an episode's own artwork on Plex is the still from that episode, a 16:9 frame
+  a portrait card can only centre-crop. The field is only filled where an
+  endpoint loaded the parent row, so elsewhere nothing changes.
 - **The art card carries its label on the art**, never in a caption strip
   underneath. `.art-card` and `.art-label` in `index.css` own the whole
   behaviour, including that the label is *visible by default* and hidden only

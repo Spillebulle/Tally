@@ -1,7 +1,13 @@
 import { Link } from 'react-router-dom'
 import { Check, Sparkles } from 'lucide-react'
 import type { MediaCard } from '@/lib/types'
-import { cn, displaySubtitle, displayTitle, posterFallbackGradient } from '@/lib/utils'
+import {
+  cn,
+  displayArtwork,
+  displaySubtitle,
+  displayTitle,
+  posterFallbackGradient,
+} from '@/lib/utils'
 import { cardSizeStyle, type CardSize } from '@/lib/card-size'
 import { ErrorState, Spinner } from './ui'
 
@@ -118,6 +124,15 @@ export function ArtMark({ children, title }: { children: React.ReactNode; title?
 interface PosterProps {
   card: MediaCard
   showProgress?: boolean
+  /**
+   * The watched tick in the top-right corner.
+   *
+   * Off where every card on the page is watched by definition - a log of plays
+   * - because a mark that is always on says nothing and it sits exactly where
+   * the page's own corner control does. Two things in one corner is one thing
+   * covering another.
+   */
+  showWatched?: boolean
   onQuickWatch?: (card: MediaCard) => void
   /** True while this card's quick-watch is in flight. */
   quickWatchPending?: boolean
@@ -159,6 +174,7 @@ interface PosterProps {
 export function Poster({
   card,
   showProgress = true,
+  showWatched = true,
   onQuickWatch,
   quickWatchPending = false,
   selected = false,
@@ -205,7 +221,10 @@ export function Poster({
       )}
     >
       <Artwork
-        src={card.poster_url}
+        // The series' poster for an episode, where the endpoint sent one: the
+        // card already says the series' *name*, and an episode still cropped to
+        // portrait is a face cut in half. See `displayArtwork`.
+        src={displayArtwork(card)}
         title={title}
         className="absolute inset-0 rounded-none"
       >
@@ -225,7 +244,7 @@ export function Poster({
           {marks}
         </div>
 
-        {isComplete && (
+        {isComplete && showWatched && (
           <span
             className="pointer-events-none absolute right-2 top-2 grid h-5 w-5 place-items-center
                        rounded-full bg-good text-art"

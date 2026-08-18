@@ -21,10 +21,12 @@ saves everything in one SQLite file you own
   <img src="https://img.shields.io/docker/pulls/spillebulle/tally?style=flat-square" alt="Docker pulls">
 </p>
 
-> Tally is at 0.4.1 and is a young project. The sync engine, the API and the
-> metadata handling carry 573 tests and are the parts least likely to surprise
+> Tally is at 0.6.0 and is a young project. The sync engine, the API and the
+> metadata handling carry 586 tests and are the parts least likely to surprise
 > you; the interface was rebuilt in 0.4.0 and is the newest thing here.
 > Read [what is not there yet](#what-is-not-there-yet) before you depend on it.
+
+<img src="docs/images/dashboard.png" alt="Tally's dashboard: six counters across the top for plays, screen time, films, episodes, anime plays and current streak, and under them the Continue watching shelf with six part-watched episodes, each a poster beside its title and a progress bar. The library navigation runs down the left." width="100%">
 
 ## Install
 
@@ -49,8 +51,8 @@ The first account to sign in becomes the administrator.
 
 | Where | Image |
 |---|---|
-| GitHub Container Registry | `ghcr.io/spillebulle/tally:0.4.1` |
-| Docker Hub | `spillebulle/tally:0.4.1` |
+| GitHub Container Registry | `ghcr.io/spillebulle/tally:0.6.0` |
+| Docker Hub | `spillebulle/tally:0.6.0` |
 | Build it yourself | `docker build -t tally .` |
 
 Both registries serve the same image for `linux/amd64` and `linux/arm64`.
@@ -82,13 +84,32 @@ pull from Plex does not put it back. How the engine decides is in
 
 ## Continue watching
 
+<img align="right" width="300" src="docs/images/continue-watching.png" alt="The Continue watching shelf: six cards, each a poster beside an episode title, a progress bar showing how far in you are, and how long ago you watched it.">
+
 The dashboard picks up mid-episode playback and the next unwatched episode of
 anything you have started. Plex drops an item off On Deck after a while, and
 Tally reads that window from your server so a show you abandoned three years ago
 does not sit at the top forever. You can set your own window instead, or turn
 the cut-off off entirely, and nothing is ever deleted either way.
 
+<br clear="all">
+
+## History, three ways
+
+Your watch log reads as a **list**, a day at a time, every play with its poster,
+where it came from and what it was played on. The same days as a wall of
+**posters**, at whichever of the three sizes you like. Or a **calendar**, a
+month at a time, one poster per day and the number of plays on it, which is the
+only one of the three that shows the shape of a month: the week off, the three
+nights in a row, the Sunday that took six episodes. Pick a day and its plays
+open underneath, with the month still on screen.
+
+Days are counted in your own zone, so a film started at half past eleven belongs
+to that evening.
+
 ## Anime, separated
+
+<img align="right" width="300" src="docs/images/anime.png" alt="Two rows of the anime grid: twelve posters, each with a small ANIME mark in its top corner and a green tick on the ones already watched.">
 
 Anime gets its own section, and "is it animated?" is not the question. Tally
 scores your library layout, the metadata agent on the item, its genres, its
@@ -96,7 +117,11 @@ country of origin and a MyAnimeList lookup, so a Western animated film is not
 filed as anime for being a cartoon. Your per-library override always wins.
 The signals and their weights are in [`docs/anime.md`](docs/anime.md).
 
+<br clear="all">
+
 ## Stats you can click
+
+<img align="right" width="300" src="docs/images/stats.png" alt="The watch activity heatmap: a year of days shaded by how much was watched, the busiest days ranked underneath it, and a bar chart of plays by month below that.">
 
 Activity by day and hour, streaks and binges, rewatches, show completion and
 drop-off, watchlist conversion, and how your ratings compare with the crowd,
@@ -104,20 +129,30 @@ over any date range and against the period before it. Every bar, heatmap day,
 decade and studio is a link into the plays behind it with the filters already
 applied.
 
+<br clear="all">
+
 ## Filters, and views worth keeping
+
+<img align="right" width="300" src="docs/images/filters.png" alt="The filter bar with four chips reading Genre Crime, Genre Drama, Your rating Rated 7+ and On Plex Yes, and the Filters panel open underneath in three groups: Title, You and Library.">
 
 Multi-select and exclusion on genres, ranges for year, runtime, rating and
 dates, cast and crew, library and server, on the grid, the watchlist and your
 history alike. The whole query lives in the URL, so a narrowed page is a link
 you can send. Save a view and it comes back.
 
+<br clear="all">
+
 ## Themes
+
+<img align="right" width="300" src="docs/images/settings-themes.png" alt="Settings, Appearance: the Dark, Light and Follow the system theme cards with a New theme tile beside them, and the swatch editor for the Graphite theme underneath showing its surface and line colours with their hex values.">
 
 Two themes ship, dark and light, and the interface can also follow the device.
 Beyond that you can make your own: Tally reads and writes `.umbertheme` files,
 the same flat table of colours my other applications use, so a theme made in one
 opens in the others unchanged. Import, export and a swatch editor are under
 **Settings → Appearance**, and the format is in [`docs/themes.md`](docs/themes.md).
+
+<br clear="all">
 
 ## Multi-user
 

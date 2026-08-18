@@ -45,7 +45,7 @@ VENV_PYTHON = BACKEND_DIR / ".venv" / "Scripts" / "python.exe"
 
 ALL_PAGES = [
     "login", "dashboard", "movies", "shows", "anime", "watchlist",
-    "history", "stats", "settings", "item",
+    "history", "history-posters", "history-calendar", "history-day", "stats", "settings", "item",
 ]
 
 
