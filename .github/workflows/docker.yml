@@ -99,7 +99,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=Tally
             org.opencontainers.image.description=Self-hosted watch tracker with two-way Plex sync
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=GPL-3.0-or-later
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -116,8 +116,14 @@ jobs:
           provenance: false
 
       # Docker Hub shows an empty page until something pushes a description, so
-      # mirror README.md onto the listing. Deliberately non-fatal: a description
-      # that fails to update must not fail a release whose images went out fine.
+      # push one. It is `docs/dockerhub.md` rather than README.md, because the
+      # two renderers are not the same: Docker Hub renders Markdown and not raw
+      # HTML, and the README's banner is a <picture> element, which is what
+      # gives GitHub its dark and light swap. `enable-url-completion` rewrites
+      # Markdown links and images only, so the README's relative HTML paths
+      # arrived here untouched and resolved to nothing. Deliberately non-fatal:
+      # a description that fails to update must not fail a release whose images
+      # went out fine.
       - name: Update the Docker Hub description
         id: hub_description
         if: env.DOCKERHUB_USERNAME != '' && startsWith(github.ref, 'refs/tags/v')
@@ -127,7 +133,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ secrets.DOCKERHUB_USERNAME }}/tally
-          readme-filepath: ./README.md
+          readme-filepath: ./docs/dockerhub.md
           short-description: "Self-hosted watch tracker with two-way Plex sync"
           enable-url-completion: true
 

@@ -197,7 +197,7 @@ function SidebarFooter() {
             <span className="figure">v{data.version}</span> ·{' '}
           </>
         )}
-        Apache-2.0
+        GPL-3.0
       </span>
       <span className="flex items-center gap-1">
         {links.map(({ href, label, icon: Icon }) =>
