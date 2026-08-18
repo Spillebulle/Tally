@@ -13,18 +13,26 @@ export function formatRuntime(minutes: number | null | undefined): string | null
   return mins ? `${hours}h ${mins}m` : `${hours}h`
 }
 
-/** Long-form total for the stats page: "12 days, 4 hours". */
+/**
+ * A total of watched time: "12d 4h", "5h 19m", "24m".
+ *
+ * `formatRuntime` with a day above the hour, and abbreviated in **every**
+ * branch. It used to spell the large units out and abbreviate the small ones,
+ * so one tile read "23 days, 14 hours" and its neighbour read "5 hours, 19m" —
+ * two unit styles inside one figure, and the spelled-out form does not fit
+ * anyway: this is a 24px mono value in a tile whose grid track drops to 177px
+ * at 390px wide, which is about eight characters. Every call site is such a
+ * figure or an `aria-label` naming one, so the label and the number it
+ * describes now read the same.
+ */
 export function formatWatchTime(minutes: number): string {
-  if (minutes <= 0) return '0 minutes'
+  if (minutes <= 0) return '0m'
   const days = Math.floor(minutes / 1440)
   const hours = Math.floor((minutes % 1440) / 60)
-  if (days >= 1) {
-    const dayPart = `${days} ${days === 1 ? 'day' : 'days'}`
-    return hours ? `${dayPart}, ${hours} ${hours === 1 ? 'hour' : 'hours'}` : dayPart
-  }
+  if (days >= 1) return hours ? `${days}d ${hours}h` : `${days}d`
   const mins = minutes % 60
-  if (hours) return `${hours} ${hours === 1 ? 'hour' : 'hours'}, ${mins}m`
-  return `${mins} minutes`
+  if (hours) return mins ? `${hours}h ${mins}m` : `${hours}h`
+  return `${mins}m`
 }
 
 export function compactNumber(value: number): string {

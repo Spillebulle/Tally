@@ -474,6 +474,159 @@ async def test_continue_watching_lists_a_show_once(authed_client, db):
     assert show_titles.count("Slow Horses") == 1
 
 
+async def test_continue_watching_folds_a_shows_episodes_into_one_row(authed_client, db):
+    """Three episodes of one series left mid-play are one card, not three.
+
+    The shelf answers "what am I in the middle of?" and a series is a single
+    answer, so it gets one row: the episode it was left in most recently. Films
+    are each their own answer and are left alone.
+    """
+    from datetime import timedelta
+
+    from app.models import User, UserMediaState, WatchStatus, utcnow
+
+    user = (await db.execute(select(User))).scalars().first()
+
+    show = MediaItem(guid_key="tmdb:show:2", media_type=MediaType.SHOW, title="The Bear")
+    films = [
+        MediaItem(guid_key="tmdb:movie:10", media_type=MediaType.MOVIE, title="Heat"),
+        MediaItem(guid_key="tmdb:movie:11", media_type=MediaType.MOVIE, title="Sicario"),
+    ]
+    db.add_all([show, *films])
+    await db.flush()
+
+    episodes = [
+        MediaItem(
+            guid_key=f"tmdb:show:2/s1e{n}",
+            media_type=MediaType.EPISODE,
+            title=f"Episode {n}",
+            show_id=show.id,
+            season_number=1,
+            episode_number=n,
+        )
+        # The fourth has no state at all, so the series also has an "up next"
+        # to offer: a show that is both part-watched and has one must still
+        # come back once.
+        for n in (1, 2, 3, 4)
+    ]
+    db.add_all(episodes)
+    await db.flush()
+
+    now = utcnow()
+    part_watched = {"progress_ms": 300_000, "duration_ms": 2_700_000}
+    db.add_all(
+        [
+            # Episode 2 is the one left most recently, and play order is
+            # deliberately not episode order: the row that stands for the
+            # series is the last one touched, not the highest numbered.
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=episodes[0].id,
+                last_watched_at=now - timedelta(days=3),
+                **part_watched,
+            ),
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=episodes[1].id,
+                last_watched_at=now - timedelta(hours=1),
+                **part_watched,
+            ),
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=episodes[2].id,
+                last_watched_at=now - timedelta(days=2),
+                **part_watched,
+            ),
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=show.id,
+                status=WatchStatus.WATCHING,
+                last_watched_at=now - timedelta(hours=1),
+            ),
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=films[0].id,
+                last_watched_at=now - timedelta(days=1),
+                **part_watched,
+            ),
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=films[1].id,
+                last_watched_at=now - timedelta(days=4),
+                **part_watched,
+            ),
+        ]
+    )
+    await db.commit()
+
+    entries = (await authed_client.get("/api/media/continue-watching")).json()
+    # One row for the series, in its place in the ordering, and both films.
+    assert [entry["item"]["title"] for entry in entries] == [
+        "Episode 2",
+        "Heat",
+        "Sicario",
+    ]
+    assert entries[0]["item"]["show_title"] == "The Bear"
+
+
+async def test_continue_watching_fills_its_limit_with_distinct_things(authed_client, db):
+    """`limit` counts answers, so folded episodes must not eat the shelf."""
+    from datetime import timedelta
+
+    from app.models import User, UserMediaState, utcnow
+
+    user = (await db.execute(select(User))).scalars().first()
+
+    show = MediaItem(guid_key="tmdb:show:3", media_type=MediaType.SHOW, title="Andor")
+    film = MediaItem(guid_key="tmdb:movie:12", media_type=MediaType.MOVIE, title="Arrival")
+    db.add_all([show, film])
+    await db.flush()
+
+    episodes = [
+        MediaItem(
+            guid_key=f"tmdb:show:3/s1e{n}",
+            media_type=MediaType.EPISODE,
+            title=f"Episode {n}",
+            show_id=show.id,
+            season_number=1,
+            episode_number=n,
+        )
+        for n in (1, 2, 3)
+    ]
+    db.add_all(episodes)
+    await db.flush()
+
+    now = utcnow()
+    part_watched = {"progress_ms": 300_000, "duration_ms": 2_700_000}
+    db.add_all(
+        [
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=episode.id,
+                last_watched_at=now - timedelta(hours=hours),
+                **part_watched,
+            )
+            for episode, hours in zip(episodes, (3, 2, 1), strict=True)
+        ]
+        + [
+            UserMediaState(
+                user_id=user.id,
+                media_item_id=film.id,
+                last_watched_at=now - timedelta(hours=4),
+                **part_watched,
+            )
+        ]
+    )
+    await db.commit()
+
+    # Two slots, and three of the four part-watched rows are the same series.
+    # Asking for two things has to answer with two *different* things.
+    entries = (
+        await authed_client.get("/api/media/continue-watching", params={"limit": 2})
+    ).json()
+    assert [entry["item"]["title"] for entry in entries] == ["Episode 3", "Arrival"]
+
+
 async def test_continue_watching_ages_out_past_the_on_deck_window(authed_client, db):
     """Plex's onDeckWindow decides what is too old to still be "continuing"."""
     from datetime import timedelta

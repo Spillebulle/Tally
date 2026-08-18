@@ -197,6 +197,12 @@ async def continue_watching(
 ) -> list[ContinueWatchingItem]:
     """Partially-watched items plus the next unwatched episode of started shows.
 
+    **One row per series, whatever it took to get there.** A film is its own
+    answer, so every part-watched film gets a card; a series is a single answer
+    to "what am I in the middle of?", so it gets exactly one — the episode it
+    was left in most recently — no matter how many of its episodes are sitting
+    part-watched or whether it also has an "up next" to offer.
+
     Anything last touched before the On Deck window falls off, the way it does
     on Plex — see `services/on_deck.py`.
     """
@@ -222,18 +228,29 @@ async def continue_watching(
             fresh_enough,
         )
         .order_by(UserMediaState.last_watched_at.desc().nulls_last())
-        .limit(limit)
+        # Over-fetched, because several rows can collapse into one card: every
+        # part-watched episode of a series folds into a single entry below, and
+        # anything nearly finished is dropped. Asking for exactly `limit` rows
+        # would then answer with fewer than `limit` distinct things whenever
+        # either happened — a show left mid-episode three times used to fill
+        # three of the shelf's slots, and at the limit it filled the shelf.
+        .limit(limit * 4)
     )
     rows = result.all()
     show_ids = [item.show_id for _, item in rows if item.show_id]
     show_titles = await show_titles_for(db, show_ids)
 
     out: list[ContinueWatchingItem] = []
-    # Shows already represented by a part-watched episode. Adding an "up next"
-    # card for them too would list the same series twice.
+    # Shows already represented, whether by a part-watched episode below or by
+    # an "up next" card further down. A series is one answer to "what am I in
+    # the middle of?", so one row stands for it: the episode it was left in
+    # most recently. The rows arrive newest first, so that is simply the first
+    # one seen. Films are untouched — each film is its own answer.
     covered_show_ids: set[int] = set()
 
     for state, item in rows:
+        if len(out) >= limit:
+            break
         percent = progress_percent(state) or 0.0
         # Anything essentially finished belongs in history, not here. The
         # cut-off is shared with the `in_progress` browse filter — see
@@ -242,6 +259,8 @@ async def continue_watching(
         if percent >= NEARLY_FINISHED_PERCENT:
             continue
         if item.show_id:
+            if item.show_id in covered_show_ids:
+                continue
             covered_show_ids.add(item.show_id)
         out.append(
             ContinueWatchingItem(
