@@ -7,6 +7,7 @@ import type { AnimeFilter, MediaCard, PersonalFilter } from '@/lib/types'
 import { compactNumber } from '@/lib/utils'
 import { certificateLabel } from '@/lib/certificates'
 import { namesOf, SORTS, useBrowseFilters } from '@/lib/browse-filters'
+import { CardSizeControl, useCardSize } from '@/lib/card-size'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { PosterGrid } from '@/components/Poster'
@@ -67,6 +68,18 @@ export function Browse({ mode }: BrowseProps) {
   const requestedKind = params.get('kind')
   const animeKind =
     requestedKind === 'movie' || requestedKind === 'show' ? requestedKind : 'all'
+
+  /*
+   * How big the posters are, remembered between visits.
+   *
+   * Deliberately *not* in the URL beside the filters. The rule that the whole
+   * browse query lives there is about anything that changes which rows you are
+   * looking at, so that a navigation cannot lose it and a link can carry it; a
+   * poster size changes none of that, and putting it in the query would make
+   * every shared link impose the sender's density and every filter change push
+   * a history entry for a redraw. See `lib/card-size.tsx`.
+   */
+  const { size: cardSize, setSize: setCardSize } = useCardSize()
 
   // The offset lives in the URL beside the filters, so a filter change and the
   // reset to page one are one navigation rather than a render that fires a
@@ -197,6 +210,7 @@ export function Browse({ mode }: BrowseProps) {
           servers: places.data?.servers ?? [],
         }}
         busy={isFetching && !isLoading}
+        actions={<CardSizeControl value={cardSize} onChange={setCardSize} />}
       />
 
       {/* A failed request is not an empty list, so the error branch comes
@@ -239,6 +253,7 @@ export function Browse({ mode }: BrowseProps) {
         <PosterGrid
           cards={data?.items ?? []}
           loading={isLoading}
+          size={cardSize}
           skeletonCount={PAGE_SIZE / 3}
           onQuickWatch={(card) => markWatched.mutate(card)}
           quickWatchPendingId={markWatched.isPending ? markWatched.variables.id : null}

@@ -41,7 +41,6 @@ import { Link } from 'react-router-dom'
 import type { StatCount } from '@/lib/types'
 import { cn, compactNumber, localDateKey } from '@/lib/utils'
 import { Tile } from './ui'
-import { Artwork } from './Poster'
 
 /* ── Shared pieces ───────────────────────────────────────────────────────── */
 
@@ -1635,7 +1634,6 @@ export interface RankedRow {
   title: string
   /** Second line: an episode's series, a film's year. */
   subtitle?: string | null
-  posterUrl: string | null
   value: number
   /**
    * What to print in place of the bare count, and what to say instead of
@@ -1661,11 +1659,18 @@ export interface RankedRow {
  * and wrong for a title: "The Lord of the Rings: The Fellowship of the Ring"
  * truncates to three words, there is nowhere to put the year, and nothing to
  * tell two episodes of the same series apart. These rows are also a route to a
- * *title* rather than to a filtered view, so the poster is the thing a reader
- * actually recognises them by.
+ * *title* rather than to a filtered view, so the row gives the name room.
  *
  * The bar is kept, as a 3px rail behind the count, so the ranking is still a
  * shape and not only an ordering.
+ *
+ * **No poster.** It carried one at 24 x 36, which is below the bottom of the
+ * artwork ladder (§7.21) - and the ladder's answer for a picture that will not
+ * fit a row is not a smaller picture, it is no picture: a rail of cards where
+ * the pictures are the point, and a list where the ranking is. A ten-row list
+ * at `--art-tile` would be nearly two thousand pixels tall, and the Stats page
+ * carries several of these. The rank, the title, the year and the figure are
+ * what a ranking is made of; the artwork is one click away, on the title.
  */
 export function RankedList({
   rows,
@@ -1692,12 +1697,6 @@ export function RankedList({
         const body = (
           <>
             <span className="figure w-4 shrink-0 text-right text-tiny text-dim">{index + 1}</span>
-            <Artwork
-              src={row.posterUrl}
-              title={row.title}
-              showTitle={false}
-              className="h-9 w-6 shrink-0 rounded-[3px]"
-            />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-control text-strong">{row.title}</span>
               {row.subtitle && (

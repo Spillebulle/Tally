@@ -237,10 +237,10 @@ export function ItemDetail() {
       <div className="-mt-strip">
         {/* Same geometry as the hero it stands in for, so the page does not
             jump sideways or shorten when the item arrives. */}
-        <Skeleton className="full-bleed h-[140px] rounded-none sm:h-[170px] lg:h-[200px]" />
-        <div className="relative -mt-16 flex gap-strip sm:-mt-24 sm:gap-4">
-          <Skeleton className="aspect-[2/3] w-[120px] shrink-0 rounded-card sm:w-[160px]" />
-          <div className="min-w-0 flex-1 space-y-2 pt-5 sm:pt-12">
+        <Skeleton className="full-bleed h-[200px] rounded-none sm:h-[240px] lg:h-[280px]" />
+        <div className="relative -mt-20 flex gap-strip sm:-mt-28 sm:gap-4">
+          <Skeleton className="aspect-art w-art-tile shrink-0 rounded-art sm:w-art-card lg:w-art-hero" />
+          <div className="min-w-0 flex-1 space-y-2 pt-8 sm:pt-16">
             <Skeleton className="h-4 w-1/3" />
             <Skeleton className="h-3 w-1/4" />
             <Skeleton className="h-button w-40" />
@@ -269,7 +269,7 @@ export function ItemDetail() {
           description="It may have been removed from your library. Go back and pick another one."
           action={
             <button type="button" onClick={() => navigate(-1)} className="btn-secondary">
-              <ChevronLeft size={16} aria-hidden="true" />
+              <ChevronLeft className="size-icon" aria-hidden="true" />
               Go back
             </button>
           }
@@ -378,19 +378,24 @@ export function ItemDetail() {
       {/* The detail hero (§10): a backdrop band, the picture flush at the left,
           the title, the facts as a two-column key/value list, one primary
           button. */}
+      {/* 7.22: the backdrop runs the full width of the content area, edge to
+          edge, and is 200-280px tall at web scale. It was 140-200, which the
+          long ramp below turns into almost nothing: a fade that is transparent
+          for its first 46% needs the height to be worth loading. */}
       <Artwork
         src={item.backdrop_url}
         title={item.title}
         showTitle={false}
         imgClassName="object-top"
-        className="full-bleed h-[140px] sm:h-[170px] lg:h-[200px]"
+        className="full-bleed h-[200px] rounded-none sm:h-[240px] lg:h-[280px]"
       >
-        {/* Scrim so what follows stays readable over any artwork, eased out
-            over the band's whole height so the artwork does not stop at a
-            line. See `.hero-scrim`. The badges and the title sit in its lower
-            reaches, which is what all those stops are for; the band was 240px
-            of pure decoration while everything began at its bottom edge. */}
-        <div className="hero-scrim absolute inset-0" />
+        {/* The ramp that joins the picture to the page, and only that: the top
+            46% of the picture is untouched and the ground arrives at the
+            bottom edge (`.fade-backdrop`, 7.22). The old one was solid by its
+            bottom seventh, which paid the whole cost of loading a picture for
+            almost none of the effect. Legibility is a separate job and a
+            separate scrim - see the Back button, which carries its own. */}
+        <div className="fade-backdrop absolute inset-0" />
 
         {/* A mark over user content, so it takes a derived ink (white on a dark
             scrim) rather than a theme token (§2.6). */}
@@ -398,16 +403,21 @@ export function ItemDetail() {
           type="button"
           onClick={() => navigate(-1)}
           className="absolute left-strip top-strip inline-flex h-button items-center gap-1.5
-                     rounded-ctl bg-black/50 px-2.5 text-control text-white
-                     transition-colors duration-hover ease-ease hover:bg-black/70"
+                     rounded-ctl bg-scrim-flat px-2.5 text-control text-art
+                     transition-opacity duration-hover ease-ease hover:opacity-80"
         >
-          <ChevronLeft size={16} aria-hidden="true" />
+          <ChevronLeft className="size-icon" aria-hidden="true" />
           Back
         </button>
       </Artwork>
 
-      <div className="relative -mt-16 flex gap-strip sm:-mt-24 sm:gap-4">
-        <div className="w-[120px] shrink-0 sm:w-[160px]">
+      <div className="relative -mt-20 flex gap-strip sm:-mt-28 sm:gap-4">
+        {/* `--art-hero`, the ladder's top rung and the one big piece on the
+            page (7.21). It overlaps the backdrop rather than starting below
+            it, so the two read as one header (7.22). It climbs the ladder
+            with the viewport rather than jumping straight to 320: a hero the
+            width of a phone is the "bigger component" 6.4 forbids. */}
+        <div className="w-art-tile shrink-0 sm:w-art-card lg:w-art-hero">
           {/* The placeholder is a layer *underneath* the artwork rather than an
               else-branch: whether a poster exists is only known once the proxy
               answers, and a 404 simply reveals what is already drawn. */}
@@ -415,7 +425,7 @@ export function ItemDetail() {
             src={item.poster_url}
             title={item.title}
             showTitle={false}
-            className="aspect-[2/3] rounded-card border border-line"
+            className="aspect-art"
           />
         </div>
 
@@ -528,9 +538,9 @@ export function ItemDetail() {
                 {watchPending ? (
                   <Spinner />
                 ) : watched ? (
-                  <X size={16} aria-hidden="true" />
+                  <X className="size-icon" aria-hidden="true" />
                 ) : (
-                  <Check size={16} aria-hidden="true" />
+                  <Check className="size-icon" aria-hidden="true" />
                 )}
                 {watched ? 'Mark unwatched' : 'Mark watched'}
               </button>
@@ -555,7 +565,7 @@ export function ItemDetail() {
                 <Spinner />
               ) : (
                 <Bookmark
-                  size={16}
+                  className="size-icon"
                   fill={item.on_watchlist ? 'currentColor' : 'none'}
                   aria-hidden="true"
                 />
@@ -572,9 +582,8 @@ export function ItemDetail() {
               aria-pressed={Boolean(item.state?.is_favorite)}
             >
               <Heart
-                size={16}
                 fill={item.state?.is_favorite ? 'currentColor' : 'none'}
-                className={item.state?.is_favorite ? 'text-strong' : undefined}
+                className={cn('size-icon', item.state?.is_favorite && 'text-strong')}
                 aria-hidden="true"
               />
             </button>
@@ -898,8 +907,8 @@ function CastPanel({
       {loading ? (
         <ul className="p-strip">
           {Array.from({ length: 6 }, (_, index) => (
-            <li key={index} className="flex h-row items-center gap-2">
-              <Skeleton className="h-5 w-5 rounded-full" />
+            <li key={index} className="flex items-center gap-2 py-1">
+              <Skeleton className="h-avatar w-avatar rounded-full" />
               <Skeleton className="h-2.5 w-40" />
             </li>
           ))}
@@ -907,9 +916,12 @@ function CastPanel({
       ) : (
         <ul className="max-h-[286px] overflow-y-auto">
           {cast.map((person) => (
+            // Sized by the picture, not squeezed into `h-row`: a face at 20px
+            // is a smudge doing no work, and `--avatar` is the ladder's floor
+            // for one (7.21). The row is the avatar plus 8.
             <li
               key={person.person_id}
-              className="flex h-row items-center gap-2 border-b border-line-soft px-strip
+              className="flex items-center gap-2 border-b border-line-soft px-strip py-1
                          last:border-b-0"
             >
               <Artwork
@@ -917,7 +929,7 @@ function CastPanel({
                 title={person.name}
                 showTitle={false}
                 imgClassName="object-top"
-                className="h-5 w-5 shrink-0 rounded-full"
+                className="h-avatar w-avatar shrink-0 rounded-full"
               />
               <span className="min-w-0 flex-1 truncate text-control text-fg">{person.name}</span>
               {person.character && (
@@ -1030,10 +1042,9 @@ function SeasonsPanel({
                     aria-expanded={isOpen}
                   >
                     <ChevronDown
-                      size={16}
                       aria-hidden="true"
                       className={cn(
-                        'shrink-0 transition-transform duration-hover ease-ease',
+                        'size-icon shrink-0 transition-transform duration-hover ease-ease',
                         isOpen ? 'text-strong' : '-rotate-90 text-muted',
                       )}
                     />
@@ -1047,7 +1058,7 @@ function SeasonsPanel({
                       )}
                     </span>
                     {done && (
-                      <Check size={16} className="shrink-0 text-good" aria-label="Fully watched" />
+                      <Check className="size-icon shrink-0 text-good" aria-label="Fully watched" />
                     )}
                   </button>
                   {season.total_episodes != null && (
@@ -1070,7 +1081,7 @@ function SeasonsPanel({
                     {markSeasonPending === number ? (
                       <Spinner className="text-tiny" />
                     ) : (
-                      <ListChecks size={16} aria-hidden="true" />
+                      <ListChecks className="size-icon" aria-hidden="true" />
                     )}
                   </button>
                 </div>
@@ -1281,7 +1292,7 @@ function ExternalLinks({
                          hover:text-strong"
             >
               <span className="min-w-0 flex-1 truncate">{link.label}</span>
-              <ExternalLink size={16} className="shrink-0 text-muted" aria-hidden="true" />
+              <ExternalLink className="size-icon shrink-0 text-muted" aria-hidden="true" />
             </a>
           </li>
         ))}

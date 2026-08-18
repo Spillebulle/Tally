@@ -780,7 +780,40 @@ src/index.css         the painted controls, as component classes.
 scripts/check-design.mjs   the rules tsc cannot see. `npm run check:design`.
 ```
 
-Four things about it are worth knowing before they cost an hour:
+Two things decide every size in the app, and both are stamped once:
+
+* **Tally is at the web scale.** `<html class="web">` in `index.html`, which
+  makes `tokens.css` swap one table of sizes for another (§6.5): 52px top bar,
+  32px buttons and fields, 38px nav rows, 14px body, 18px icons, 280px sidebar.
+  Nothing else changes - same colours, same hairlines, same shadows, same rules
+  about the accent. **A component never reads the class**; it asks for
+  `h-button`. A `.web .thing {}` rule is a token that is missing, and a
+  `fontSize` or a `spacing` entry stating a *number* rather than a `var()`
+  pins that one thing to the desktop table while everything round it grows.
+  Mobile is not a third scale: a narrow viewport changes the shell, never a
+  size.
+* **Artwork is on a four-rung ladder** (§7.21): `w-art-tile` 120 beside text,
+  `w-art-card` 180 for the browse card, `w-art-hero` 320 once on a detail page,
+  `avatar` 36 for a face, shape from `aspect-art` / `aspect-wide`. The same
+  kind of thing is one size across a page, so `.poster-grid` is the single
+  definition of the card grid, and **which rung it uses is the reader's** -
+  compact/standard/large are `--art-tile`/`--art-card`/`--art-hero`, three
+  rungs rather than three numbers, remembered in `localStorage` and never in
+  the URL because they change nothing about which rows you are looking at
+  (`lib/card-size.tsx`). That control is on the browse toolbar through
+  `BrowseFilters`' `actions` slot and **not** in the filter table: everything
+  in that table is derived from, so a card size in there would put a chip
+  reading "Large" in the filter row and claim the grid was narrowed. A picture that cannot have a rung **does not
+  appear**: portrait art never goes in a text row, because a row with a picture
+  is sized *by* the picture, which is why the History diary and the Stats
+  leaderboards lost thumbnails that were three rungs under the ladder. The art
+  card carries its label on the art and never in a caption strip, the label is
+  visible by default and hidden only where a pointer can reveal it, and the
+  placeholder names the item *underneath* the image so a library with no
+  artwork is not a wall of anonymous gradients. `docs/interface.md` has the
+  table.
+
+Five more things are worth knowing before they cost an hour:
 
 * **Tailwind fails silently.** `fontSize`, `borderRadius` and `boxShadow` are
   *replaced* rather than extended, so `text-sm`, `rounded-2xl` and `shadow-card`
@@ -796,6 +829,14 @@ Four things about it are worth knowing before they cost an hour:
 * **Selection is a neutral `control` fill plus `text-strong` plus a small accent
   mark**, never an accent background. This is the rule the whole language rests
   on, and the one the old interface broke most.
+* **A `1fr` grid track floors at its item's min-content, and `.panel` clips.**
+  `truncate` only shrinks a *flex* item, so a nowrap string sets the whole
+  column's minimum, the row grows past its track, and `overflow-hidden` eats
+  the difference with no scrollbar to say so - the Continue watching row's
+  mark-as-watched button was simply absent below about 420px. `min-w-0` on the
+  grid item is the fix. Worth re-scanning for after any size change: anything
+  wider than its nearest `overflow-x: hidden` ancestor is content nobody can
+  reach.
 * **There are three theme states, not two.** Dark is bare `:root`; forced light
   is `.light`; following the system is nothing stamped at all. A token written
   in only one of the two light blocks breaks the other state.
@@ -817,6 +858,19 @@ Four things about it are worth knowing before they cost an hour:
   separation and contrast against both surfaces. If you change series colours,
   re-run the validator in the `dataviz` skill rather than eyeballing. Every chart
   also ships a `DataTable` fallback so nothing is gated behind colour or hover.
+* **A backdrop image joins the page over a long ramp** (§7.22): `.fade-backdrop`
+  is transparent for its first 46% and reaches the ground only at the bottom
+  edge, so at least the top 40% of the picture is untouched. The old ramp was
+  solid by its bottom seventh, which paid the whole cost of loading a picture
+  for almost none of the effect. Legibility is a separate job and a separate
+  scrim under the text, never a steeper fade. The house token ramps to
+  `--backdrop`; Tally's pages sit on `--window` (§6.2 - a page is a panel
+  interior, the pit is for a canvas), so the stops are the house's and the
+  colour is Tally's.
+* **Text on artwork is `text-art` / `text-art-dim` on `bg-scrim-flat`**, and
+  those are white and black in *both* themes. A picture supplies its own
+  contrast, so a pale scrim over it erases the picture rather than the text.
+  It is the one place the light theme does not lighten.
 * **Zero is not the bottom of a ramp.** The heatmap's five steps are `heat-1..5`
   and a day with no plays is `control`, so "nothing happened" and "a little
   happened" cannot be read as the same thing.

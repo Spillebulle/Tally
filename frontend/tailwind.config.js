@@ -17,15 +17,25 @@ export default {
   darkMode: 'class',
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
+    /*
+     * Every size is the token, never the number.
+     *
+     * This is what carries the web scale (STYLE-GUIDE 6.5). `<html class="web">`
+     * makes `--text-body` 14px instead of 12, and a `fontSize` stating `12px`
+     * here would quietly pin the whole app to the desktop table while the
+     * chrome around it grew - which is worse than either scale on its own.
+     * The two that do not move are stated flat because they do not move:
+     * the wordmark and the eyebrow are the same size in both tables.
+     */
     fontSize: {
-      display: ['64px', { lineHeight: '1', letterSpacing: '-2px', fontWeight: '900' }],
-      page: ['15px', { lineHeight: '1.35' }],
-      heading: ['13px', { lineHeight: '1.35' }],
-      body: ['12px', { lineHeight: '1.35' }],
-      control: ['11.5px', { lineHeight: '1.35' }],
-      small: ['11px', { lineHeight: '1.35' }],
-      tiny: ['10.5px', { lineHeight: '1.35' }],
-      eyebrow: ['10px', { lineHeight: '1.35', letterSpacing: '2px' }],
+      display: ['var(--text-display)', { lineHeight: '1', letterSpacing: '-2px', fontWeight: '900' }],
+      page: ['var(--text-page)', { lineHeight: 'var(--lh)' }],
+      heading: ['var(--text-heading)', { lineHeight: 'var(--lh)' }],
+      body: ['var(--text-body)', { lineHeight: 'var(--lh)' }],
+      control: ['var(--text-control)', { lineHeight: 'var(--lh)' }],
+      small: ['var(--text-small)', { lineHeight: 'var(--lh)' }],
+      tiny: ['var(--text-tiny)', { lineHeight: 'var(--lh)' }],
+      eyebrow: ['10px', { lineHeight: 'var(--lh)', letterSpacing: '2px' }],
     },
     borderRadius: {
       none: '0',
@@ -34,6 +44,7 @@ export default {
       tool: 'var(--r-tool)', //  6px  tool button, well, field
       card: 'var(--r-card)', //  8px  card, tile, menu, popover
       modal: 'var(--r-modal)', //10px dialog, floating panel
+      art: 'var(--r-art)', //    6px  artwork, whatever its size (7.21)
       full: '9999px', //              dots, the toggle pill
     },
     boxShadow: {
@@ -90,6 +101,15 @@ export default {
 
       plex: { DEFAULT: 'var(--plex)', ink: 'var(--plex-ink)' },
       'brand-ink': 'var(--brand-ink)',
+
+      /*
+       * Text laid on artwork (7.21). Two ranks, and they are the same in both
+       * themes: a picture supplies its own contrast, so a pale scrim over it
+       * would erase the picture rather than the text. This is the one place
+       * the light theme does not lighten, which is why these are their own
+       * tokens rather than `strong` and `muted`.
+       */
+      art: { DEFAULT: 'var(--ink-art)', dim: 'var(--ink-art-dim)' },
 
       series: {
         1: 'var(--series-1)',
@@ -161,6 +181,15 @@ export default {
           line: 'var(--critical-line)',
         },
 
+        /*
+         * The scrims that go under text on artwork (7.21). Black in both
+         * themes, for the reason in `art` above. `--scrim-art` is the bottom
+         * gradient and is a background-image rather than a colour, so it is
+         * `.scrim-art` in index.css; this one is the even wash.
+         */
+        'scrim-flat': 'var(--scrim-flat)',
+        'ink-art': { DEFAULT: 'var(--ink-art)', dim: 'var(--ink-art-dim)' },
+
         // The logo mark's ink. One colour in every theme, because the mark is
         // artwork rather than text. See theme-tally.css.
         'brand-ink': 'var(--brand-ink)',
@@ -203,22 +232,55 @@ export default {
         ],
       },
 
-      // The chrome's fixed sizes, by name, so a strip cannot drift from the
-      // guide by a pixel. Usable as height, width and padding alike.
+      /*
+       * The chrome's fixed sizes, by name, so a strip cannot drift from the
+       * guide by a pixel. Usable as height, width and padding alike.
+       *
+       * The numbers in the comments are the *desktop* table. Tally stamps
+       * `class="web"` (STYLE-GUIDE 6.5), so what actually renders is the web
+       * column beside it - the token is the same either way, which is the
+       * point: a component asks for `h-button` and never asks which scale it
+       * is on.
+       */
       spacing: {
-        menubar: 'var(--h-menubar)', //   34px top bar
-        tabstrip: 'var(--h-tabstrip)', // 30px
-        toolbar: 'var(--h-toolbar)', //   36px filter strip
-        status: 'var(--h-status)', //     26px status/footer
-        panelhead: 'var(--h-panelhead)', //32px panel header
-        row: 'var(--h-row)', //           26px list row with a picture
-        'row-plain': 'var(--h-row-plain)', //20px text-only row
-        button: 'var(--h-button)', //     26px
-        dropdown: 'var(--h-dropdown)', // 18px
-        bottomnav: 'var(--h-bottomnav)', //52px
-        sidebar: 'var(--w-sidebar)', //   240px
-        panel: 'var(--w-panel)', //       264px
-        strip: 'var(--pad-strip)', //     12px, the padding inside every strip
+        menubar: 'var(--h-menubar)', //   34 -> 52  top bar
+        tabstrip: 'var(--h-tabstrip)', // 30 -> 38
+        toolbar: 'var(--h-toolbar)', //   36 -> 44  filter strip
+        status: 'var(--h-status)', //     26 -> 32  status/footer
+        panelhead: 'var(--h-panelhead)', //32 -> 40 panel header
+        row: 'var(--h-row)', //           26 -> 32  list row with a picture
+        'row-plain': 'var(--h-row-plain)', //20 -> 26 text-only row
+        nav: 'var(--h-nav)', //           30 -> 38  sidebar navigation row
+        button: 'var(--h-button)', //     26 -> 32
+        field: 'var(--h-field)', //       26 -> 32  text field, search well
+        dropdown: 'var(--h-dropdown)', // 18 -> 22
+        bottomnav: 'var(--h-bottomnav)', //52 -> 56
+        sidebar: 'var(--w-sidebar)', //   240 -> 280
+        panel: 'var(--w-panel)', //       264 -> 300
+        strip: 'var(--pad-strip)', //     12 -> 16, the padding inside every strip
+        mark: 'var(--mark)', //           15 -> 22  the app mark in the top bar
+        icon: 'var(--icon)', //           16 -> 18  icon in a row or a button
+        'icon-lg': 'var(--icon-lg)', //   20 -> 22  icon in a panel header
+
+        /*
+         * The artwork ladder (7.21). Four widths and no fifth, plus the
+         * avatar. Written as widths, because artwork is sized by its width and
+         * takes its height from `aspect-art` (portrait 2/3) or `aspect-wide`
+         * (landscape 16/9); a picture is never stretched into a box of the
+         * other shape.
+         */
+        'art-row': 'var(--art-row)', //   40 -> 48   landscape, inline in a row
+        'art-tile': 'var(--art-tile)', // 100 -> 120 a picture beside text
+        'art-card': 'var(--art-card)', // 150 -> 180 the browse card
+        'art-hero': 'var(--art-hero)', // 260 -> 320 one per detail page
+        avatar: 'var(--avatar)', //       28 -> 36   a person, round
+      },
+
+      aspectRatio: {
+        // Portrait artwork. The token, so the shape is stated once (7.21).
+        art: 'var(--art-ratio)',
+        // Landscape artwork: stills, backdrops, the inline row thumb.
+        wide: '16 / 9',
       },
 
       borderWidth: { DEFAULT: '1px', 0: '0', 2: '2px' },

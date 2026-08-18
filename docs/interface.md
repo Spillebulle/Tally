@@ -1,8 +1,9 @@
 # Interface
 
-*Dated 17 August 2026. Settles how Tally's interface is built after the move to
+*Dated 18 August 2026. Settles how Tally's interface is built after the move to
 the house design language. Supersedes the Inter / rounded-card / elevation look
-that shipped up to 0.3.0.*
+that shipped up to 0.3.0. Revised for the guide's web scale (6.5) and artwork
+ladder (7.21).*
 
 Tally follows `../../Design-Principles/STYLE-GUIDE.md`. That document is the
 rule book and is not repeated here. This page settles the things that are
@@ -72,16 +73,108 @@ Colours are roles. The old names are gone and `check:design` fails on them.
 | `border-line-accent` | *(gone)* | selection is neutral now |
 | `bg-heat-0..4` | `bg-heat-1..5` | zero is `bg-control`, not a heat step |
 
-Sizes have names too: `h-menubar` (34), `h-toolbar` (36), `h-status` (26),
-`h-panelhead` (32), `h-row` (26), `h-row-plain` (20), `h-button` (26),
-`h-bottomnav` (52), `w-sidebar` (240), `w-panel` (264), `p-strip` (12).
+Sizes have names too, and **every one of them is the token, never the number** -
+that is what carries the scale below. `h-menubar`, `h-toolbar`, `h-status`,
+`h-panelhead`, `h-row`, `h-row-plain`, `h-nav`, `h-button`, `h-field`,
+`h-dropdown`, `h-bottomnav`, `w-sidebar`, `w-panel`, `p-strip`, `w-mark`,
+`size-icon`, `size-icon-lg`.
 
-Type: `text-page` 15, `text-heading` 13, `text-body` 12, `text-control` 11.5,
-`text-small` 11, `text-tiny` 10.5, `text-eyebrow` 10 (tracked 2 px, uppercase),
-`text-display` 64 (the wordmark, nowhere else). Radii: `rounded-tight` 3,
-`rounded-ctl` 5, `rounded-tool` 6, `rounded-card` 8, `rounded-modal` 10, plus
-`rounded-full` for dots and the toggle pill. Shadows: `shadow-menu`,
-`shadow-float`, `shadow-modal`, `shadow-knob`, and **nothing else casts one**.
+Type: `text-page`, `text-heading`, `text-body`, `text-control`, `text-small`,
+`text-tiny`, `text-eyebrow` (10 px, tracked 2 px, uppercase, and the one size
+that does not move), `text-display` (64, the wordmark, nowhere else). Radii:
+`rounded-tight` 3, `rounded-ctl`, `rounded-tool`, `rounded-card`,
+`rounded-modal`, `rounded-art`, plus `rounded-full` for dots and the toggle
+pill. Shadows: `shadow-menu`, `shadow-float`, `shadow-modal`, `shadow-knob`,
+and **nothing else casts one**.
+
+## Tally is at the web scale
+
+`<html class="web">`, stamped in `index.html` and nowhere else, which makes
+`tokens.css` swap one table of sizes for another (the guide's 6.5). Tally is
+read in a browser tab rather than at arm's length in a desktop tool, so the
+things you aim at grow about a quarter, the top bar grows by half because it is
+the one place the app says its name, and text grows least - a 125 % button with
+100 % text looks empty and 125 % prose reads as a document.
+
+| | Desktop | Tally |
+|---|---|---|
+| Top bar / mark | 34 / 15 | **52 / 22** |
+| Button, field | 26 | **32** |
+| Nav row, list row | 30 / 26 | **38 / 32** |
+| Toolbar, panel header | 36 / 32 | **44 / 40** |
+| Icon in a row or button | 16 | **18** |
+| Body / control text | 12 / 11.5 | **14 / 13** |
+| Sidebar | 240 | **280** |
+| Padding inside a strip | 12 | **16** |
+
+What the step never touches: the colour ladder and both themes, the 1 px
+hairline, the dashed mark, the 4 and 8 px fine grid, the shadows, the 80/160 ms
+motion, the four text ranks, and every rule about where the accent goes.
+
+Three rules come with it:
+
+- **A component never reads the class.** It asks for `h-button`. A rule saying
+  `.web .thing { … }` is a token that is missing.
+- **Mobile is not a third scale.** A narrow viewport changes the *shell* - the
+  sidebar becomes a drawer, a row wraps - never the sizes.
+- **The class is in the markup, not in a script.** It is not a preference and
+  it never changes, and anything stamping it at runtime would paint one frame
+  at the desktop size first.
+
+## Artwork is on a ladder
+
+A poster, a still, a face: not an icon, not decoration, and on most of Tally's
+pages it *is* the interface. Four widths and no fifth (the guide's 7.21), plus
+the avatar. Tally's numbers are the web column:
+
+| Token | Width | Where in Tally |
+|---|---|---|
+| `w-art-row` | 48 | Landscape only. Tally has no landscape still for a card, so **nothing uses it** |
+| `w-art-tile` | 120 | A picture beside text: Continue watching, the Discover picker, the hero on a phone |
+| `w-art-card` | 180 | The browse card. Every grid and every rail |
+| `w-art-hero` | 320 | The item page's poster. One per page |
+| `h-avatar w-avatar` | 36 | A cast face, round |
+
+Shape is `aspect-art` (portrait 2/3, from `--art-ratio`) or `aspect-wide`
+(16/9). Never a literal `aspect-[2/3]`; `check:design` fails on one.
+
+- **The same kind of thing is one size across a page**, and two rails may
+  differ by one rung at most. `.poster-grid` in `index.css` is the single
+  definition of the card grid for exactly this reason: the watchlist kept its
+  own copy and drifted off the ladder while the browse pages moved.
+- **Which rung a card grid uses is the reader's**, through the poster-size
+  control on the browse and watchlist toolbars: compact, standard or large,
+  which are `--art-tile`, `--art-card` and `--art-hero`. Three *rungs*, not
+  three numbers - a size control picks among the sanctioned sizes rather than
+  inventing a fifth, and the page is still drawn at exactly one of them. It is
+  remembered in `localStorage` and deliberately not in the URL, because it
+  changes nothing about which rows you are looking at; `lib/card-size.tsx` has
+  the whole argument. The grid's floor is clamped to under half its container,
+  which is what stops the standard size becoming one window-wide poster on a
+  phone - and the reason the control hides itself below `sm`, where all three
+  sizes resolve to the two columns there is room for.
+- **A picture that cannot have a rung does not appear.** Portrait art never
+  goes in a text row, because a row with a picture is sized *by* the picture.
+  That is why the History diary and the Stats leaderboards have no thumbnail:
+  they carried posters at 14 x 20 and 24 x 36, three rungs under the bottom of
+  the ladder and, in the guide's words about faces, a smudge doing no work.
+- **The art card carries its label on the art**, never in a caption strip
+  underneath. `.art-card` and `.art-label` in `index.css` own the whole
+  behaviour, including that the label is *visible by default* and hidden only
+  where a pointer can reveal it: the name of a thing is never something you can
+  get only by hovering, so a touch screen and `prefers-reduced-motion` both
+  keep it and keyboard focus does exactly what hover does.
+- **A missing picture names itself.** `Artwork` draws the title on the
+  placeholder *under* the image, so artwork covers it the instant it arrives.
+  On a fresh instance with no TMDB key and no Plex artwork that is every card
+  on the page, and without it a grid of gradients is anonymous.
+- Text on artwork is `text-art` / `text-art-dim` on `bg-scrim-flat` or
+  `.scrim-art`. These are white and black in **both** themes: a picture
+  supplies its own contrast and a pale scrim over it erases the picture rather
+  than the text. It is the one place the light theme does not lighten.
+- A backdrop joins the page over a long ramp - `.fade-backdrop`, transparent
+  for its first 46 % and reaching the ground only at the bottom edge (7.22).
+  Legibility is a separate job and a separate scrim; never a steeper fade.
 
 ## The controls that already exist
 
@@ -92,7 +185,9 @@ In `index.css`, so a page composes rather than restyles: `.card`, `.panel`,
 `-critical`, `.keycap`, `.row`, `.row-selected`, `.nav-row`,
 `.nav-row-selected`, `.menu`, `.menu-item`, `.menu-item-selected`,
 `.menu-separator`, `.tooltip`, `.dialog`, `.floating`, `.notice`, `.dashed`,
-`.eyebrow`, `.figure`, `.skeleton`, `.scroll-x`, `.full-bleed`, `.hero-scrim`.
+`.eyebrow`, `.figure`, `.skeleton`, `.scroll-x`, `.full-bleed`, and the artwork
+set: `.art`, `.art-card`, `.art-label`, `.art-placeholder`, `.poster-grid`,
+`.scrim-art`, `.fade-backdrop`. (`.hero-scrim` is gone; `check:design` fails on it.)
 
 If a component needs something that is not there, **add the class here** rather
 than assembling it inline at one call site. The test is whether a second page
@@ -104,8 +199,11 @@ would want the same thing; almost always it would.
 (single-weight stroke, round caps), it tree-shakes per icon, and it removes the
 hand-drawn set that had to be extended every time a page needed a glyph.
 
-Sizes are 16 in rows and buttons, 20 in panel headers, 24 in empty states, and
-never larger. Colour is `text-muted` at rest, `text-strong` on hover or when
+Sizes come from `size-icon` (18 here, 16 on a desktop app) in rows and buttons
+and `size-icon-lg` in a panel header, never from lucide's `size` prop, which
+would pin an icon to one scale while everything round it took the step. 24 in
+an empty state, and never larger; a mark set *inside* a line of text (11, 12)
+is sized to that text and stays a number. Colour is `text-muted` at rest, `text-strong` on hover or when
 selected, and `accent` only for the active bar-nav item. An icon with no label
 carries a `title`. Brand marks (Plex, GitHub, Docker) are solid paths and stay
 in `components/Icons.tsx`, which is the only thing that file still holds.
@@ -136,6 +234,16 @@ light blocks breaks the other state. Components never read the class.
 painted under the border and the ring blended on top, so the two coverages
 disagree along the caps. This is a second reason selection is a neutral fill
 rather than a tinted edge.
+
+**A `1fr` grid track floors at its item's min-content, and `.panel` clips.**
+`1fr` is `minmax(auto, 1fr)`, and that `auto` is the item's min-content - which
+for a `truncate`d span is the whole nowrap string, because `truncate` only
+shrinks a *flex* item. So a row grew past its column, `.panel`'s
+`overflow-hidden` ate the difference, and the mark-as-watched button on
+Continue watching simply was not there below about 420 px, with no scrollbar to
+say so. `min-w-0` on the grid item is the fix. It is worth scanning for after
+any size change: an element wider than its nearest `overflow-x: hidden`
+ancestor is content nobody can reach.
 
 **Never key or parse a local date through `toISOString()` or
 `new Date('YYYY-MM-DD')`.** Both convert via UTC and are off by a day east of

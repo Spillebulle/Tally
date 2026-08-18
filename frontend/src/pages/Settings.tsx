@@ -319,7 +319,7 @@ export function Settings() {
                   aria-current={selected ? 'page' : undefined}
                   className={cn('nav-row w-full', selected && 'nav-row-selected')}
                 >
-                  <Icon size={16} aria-hidden="true" />
+                  <Icon className="size-icon" aria-hidden="true" />
                   <span className="truncate">{tab.label}</span>
                 </button>
               )
@@ -461,7 +461,7 @@ function PlexPane() {
             }
             className="btn-outline"
           >
-            {discover.isPending ? <Spinner /> : <RefreshCw size={16} aria-hidden="true" />}
+            {discover.isPending ? <Spinner /> : <RefreshCw className="size-icon" aria-hidden="true" />}
             Refresh
           </button>
         }
@@ -537,7 +537,7 @@ function PlexPane() {
                 }}
                 className="btn-outline shrink-0"
               >
-                <Copy size={16} aria-hidden="true" />
+                <Copy className="size-icon" aria-hidden="true" />
                 Copy
               </button>
             </div>
@@ -814,7 +814,12 @@ function LibraryRow({
         </span>
       </span>
 
-      <span className="flex shrink-0 items-center gap-2">
+      {/* Wraps, and is not `shrink-0`. Three controls at the web scale (6.5) -
+          a 8.5rem select, a 32px button and a toggle with its label - come to
+          more than a phone-width panel can hold on one line, and a cluster
+          that refuses to shrink does not overflow visibly: `.panel` clips it,
+          so the Include switch simply was not there below about 420px. */}
+      <span className="flex flex-wrap items-center justify-end gap-2">
         <Select
           label={`Anime in ${library.title}`}
           value={anime}
@@ -834,7 +839,7 @@ function LibraryRow({
           title={scanning ? 'A scan of this library is already running.' : 'Read this library again.'}
           className="btn-outline"
         >
-          {scanning ? <Spinner /> : <RefreshCw size={16} aria-hidden="true" />}
+          {scanning ? <Spinner /> : <RefreshCw className="size-icon" aria-hidden="true" />}
           Scan
         </button>
 
@@ -1203,7 +1208,7 @@ function LibraryPane() {
             }
             className="btn-danger"
           >
-            {reclassify.isPending ? <Spinner /> : <Sparkles size={16} aria-hidden="true" />}
+            {reclassify.isPending ? <Spinner /> : <Sparkles className="size-icon" aria-hidden="true" />}
             Re-detect anime
           </button>
         </Row>
@@ -1831,7 +1836,7 @@ function AppearancePane() {
               onClick={() => fileRef.current?.click()}
               disabled={importTheme.isPending}
             >
-              <Upload size={16} aria-hidden="true" />
+              <Upload className="size-icon" aria-hidden="true" />
               {importTheme.isPending ? 'Importing…' : 'Import a file'}
             </button>
           </>
@@ -2011,7 +2016,7 @@ function AppearancePane() {
               href={api.themes.exportUrl(inUse.id)}
               download={`${inUse.id}.umbertheme`}
             >
-              <Download size={16} aria-hidden="true" />
+              <Download className="size-icon" aria-hidden="true" />
               Save the file
             </a>
           </Row>
@@ -2088,7 +2093,7 @@ function AppearancePane() {
                   disabled={remove.isPending}
                   onClick={() => remove.mutate(inUse.id)}
                 >
-                  <Trash2 size={16} aria-hidden="true" />
+                  <Trash2 className="size-icon" aria-hidden="true" />
                   {remove.isPending ? 'Deleting…' : 'Delete for good'}
                 </button>
               </>
@@ -2098,7 +2103,7 @@ function AppearancePane() {
                 className="btn-danger"
                 onClick={() => setConfirmingDelete(true)}
               >
-                <Trash2 size={16} aria-hidden="true" />
+                <Trash2 className="size-icon" aria-hidden="true" />
                 Delete
               </button>
             )}
@@ -2266,7 +2271,7 @@ function ApiKeysPane() {
                 }
                 className="btn-primary shrink-0"
               >
-                {create.isPending ? <Spinner /> : <Plus size={16} aria-hidden="true" />}
+                {create.isPending ? <Spinner /> : <Plus className="size-icon" aria-hidden="true" />}
                 Create
               </button>
             </div>
@@ -2328,7 +2333,7 @@ function ApiKeysPane() {
                 title="Copy the key to the clipboard."
                 className="btn-outline shrink-0"
               >
-                <Copy size={16} aria-hidden="true" />
+                <Copy className="size-icon" aria-hidden="true" />
                 Copy
               </button>
               <button
@@ -2422,7 +2427,7 @@ function ApiKeysPane() {
           accept it as far as its access allows.
         </Note>
         <a href="/api/docs" className="btn-outline w-fit" title="Open the generated API reference.">
-          <ExternalLink size={16} aria-hidden="true" />
+          <ExternalLink className="size-icon" aria-hidden="true" />
           API docs
         </a>
       </Group>
@@ -2502,7 +2507,7 @@ function AboutPane() {
                 className="btn-outline"
                 title="Open the source repository."
               >
-                <ExternalLink size={16} aria-hidden="true" />
+                <ExternalLink className="size-icon" aria-hidden="true" />
                 Source
               </a>
             )}
@@ -2514,7 +2519,7 @@ function AboutPane() {
                 className="btn-outline"
                 title="Open the published image."
               >
-                <ExternalLink size={16} aria-hidden="true" />
+                <ExternalLink className="size-icon" aria-hidden="true" />
                 Docker image
               </a>
             )}

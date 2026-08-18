@@ -52,7 +52,13 @@ size, so the small frame is redrawn on the pixel grid: 1 px uprights on whole
 pixel columns x = 3.5, 6.5, 9.5, 12.5 with 2 px gaps, butt caps, y = 3 to 13,
 and a rising fifth mark from (3.5, 11.5) to (12.5, 4.5). That is 37.9°, as
 near the master's 42° as a 9-pixel run allows, and steep for the same reason.
-This is the frame the browser tab and the top bar show.
+This is the frame the browser tab shows.
+
+The top bar shows the **master**, at `--mark`. Tally is at the guide's web
+scale, where the mark in the bar is 22 px rather than 15 (STYLE-GUIDE 6.5): the
+top bar is the one place the app says who it is, and it is the one piece of
+chrome that grows by half rather than a quarter. 22 is above the 20 px
+threshold, so the small drawing no longer applies there.
 
 ## Colours
 

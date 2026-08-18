@@ -1,5 +1,19 @@
 <!doctype html>
-<html lang="en">
+<!--
+  `class="web"` is the hosted-web scale (STYLE-GUIDE.md 6.5). Tally is read
+  in a browser tab rather than at arm's length in a desktop tool, so
+  `tokens.css` swaps one table of sizes for another: 52px top bar, 32px
+  buttons and fields, 38px nav rows, 14px body, and the artwork ladder one
+  rung up. It is a scale and nothing else - same colours, same hairlines,
+  same shadows, same rules about the accent - and it is stamped here, once,
+  because a component may never read it.
+
+  It is written into the markup rather than added by a script: it is not a
+  preference, it never changes, and anything that stamped it at runtime
+  would render one frame at desktop size first. The theme script below
+  removes only `dark` and `light`, and so does ThemeProvider.
+-->
+<html lang="en" class="web">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />

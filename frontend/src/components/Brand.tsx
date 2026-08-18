@@ -14,7 +14,12 @@
  */
 
 interface MarkProps {
-  /** Rendered size in px. 15 in the top bar (section 6.2), 16 elsewhere. */
+  /**
+   * Which drawing to use, in px: at or below 20 the mark is redrawn on the
+   * pixel grid (see SMALL), above it the master is used. It also sets the
+   * rendered size, unless a `className` overrides the width and height - which
+   * is what the top bar does, so the mark follows `--mark` (section 6.5).
+   */
   size?: number
   className?: string
   /**
@@ -117,15 +122,31 @@ export function Wordmark({ className }: { className?: string }) {
 }
 
 /*
- * The top-bar lockup: 15 px mark plus the app name at 12 px 600
- * `text-strong` (section 6.2). The name is the accessible one, so the mark
- * beside it is decorative.
+ * The top-bar lockup: the mark at `--mark` plus the app name at
+ * `--text-heading` `text-strong` (section 6.2). The name is the accessible
+ * one, so the mark beside it is decorative.
+ *
+ * At the web scale Tally is stamped with, that is a 22 px mark beside a 15 px
+ * name, where it used to be 15 beside 12. The top bar is the one piece of
+ * chrome that grows by half rather than a quarter, because it is the one place
+ * the app says who it is: at 34 px with a 15 px mark a hosted app reads as a
+ * browser toolbar belonging to nobody.
+ *
+ * `size` and the class say two different things. The number picks the
+ * *drawing* - 22 is above the 20 px threshold, so this is the master and not
+ * the pixel-grid redraw - and `h-mark w-mark` sets the rendered size from the
+ * token, so the lockup follows the scale rather than a literal.
+ *
+ * The guide asks for 700 here and this is 600. Section 4 allows two weights in
+ * the interface, 400 and 600, with 900 reserved for the wordmark, and
+ * `check:design` enforces exactly that; a third weight for one word is a worse
+ * trade than a word set one step lighter than the table says.
  */
 export function Logo({ className }: { className?: string }) {
   return (
     <span className={`inline-flex items-center gap-2 ${className ?? ''}`}>
-      <Mark size={15} decorative />
-      <span className="text-body font-semibold text-strong">Tally</span>
+      <Mark size={22} className="h-mark w-mark" decorative />
+      <span className="text-heading font-semibold text-strong">Tally</span>
     </span>
   )
 }

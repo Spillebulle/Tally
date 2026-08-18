@@ -408,10 +408,9 @@ function DropdownShell({
       >
         <span className="truncate">{summaryNode ?? summary}</span>
         <ChevronDown
-          size={16}
           aria-hidden="true"
           className={cn(
-            'ml-auto shrink-0 text-muted transition-transform duration-open ease-ease',
+            'ml-auto size-icon shrink-0 text-muted transition-transform duration-open ease-ease',
             open && 'rotate-180',
           )}
         />
@@ -459,9 +458,8 @@ function OptionSearch({
   return (
     <div className="relative mb-1">
       <Search
-        size={16}
         aria-hidden="true"
-        className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
+        className="pointer-events-none absolute left-2.5 top-1/2 size-icon -translate-y-1/2 text-dim"
       />
       <input
         type="text"
@@ -616,7 +614,7 @@ function SelectPanel({
               {/* The fill marks the current item; the check restates it, since
                   short labels can make the fill easy to miss. */}
               {chosen && (
-                <Check size={16} aria-hidden="true" className="shrink-0 text-strong" />
+                <Check aria-hidden="true" className="size-icon shrink-0 text-strong" />
               )}
             </button>
           )

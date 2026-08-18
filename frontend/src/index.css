@@ -170,7 +170,7 @@
   /* ── Fields ──────────────────────────────────────────────────────────── */
 
   .field {
-    @apply h-button w-full rounded-tool border border-line bg-field px-3 text-control
+    @apply h-field w-full rounded-tool border border-line bg-field px-3 text-control
            text-fg placeholder:text-placeholder focus:border-accent focus:outline-none;
   }
 
@@ -234,7 +234,7 @@
   /* Sidebar and settings navigation: the row plus a 3px accent bar at the
      left edge when selected. */
   .nav-row {
-    @apply relative flex h-[30px] items-center gap-2.5 rounded-ctl px-strip text-control
+    @apply relative flex h-nav items-center gap-2.5 rounded-ctl px-strip text-control
            text-muted transition-colors duration-hover ease-ease
            hover:bg-control-hover hover:text-fg;
   }
@@ -336,28 +336,161 @@
     margin-inline: calc((100% - 100cqw) / 2);
   }
 
+  /* ── Artwork ─────────────────────────────────────────────────────────── */
+
   /*
-   * The detail hero's fade from artwork into the page.
+   * A picture of the thing itself (7.21): a poster, a still, a face. Not an
+   * icon and not decoration - it is the content, and on most of Tally's pages
+   * it *is* the interface.
    *
-   * Many stops rather than three even ones: a linear ramp bands visibly where
-   * its slope changes. The bottom seventh is solid so the title never lands on
-   * bare artwork however bright it is, and every stop names the colour - fading
-   * to `transparent` would pass through grey.
+   * The box is a `control` block at the picture's own size, so the layout does
+   * not move when the image arrives and a title with no artwork is a block of
+   * the same size as its siblings rather than a gap. Whether artwork exists is
+   * not knowable without a request per card, so the placeholder is a layer
+   * underneath rather than an else-branch; see `Artwork` in Poster.tsx.
+   *
+   * Size comes from the ladder (`w-art-tile`, `w-art-card`, ...) and shape from
+   * `aspect-art` or `aspect-wide`. There is no size in this class on purpose.
    */
-  .hero-scrim {
+  .art {
+    @apply relative overflow-hidden rounded-art bg-control;
+  }
+
+  /*
+   * Text laid along the bottom of a picture. Black in both themes: a picture
+   * carries its own contrast and a pale scrim over it erases the picture
+   * rather than the text, so this is the one place the light theme does not
+   * lighten (7.21).
+   */
+  .scrim-art {
+    background-image: var(--scrim-art);
+  }
+
+  /*
+   * The art card: where the picture is the item, the card *is* the picture.
+   *
+   * At rest it is artwork and nothing else - no plate, no border, and no
+   * caption strip beneath, which used to make every card taller than the thing
+   * it existed to show and turned a grid of pictures into a grid of boxes. The
+   * label lives on the artwork instead.
+   *
+   * The lift is the one place a card moves, and it is 3px (`--art-lift`) with
+   * the float shadow, because for these three seconds the card really is
+   * floating over the grid.
+   */
+  .art-card {
+    @apply art block transition duration-open ease-ease;
+  }
+
+  /*
+   * The label over the bottom of an art card.
+   *
+   * Visible by default, and hidden only where a pointer can actually reveal
+   * it. **The name of a thing is never information you can only get by
+   * hovering** (7.21): on a touch screen there is no hover, and under
+   * `prefers-reduced-motion` a card that changes on approach is exactly what
+   * was asked not to happen. Both fall through to the default here, which is
+   * why the rule is written as an opt-*in* to hiding rather than an opt-out.
+   *
+   * Keyboard focus does exactly what hover does, in the same rule, so a
+   * keyboard user is never the one person who cannot read the grid.
+   */
+  .art-label {
+    @apply pointer-events-none absolute inset-x-0 bottom-0 scrim-art px-2.5 pb-2 pt-6;
+  }
+
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .art-card:hover,
+    .art-card:focus-within {
+      transform: translateY(calc(-1 * var(--art-lift)));
+      box-shadow: var(--shadow-float);
+    }
+
+    /*
+     * `visibility`, not `opacity` alone. Opacity is not a hit test: a label
+     * faded to nothing still swallows the tap, and the quick-watch button
+     * inside it stayed clickable while invisible - which is how a tap in a
+     * poster's corner used to scrobble the title instead of opening it.
+     * `visibility` flips discretely, so the fade in and out still reads.
+     */
+    .art-card .art-label {
+      visibility: hidden;
+      opacity: 0;
+      transition:
+        opacity var(--t-open) var(--ease),
+        visibility var(--t-open);
+    }
+
+    .art-card:hover .art-label,
+    .art-card:focus-within .art-label {
+      visibility: visible;
+      opacity: 1;
+    }
+
+    /* The placeholder's name and the label say the same thing, so only one of
+       them is ever on screen. Artwork covers the placeholder anyway; this is
+       for the card that has none. */
+    .art-card .art-placeholder {
+      transition: opacity var(--t-open) var(--ease);
+    }
+
+    .art-card:hover .art-placeholder,
+    .art-card:focus-within .art-placeholder {
+      opacity: 0;
+    }
+  }
+
+  /*
+   * The card grid: one size of poster, as many columns as fit.
+   *
+   * Reflow, not breakpoints. A wide screen gets *more* columns, never bigger
+   * cards (6.4), and the floor is a rung of the artwork ladder - `--art-card`
+   * unless the reader has chosen another, which `lib/card-size.tsx` writes into
+   * `--card-floor`.
+   *
+   * The `min(..., 45%)` is the whole responsive story, and it replaces a pair
+   * of breakpoint-swapped floors. A 180px floor in a 358px window yields a
+   * single column, which is a poster the width of the phone and exactly the
+   * "bigger component" 6.4 forbids; clamping the floor to under half the
+   * container guarantees at least two. It stops binding at about a 400px
+   * container, so from a tablet upward the chosen rung is the floor exactly and
+   * the three sizes give roughly eight, five and three columns on a full page.
+   *
+   * A consequence worth knowing rather than working around: below that width
+   * every size resolves to two columns, because two is all there is room for.
+   * That is why the control hides itself there instead of lying.
+   */
+  .poster-grid {
+    display: grid;
+    gap: var(--s3);
+    grid-template-columns: repeat(
+      auto-fill,
+      minmax(min(var(--card-floor, var(--art-card)), 45%), 1fr)
+    );
+  }
+
+  /*
+   * A backdrop image joining the page (7.22).
+   *
+   * The house token `--fade-backdrop` ramps to `--backdrop`, the canvas pit. A
+   * hosted page's ground is `--window` (6.2: a page is a panel interior, and
+   * the pit is for a canvas), so the stops are the house's and the colour is
+   * Tally's. Restating the ramp is the only way to change the one value in it.
+   *
+   * Four stops, transparent for the first 46 %, reaching the ground only at
+   * 100 %. The old ramp was solid by the bottom seventh and had ten stops
+   * hurrying it there, which paid the whole cost of loading a picture for
+   * almost none of the effect. Legibility is a separate job: text along the
+   * bottom of the picture gets `.scrim-art` under it, never a steeper ramp.
+   */
+  .fade-backdrop {
     background-image: linear-gradient(
-      to top,
-      var(--window) 0%,
-      var(--window) 15%,
-      color-mix(in oklab, var(--window) 97%, transparent) 26%,
-      color-mix(in oklab, var(--window) 91%, transparent) 36%,
-      color-mix(in oklab, var(--window) 81%, transparent) 46%,
-      color-mix(in oklab, var(--window) 67%, transparent) 56%,
-      color-mix(in oklab, var(--window) 51%, transparent) 66%,
-      color-mix(in oklab, var(--window) 35%, transparent) 76%,
-      color-mix(in oklab, var(--window) 20%, transparent) 85%,
-      color-mix(in oklab, var(--window) 9%, transparent) 93%,
-      color-mix(in oklab, var(--window) 0%, transparent) 100%
+      to bottom,
+      transparent 0%,
+      color-mix(in oklab, var(--window) 12%, transparent) 46%,
+      color-mix(in oklab, var(--window) 55%, transparent) 74%,
+      color-mix(in oklab, var(--window) 88%, transparent) 90%,
+      var(--window) 100%
     );
   }
 }
