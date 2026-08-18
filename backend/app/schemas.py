@@ -157,6 +157,12 @@ class MediaCard(ORMModel):
     episode_number: int | None = None
     show_id: int | None = None
     show_title: str | None = None
+    # The *series'* poster for an episode, when the caller loaded the parent.
+    # An episode's own artwork on Plex is the still from that episode, which a
+    # portrait card can only centre-crop; a page that draws plays as artwork
+    # wants the poster of the thing you would recognise. Null everywhere the
+    # parent was not loaded, so a reader falls back to `poster_url`.
+    show_poster_url: str | None = None
     status: WatchStatus | None = None
     rating: float | None = None
     progress_percent: float | None = None
@@ -255,6 +261,40 @@ class HistoryPage(BaseModel):
     total: int
     offset: int
     limit: int
+
+
+class HistoryCalendarDay(BaseModel):
+    """One local day that has at least one play in it.
+
+    Only such days are sent. A month is 28 to 31 cells the client can draw from
+    the month alone, and shipping the empty ones would be a payload of zeroes.
+    """
+
+    # A **local** day key, bucketed in the zone the response names. The frontend
+    # must read it with `parseLocalDateLabel`, never `new Date('YYYY-MM-DD')`,
+    # which parses as UTC and lands on the day before west of Greenwich.
+    date: date
+    # Plays, including rewatches and every episode of a binge.
+    count: int
+    # Distinct titles behind those plays — a series counts once, however many
+    # episodes of it were watched. What "+3 more" is honestly counting.
+    titles: int
+    # The first few of those titles, most recent play first, capped by `per_day`.
+    items: list[MediaCard]
+
+
+class HistoryCalendar(BaseModel):
+    """A month of the watch log, bucketed by the viewer's own day."""
+
+    # `YYYY-MM`, echoed back so a late response cannot be drawn under the wrong
+    # heading.
+    month: str
+    # The zone actually used, which is not always the one asked for. See
+    # `timezones.zone_for`.
+    timezone: str
+    days: list[HistoryCalendarDay]
+    # Plays in the whole month, after filtering — the sum of every `count`.
+    total: int
 
 
 # --- ratings / state ------------------------------------------------------

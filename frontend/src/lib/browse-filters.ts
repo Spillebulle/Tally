@@ -525,6 +525,20 @@ export interface FilterPage {
    */
   omit?: readonly FilterKey[]
   /**
+   * Parameters this page owns that are **not** filters, and that `clear()` must
+   * therefore leave alone.
+   *
+   * "Clear all" empties the query, which is right for everything that narrows
+   * the results and wrong for everything that says which shape the page is
+   * being drawn in. History keeps `view` and `month`: clearing the filters from
+   * inside the calendar threw the reader back to the list, in a different
+   * month, which reads as the button having done something else entirely.
+   *
+   * A page's own *filter* does not belong here - History's `filter` really does
+   * narrow, so "Clear all" really should drop it.
+   */
+  keep?: readonly string[]
+  /**
    * This page *is* the search, rather than a page you can also search within.
    *
    * Two things follow, and both are the same statement said to two different
@@ -787,6 +801,20 @@ const endOfDay = (key: string): string => {
   date.setHours(23, 59, 59, 999)
   return date.toISOString()
 }
+
+/**
+ * The instants one local day means, for a page asking about a single date.
+ *
+ * The same pair the range control sends, so a day opened from History's
+ * calendar and a day picked in the date range answer with the same rows. The
+ * end bound is the day's *last* instant: `/api/history` compares
+ * `watched_at <= until`, and midnight would drop everything actually watched
+ * that day.
+ */
+export const dayWindow = (key: string): { since: string; until: string } => ({
+  since: startOfDay(key),
+  until: endOfDay(key),
+})
 
 /** How a day range reads in a chip: "14–20 Aug 2026", "from 1 Jan 2026". */
 const describeDays = ({ from, to }: DateRangeValue): string => {
@@ -1434,6 +1462,15 @@ export interface BrowseFilterState {
   set: <K extends FilterKey>(key: K, value: FilterValues[K]) => void
   /** Sets a parameter this table does not own — a page's own `kind`, say. */
   update: (key: string, value: string | null) => void
+  /**
+   * Sets several parameters in one write, filters and the page's own alike.
+   *
+   * One write rather than two calls, because each write starts from the URL as
+   * it is *now*: two in a row both read the same snapshot and the second
+   * silently discards the first. History changes a month and clears the
+   * selected day together, and those two have to land as one.
+   */
+  updateMany: (patch: Record<string, string | null>) => void
   clear: () => void
   /**
    * The current query, canonicalised — what "save this view" stores.
@@ -1540,11 +1577,16 @@ export function useBrowseFilters(page: FilterPage): BrowseFilterState {
     ).length,
     set: (key, value) => commit(table[key].write(value, ctx)),
     update: (key, value) => commit({ [key]: value }),
+    updateMany: (patch) => commit(patch),
     clear: () => {
       const kept = new URLSearchParams()
       for (const def of defs) {
         if (def.role !== 'search') continue
         applyWrite(kept, def, values[def.key], ctx)
+      }
+      // Whatever this page holds that is not a filter — see `FilterPage.keep`.
+      for (const key of page.keep ?? []) {
+        for (const value of params.getAll(key)) kept.append(key, value)
       }
       setParams(kept, { replace: true })
     },

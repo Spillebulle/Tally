@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from collections import OrderedDict
+from datetime import UTC, date, datetime, time, tzinfo
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -24,9 +25,16 @@ from ..models import (
     WatchStatus,
     utcnow,
 )
-from ..schemas import HistoryPage, LogWatchRequest, WatchEventOut
-from ..serializers import show_titles_for, states_for, to_card
+from ..schemas import (
+    HistoryCalendar,
+    HistoryCalendarDay,
+    HistoryPage,
+    LogWatchRequest,
+    WatchEventOut,
+)
+from ..serializers import shows_for, states_for, to_card
 from ..services.sync_service import SyncService
+from ..timezones import zone_for
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 
@@ -114,9 +122,9 @@ async def list_history(
         rows = await db.execute(select(MediaItem).where(MediaItem.id.in_(item_ids)))
         items = {item.id: item for item in rows.scalars()}
     states = await states_for(db, user.id, item_ids)
-    show_titles = await show_titles_for(
-        db, [item.show_id for item in items.values() if item.show_id]
-    )
+    # Whole parent rows rather than their titles: the card views draw the
+    # *series* poster for an episode play, and only the parent knows it.
+    shows = await shows_for(db, [item.show_id for item in items.values() if item.show_id])
 
     out = []
     for event in events:
@@ -126,11 +134,159 @@ async def list_history(
             payload.item = to_card(
                 item,
                 states.get(item.id),
-                show_title=show_titles.get(item.show_id or 0),
+                show=shows.get(item.show_id or 0),
             )
         out.append(payload)
 
     return HistoryPage(events=out, total=total, offset=offset, limit=limit)
+
+
+# A month, as the client writes it. Checked by FastAPI rather than parsed
+# defensively later: a URL is untrusted input, and a 422 on `?month=2026-13` is
+# a better answer than silently drawing January.
+_MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
+
+
+def _month_bounds(month: str, tz: tzinfo) -> tuple[datetime, datetime]:
+    """The half-open UTC window covering one **local** month.
+
+    Filter in UTC, bucket in local (CLAUDE.md): the bounds are built as local
+    midnight and converted, so `watched_at >= :since` still uses
+    `ix_watch_events_user_time`, while the day each play lands on is decided in
+    Python from `watched_at.astimezone(tz)`.
+
+    Half-open, `[start, end)`, so a play at local midnight on the 1st belongs to
+    exactly one month rather than to two.
+    """
+    year, index = int(month[:4]), int(month[5:])
+    first = date(year, index, 1)
+    following = date(year + (index == 12), index % 12 + 1, 1)
+    return (
+        datetime.combine(first, time.min, tzinfo=tz).astimezone(UTC),
+        datetime.combine(following, time.min, tzinfo=tz).astimezone(UTC),
+    )
+
+
+@router.get("/calendar", response_model=HistoryCalendar)
+async def history_calendar(
+    db: DbSession,
+    user: CurrentUser,
+    filters: Annotated[MediaFilters, Depends()],
+    month: str | None = Query(None, pattern=_MONTH_PATTERN),
+    tz: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    anime_only: bool = False,
+    # How many titles a day may name. The cap is small on purpose: a cell is a
+    # picture and a number, and a binge of twelve episodes is one series, one
+    # poster and a count of plays.
+    per_day: int = Query(3, ge=1, le=8),
+) -> HistoryCalendar:
+    """One month of the watch log, bucketed by the viewer's own day.
+
+    The same filter surface as `GET /api/history`, and the same two overrides —
+    a calendar disagreeing with the list under it would be worse than no
+    calendar at all. `since`/`until` still apply and are *intersected* with the
+    month rather than replaced by it, so a narrowed window shows as empty cells
+    instead of quietly widening back to the whole month.
+
+    Only days with plays are returned. The rest of the grid is 28 to 31 cells
+    the client derives from the month itself, and sending them would be a
+    payload of zeroes.
+
+    Two things make this an endpoint rather than a page of `GET /api/history`:
+
+    * **A month is not a page.** Fifty rows is a fortnight of one viewer's
+      watching and a year of another's, so paging cannot fill a grid whose
+      shape is fixed by the calendar.
+    * **A cell is a picture and a number**, not fifty event payloads. Every play
+      in the month is walked to count it, as two columns; only the distinct
+      titles behind them are loaded as rows.
+    """
+    filters.personal = "all"
+    if anime_only:
+        filters.anime = "only"
+
+    zone, zone_name = zone_for(user.preferences, tz)
+    if month is None:
+        month = datetime.now(UTC).astimezone(zone).strftime("%Y-%m")
+    start, end = _month_bounds(month, zone)
+
+    conditions = [
+        WatchEvent.user_id == user.id,
+        WatchEvent.watched_at >= start,
+        WatchEvent.watched_at < end,
+    ]
+    # The page's own window, on top of the month rather than instead of it.
+    if since is not None:
+        conditions.append(WatchEvent.watched_at >= since)
+    if until is not None:
+        conditions.append(WatchEvent.watched_at <= until)
+
+    joined = MediaItem.id == WatchEvent.media_item_id
+    stmt, _count_stmt = apply_filters(
+        # Two columns rather than whole rows: this walks every play in the
+        # month, and the count is all most of them contribute.
+        select(WatchEvent.watched_at, WatchEvent.media_item_id)
+        .join(MediaItem, joined)
+        .where(and_(*conditions)),
+        select(func.count(WatchEvent.id)).join(MediaItem, joined).where(and_(*conditions)),
+        filters,
+        user.id,
+        sort="watched_at",
+        order="desc",
+        sort_columns={"watched_at": WatchEvent.watched_at},
+        default_types=False,
+    )
+
+    # local day → plays, and the items played that day in query order (newest
+    # first), so the front of the list is the last thing watched on it.
+    plays: dict[date, int] = {}
+    watched: dict[date, OrderedDict[int, None]] = {}
+    for watched_at, item_id in await db.execute(stmt):
+        day = watched_at.astimezone(zone).date()
+        plays[day] = plays.get(day, 0) + 1
+        watched.setdefault(day, OrderedDict())[item_id] = None
+
+    # The distinct titles of the month, not its plays: a binge of one series is
+    # one row here however many episodes it was.
+    item_ids = {item_id for day in watched.values() for item_id in day}
+    items: dict[int, MediaItem] = {}
+    if item_ids:
+        rows = await db.execute(select(MediaItem).where(MediaItem.id.in_(item_ids)))
+        items = {item.id: item for item in rows.scalars()}
+    shows = await shows_for(db, [item.show_id for item in items.values() if item.show_id])
+    states = await states_for(db, user.id, list(item_ids))
+
+    days: list[HistoryCalendarDay] = []
+    for day in sorted(watched):
+        # A series counts once, whatever it was that you watched of it: five
+        # episodes on a Tuesday is one title, one poster and five plays. The
+        # episode kept as the representative is the most recent of them, so the
+        # card the cell draws is the one the list under it opens with.
+        titles: OrderedDict[int, int] = OrderedDict()
+        for item_id in watched[day]:
+            item = items.get(item_id)
+            titles.setdefault((item.show_id or item_id) if item else item_id, item_id)
+        picked = [items[i] for i in list(titles.values())[:per_day] if i in items]
+        days.append(
+            HistoryCalendarDay(
+                date=day,
+                count=plays[day],
+                titles=len(titles),
+                items=[
+                    to_card(item, states.get(item.id), show=shows.get(item.show_id or 0))
+                    for item in picked
+                ],
+            )
+        )
+
+    return HistoryCalendar(
+        month=month,
+        timezone=zone_name,
+        days=days,
+        total=sum(plays.values()),
+    )
 
 
 @router.post("", response_model=WatchEventOut, status_code=status.HTTP_201_CREATED)

@@ -481,6 +481,38 @@ the shared `watched_after`/`watched_before`: the first pair reads
 `UserMediaState.last_watched_at`, the rollup of when you last touched the title
 at all. Two tables, two questions; never merge them.
 
+**History draws those same rows three ways, and only one of them is a page.**
+`?view=list|grid|calendar`, in the URL rather than in `localStorage` beside the
+poster size, because a view changes what is *fetched* and carries a position
+with it — `?month=` and `?day=` — while a card size changes neither. The list
+and the poster grid share one paged `GET /api/history`; the calendar is
+`GET /api/history/calendar`, and it is a separate endpoint for two reasons that
+are worth keeping straight:
+
+* **A month is not a page.** Fifty rows is a fortnight of one viewer's watching
+  and a year of another's, so no `limit` fills a grid whose shape is fixed by
+  the calendar.
+* **A cell is a picture and a number.** Every play in the month is walked to
+  count it, as `(watched_at, media_item_id)` tuples; only the distinct titles
+  behind them are loaded as rows, and a day's plays are collapsed to titles so
+  a binge is one poster and a count of five.
+
+It declares the same `MediaFilters` and makes the same two overrides, because a
+calendar disagreeing with the list under it would be worse than no calendar —
+and the page's own `since`/`until` are **intersected** with the month rather
+than replaced by it, or a narrowed window would silently widen back out when
+drawn as a month. Buckets are local (`?tz=` → preference → UTC, reported back),
+bounds are local midnight converted to UTC, exactly as `routers/stats.py` does
+it.
+
+Two smaller rules came out of this and belong to the shared code, not to the
+page. `FilterPage.keep` names the parameters `clear()` must not take — clearing
+the filters from inside the calendar used to land the reader in the list, in a
+different month. And `updateMany` exists because every write starts from the URL
+as it *is*: two `update` calls in a row both read the same snapshot and the
+second discards the first, which is exactly what changing month while closing a
+day would have done.
+
 **A facet an episode does not carry is read from its show.** Genre, studio,
 content rating, network and release status are only ever populated for MOVIE and
 SHOW — enrichment is skipped for episodes by design — so a facet filter over
@@ -805,8 +837,15 @@ Two things decide every size in the app, and both are stamped once:
   in that table is derived from, so a card size in there would put a chip
   reading "Large" in the filter row and claim the grid was narrowed. A picture that cannot have a rung **does not
   appear**: portrait art never goes in a text row, because a row with a picture
-  is sized *by* the picture, which is why the History diary and the Stats
-  leaderboards lost thumbnails that were three rungs under the ladder. The art
+  is sized *by* the picture. That is why the History diary and the Stats
+  leaderboards lost thumbnails that were three rungs under the ladder (14 x 20
+  and 24 x 36) — and why the diary's poster came *back* at `--art-row`, 48, the
+  rung meant to sit inline in a list: with no landscape still to spend it on it
+  goes on height, giving a 32 x 48 poster and a 48px row. "Smaller than the
+  rung" is the thing that is forbidden, not "a picture in a row". `.month-grid`
+  is the one grid that cannot choose its column count, so it is capped at seven
+  `--art-tile` columns instead of reflowing, and it drops the artwork entirely
+  below about 500px where a cell is 48px wide. The art
   card carries its label on the art and never in a caption strip, the label is
   visible by default and hidden only where a pointer can reveal it, and the
   placeholder names the item *underneath* the image so a library with no

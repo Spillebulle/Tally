@@ -22,7 +22,7 @@ const { chromium } = require('playwright')
 const BASE_URL = process.env.TALLY_BASE_URL
 const OUT_DIR = process.env.TALLY_OUT
 const THEMES = (process.env.TALLY_THEMES || 'dark,light').split(',').filter(Boolean)
-const PAGES = (process.env.TALLY_PAGES || 'login,dashboard,movies,shows,anime,watchlist,history,stats,settings,item')
+const PAGES = (process.env.TALLY_PAGES || 'login,dashboard,movies,shows,anime,watchlist,history,history-posters,history-calendar,history-day,stats,settings,item')
   .split(',')
   .filter(Boolean)
 const WIDTH = parseInt(process.env.TALLY_WIDTH || '1440', 10)
@@ -36,6 +36,13 @@ if (!BASE_URL || !OUT_DIR || !USERNAME || !PASSWORD) {
   process.exit(1)
 }
 
+/** Today as a local `YYYY-MM-DD`, never through `toISOString()`, which is UTC. */
+function localDay() {
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
 const PAGE_PATHS = {
   login: '/login',
   dashboard: '/',
@@ -44,6 +51,15 @@ const PAGE_PATHS = {
   anime: '/anime',
   watchlist: '/watchlist',
   history: '/history',
+  // History draws the same plays three ways, and two of them are artwork - so
+  // the one page whose regressions a screenshot would catch is the one page a
+  // single shot cannot cover.
+  'history-posters': '/history?view=grid',
+  'history-calendar': '/history?view=calendar',
+  // The calendar with a day open under it. Today, because the seed runs its
+  // plays up to now - and on the days it leaves empty this still shows the
+  // "nothing watched that day" branch, which is worth a look of its own.
+  'history-day': `/history?view=calendar&day=${localDay()}`,
   stats: '/stats',
   settings: '/settings',
   item: ITEM_ID ? `/item/${ITEM_ID}` : null,

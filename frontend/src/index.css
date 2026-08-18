@@ -470,6 +470,34 @@
   }
 
   /*
+   * The month grid: seven columns, and a picture in each one.
+   *
+   * Not `.poster-grid`. That grid reflows to as many columns as fit, which is
+   * the right answer everywhere the order is the only structure; a calendar has
+   * exactly seven columns or it is not a calendar, so the *width* has to give
+   * instead. The cells are `aspect-art`, so every one of them is a poster's
+   * shape whether or not it has a poster in it.
+   *
+   * The cap is what keeps this on the artwork ladder (7.21). Tracks are `1fr`,
+   * so on a wide page a seven-column grid would stretch each cell far past any
+   * sanctioned width - a month of 260px posters, one rung above the browse card
+   * on a page that is not a detail page. Capping the whole grid at seven
+   * `--art-tile` columns plus their gaps means a cell is *at most* the tile
+   * rung, and below that it shrinks with the window like everything else.
+   *
+   * Under about 500px the cells are too small to hold a picture at all, and a
+   * picture that cannot have a rung does not appear - the cell keeps its number
+   * and its count, and `MonthCalendar` drops the artwork. That is the shell
+   * changing on a narrow viewport, not a third scale.
+   */
+  .month-grid {
+    display: grid;
+    gap: var(--s1);
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    max-width: calc(7 * var(--art-tile) + 6 * var(--s1));
+  }
+
+  /*
    * A backdrop image joining the page (7.22).
    *
    * The house token `--fade-backdrop` ramps to `--backdrop`, the canvas pit. A

@@ -4,6 +4,32 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
+## 0.6.0
+
+**History is drawn three ways.** The diary list is still there and still the
+default. Beside it on the filter strip are two more: **Posters**, the same days
+of viewing as artwork, with the same poster-size control the grids have; and
+**Calendar**, a month at a time, one poster per day and the number of plays on
+it. Which one you are looking at is part of the link, so a month is something
+you can send to somebody.
+
+**The calendar answers a question the list could not.** A diary in date order
+hides the gaps and the runs behind a scroll bar. A month shows them: the week
+off, the three nights in a row, the Sunday that took six episodes. Click a day
+and its plays appear under the calendar, with the month still on screen, so
+looking at the next day is one more click.
+
+**A day belongs to you, not to the server.** The calendar buckets plays in your
+own time zone, so a film started at half past eleven belongs to that evening.
+
+**The list has posters too.** Every row in the diary carries a 32 x 48 poster,
+which makes the rows half again as tall and a page of them recognisable at a
+glance. The poster grid is still the one to pick when the artwork is the point.
+
+**An episode is drawn as its series.** Wherever a play appears as artwork,
+episodes now use the series poster instead of the still from that episode,
+which a portrait card could only crop through the middle.
+
 ## 0.5.0
 
 **Tally is drawn a size up.** It is a web application read in a browser tab,

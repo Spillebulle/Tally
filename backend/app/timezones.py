@@ -51,3 +51,18 @@ def _load(name: str) -> tzinfo | None:
         # ZoneInfoNotFoundError: no such zone in the tzdata this image carries.
         # ValueError: a key ZoneInfo itself refuses, e.g. one containing "..".
         return None
+
+
+def zone_for(preferences: dict | None, tz: str | None) -> tuple[tzinfo, str]:
+    """The zone in force for one request, and the name to report it under.
+
+    `?tz=` beats the stored preference, and an unloadable name falls back to UTC
+    rather than 500ing — so the response has to say which zone it *actually*
+    used, or a silent fallback looks like correct data in the wrong hours.
+
+    It takes the preferences blob rather than the `User` row so this module
+    stays free of the models, and so a caller with no user at all can still ask.
+    """
+    name = tz or (preferences or {}).get("timezone")
+    zone = resolve(name)
+    return zone, "UTC" if zone is UTC else str(name)

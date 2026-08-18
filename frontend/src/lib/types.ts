@@ -39,6 +39,16 @@ export interface MediaCard {
   episode_number: number | null
   show_id: number | null
   show_title: string | null
+  /**
+   * The *series'* poster, for an episode whose parent the endpoint loaded.
+   *
+   * An episode's own artwork on Plex is the still from that episode - a 16:9
+   * frame a portrait card can only centre-crop - so anywhere a play is drawn as
+   * artwork this is the picture to prefer. Null where the parent was not
+   * loaded, and for anything that is not an episode, so a reader falls back to
+   * `poster_url`.
+   */
+  show_poster_url: string | null
   status: WatchStatus | null
   rating: number | null
   progress_percent: number | null
@@ -141,6 +151,31 @@ export interface HistoryPage {
   total: number
   offset: number
   limit: number
+}
+
+/** One local day of the watch log. Only days with plays are sent. */
+export interface HistoryCalendarDay {
+  /**
+   * A **local** day key, bucketed in the zone `HistoryCalendar.timezone` names.
+   * Read it with `parseLocalDateLabel`, never `new Date('YYYY-MM-DD')`.
+   */
+  date: string
+  /** Plays, including rewatches and every episode of a binge. */
+  count: number
+  /** Distinct titles behind them - a series counts once, however many episodes. */
+  titles: number
+  /** The first few of those titles, most recent play first. */
+  items: MediaCard[]
+}
+
+export interface HistoryCalendar {
+  /** `YYYY-MM`, echoed back so a late response cannot land under the wrong heading. */
+  month: string
+  /** The zone actually used, which is not always the one asked for. */
+  timezone: string
+  days: HistoryCalendarDay[]
+  /** Plays in the whole month, after filtering. */
+  total: number
 }
 
 export interface WatchlistEntry {

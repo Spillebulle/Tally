@@ -1,14 +1,26 @@
 import { Link, useSearchParams } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type MediaQuery } from '@/lib/api'
+import { api, type HistoryCalendarQuery, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
-import { HISTORY_SORTS, useBrowseFilters } from '@/lib/browse-filters'
-import type { HistoryPage, WatchEvent } from '@/lib/types'
-import { cn, compactNumber, displaySubtitle, formatDateTime } from '@/lib/utils'
+import { dayWindow, HISTORY_SORTS, useBrowseFilters } from '@/lib/browse-filters'
+import { CardSizeControl, cardSizeStyle, useCardSize } from '@/lib/card-size'
+import type { HistoryCalendarDay, HistoryPage, WatchEvent } from '@/lib/types'
+import {
+  cn,
+  compactNumber,
+  displayArtwork,
+  displaySubtitle,
+  displayTitle,
+  formatDateTime,
+  localDateKey,
+  parseLocalDateLabel,
+} from '@/lib/utils'
 import { BrowseFilters } from '@/components/BrowseFilters'
+import { MonthCalendar, monthLabel } from '@/components/MonthCalendar'
 import { Pagination, usePageParam } from '@/components/Pagination'
+import { ArtMark, Artwork, POSTER_GRID, Poster, PosterSkeleton } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
-import { Clock, X } from 'lucide-react'
+import { CalendarDays, Clock, LayoutGrid, Rows3, X } from 'lucide-react'
 
 const PAGE_SIZE = 50
 
@@ -40,6 +52,62 @@ const FILTERS = [
 ] as const
 
 type Filter = (typeof FILTERS)[number]['value']
+
+/**
+ * How the same plays are drawn. Three answers to three different questions.
+ *
+ * * **List** — what did I watch, most recent first. The densest, and the only
+ *   one that shows where a play came from and what it was played on.
+ * * **Posters** — the same diary, as artwork. A month of viewing is recognised
+ *   at a glance in a way a column of titles never is.
+ * * **Calendar** — *when*, and with what shape: the gaps, the runs, the Sunday
+ *   that took six episodes. A list in date order hides all of that behind a
+ *   scroll bar.
+ *
+ * In the URL, unlike the poster size beside it, and the difference is the usual
+ * test: a view mode changes what is *fetched* (the calendar asks for a month,
+ * not a page) and it carries a position with it — which month, which day is
+ * open — so a link has to be able to say it and Back has to be able to undo it.
+ * The card size changes neither, which is why it lives in `localStorage`.
+ */
+const VIEWS = [
+  { value: 'list', label: 'List', icon: <Rows3 className="size-icon" aria-hidden="true" /> },
+  {
+    value: 'grid',
+    label: 'Posters',
+    icon: <LayoutGrid className="size-icon" aria-hidden="true" />,
+  },
+  {
+    value: 'calendar',
+    label: 'Calendar',
+    icon: <CalendarDays className="size-icon" aria-hidden="true" />,
+  },
+] as const
+
+type ViewMode = (typeof VIEWS)[number]['value']
+
+const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/
+const DAY = /^\d{4}-\d{2}-\d{2}$/
+
+/** The month the reader is in, as `YYYY-MM`, in their own zone. */
+const thisMonth = () => localDateKey(new Date()).slice(0, 7)
+
+/**
+ * The zone the browser is actually in.
+ *
+ * Sent with the calendar request rather than left to the stored preference,
+ * because which day a play landed on is a question about where the reader is
+ * *now*: a stored "Europe/Oslo" is the right default and the wrong answer for
+ * the same person reading in Tokyo. The server still resolves it, and still
+ * falls back to the preference and then to UTC.
+ */
+const browserZone = (): string | undefined => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+  } catch {
+    return undefined
+  }
+}
 
 /** Group events by calendar day so the timeline reads as a diary. */
 function groupByDay(events: WatchEvent[]): Array<[string, WatchEvent[]]> {
@@ -94,7 +162,24 @@ export function History() {
   const filter: Filter = FILTERS.some((option) => option.value === requestedFilter)
     ? (requestedFilter as Filter)
     : 'all'
+  // Every one of these is checked against what it may be, and falls back to the
+  // page default: a URL is untrusted input, and `?month=2026-13` reaching the
+  // API is a 422 and an error card where the calendar should be.
+  const requestedView = params.get('view')
+  const view: ViewMode = VIEWS.some((option) => option.value === requestedView)
+    ? (requestedView as ViewMode)
+    : 'list'
+  const requestedMonth = params.get('month')
+  const month = requestedMonth && MONTH.test(requestedMonth) ? requestedMonth : thisMonth()
+  const requestedDay = params.get('day')
+  // A day is only meaningful under the calendar that opened it. Left readable
+  // in the other views, a stale `?day=` would narrow a diary with no control
+  // anywhere saying so.
+  const day =
+    view === 'calendar' && requestedDay && DAY.test(requestedDay) ? requestedDay : null
+
   const { page, setPage } = usePageParam()
+  const { size: cardSize, setSize: setCardSize } = useCardSize()
   const queryClient = useQueryClient()
   const { notify } = useToast()
 
@@ -122,10 +207,31 @@ export function History() {
      * this page is about, so it is the one that stays.
      */
     omit: ['status', 'watched'],
+    /**
+     * How the page is drawn, and where in it the reader is. None of the three
+     * narrows anything, so "Clear all" must not take them: clearing the filters
+     * from inside the calendar used to land the reader back in the list, in a
+     * different month, which reads as the button having done something else.
+     */
+    keep: ['view', 'month', 'day'],
   })
 
   const setFilter = (next: Filter) =>
     filters.update('filter', next === 'all' ? null : next)
+
+  // A default never survives into the URL, so leaving the calendar drops the
+  // month and the day with it rather than leaving a position nothing can see.
+  const setView = (next: ViewMode) =>
+    filters.updateMany(
+      next === 'calendar'
+        ? { view: next }
+        : { view: next === 'list' ? null : next, month: null, day: null },
+    )
+
+  // One write, not two: each starts from the URL as it is now, so a second call
+  // would discard the first. Changing month closes the day open in the old one.
+  const setMonth = (next: string) =>
+    filters.updateMany({ month: next === thisMonth() ? null : next, day: null })
 
   const query: MediaQuery = {
     ...filters.query,
@@ -139,10 +245,41 @@ export function History() {
     limit: PAGE_SIZE,
   }
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
-    queryKey: ['history', query],
-    queryFn: () => api.history.list(query),
+  // The calendar's day panel is the same list endpoint, narrowed to one date.
+  // The window is *added* to the filters rather than replacing them, so a
+  // filtered month opens a filtered day.
+  const listQuery: MediaQuery = day ? { ...query, ...dayWindow(day), offset: 0 } : query
+
+  const {
+    data,
+    isLoading: listLoading,
+    isFetching: listFetching,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
+    queryKey: ['history', listQuery],
+    queryFn: () => api.history.list(listQuery),
     placeholderData: keepPreviousData,
+    // Under the calendar there is nothing to list until a day is picked.
+    enabled: view !== 'calendar' || day !== null,
+  })
+
+  const calendarQuery: HistoryCalendarQuery = {
+    ...query,
+    month,
+    tz: browserZone(),
+    // A cell draws one picture, so one card is all it can use. The count and
+    // the number of titles behind it come back whatever this is.
+    per_day: 1,
+    offset: undefined,
+    limit: undefined,
+  }
+  const calendar = useQuery({
+    queryKey: ['history-calendar', calendarQuery],
+    queryFn: () => api.history.calendar(calendarQuery),
+    placeholderData: keepPreviousData,
+    enabled: view === 'calendar',
   })
 
   // The same two lists the grids offer, over everything: History shows films,
@@ -163,9 +300,9 @@ export function History() {
     // Take the row out immediately; waiting for the round trip made the button
     // look inert. Restored from the snapshot if the delete fails.
     onMutate: async (eventId: number) => {
-      await queryClient.cancelQueries({ queryKey: ['history', query] })
-      const previous = queryClient.getQueryData<HistoryPage>(['history', query])
-      queryClient.setQueryData<HistoryPage>(['history', query], (old) =>
+      await queryClient.cancelQueries({ queryKey: ['history', listQuery] })
+      const previous = queryClient.getQueryData<HistoryPage>(['history', listQuery])
+      queryClient.setQueryData<HistoryPage>(['history', listQuery], (old) =>
         old
           ? {
               ...old,
@@ -179,20 +316,37 @@ export function History() {
     onSuccess: () => notify('Removed from history', 'info'),
     onError: (error: Error, _eventId, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(['history', query], context.previous)
+        queryClient.setQueryData(['history', listQuery], context.previous)
       }
       notify(error.message, 'error')
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['history'] })
+      // The month's counts are the same plays seen another way, so a removal
+      // has to reach them too or the calendar keeps insisting on a play the
+      // list no longer has.
+      queryClient.invalidateQueries({ queryKey: ['history-calendar'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
     },
   })
 
+  /**
+   * Is the month on screen the month that came back?
+   *
+   * `keepPreviousData` holds the old month's days while the new one is in
+   * flight, which is what stops the grid blinking — but the heading, the cells
+   * and the total all come from the URL, so for that moment they would be the
+   * new month drawn from the old month's numbers. The payload echoes its own
+   * `month` for exactly this: until the two agree, the grid is loading.
+   */
+  const shownMonth = calendar.data?.month === month ? calendar.data : null
+  const monthReady = shownMonth !== null
   const total = data?.total ?? 0
   const pageCount = Math.ceil(total / PAGE_SIZE)
   const events = data?.events ?? []
+  const isLoading = view === 'calendar' ? !monthReady : listLoading
+  const isFetching = view === 'calendar' ? calendar.isFetching : listFetching
   // The day headings are only true while the list is in time order. Sorted by
   // title, consecutive rows come from unrelated dates, and grouping them would
   // print a heading per row and call each one a day's viewing.
@@ -202,6 +356,8 @@ export function History() {
   // so it is the one thing `filters.active` cannot know about.
   const narrowed = filters.active || filter !== 'all' || Boolean(filters.values.q)
 
+  const removeRow = (event: WatchEvent) => remove.mutate(event.id)
+
   return (
     <div>
       <PageHeader
@@ -209,6 +365,11 @@ export function History() {
         subtitle={
           isLoading ? (
             'Loading…'
+          ) : view === 'calendar' ? (
+            <>
+              <span className="figure">{compactNumber(shownMonth?.total ?? 0)}</span>{' '}
+              plays in {monthLabel(month)}
+            </>
           ) : (
             <>
               <span className="figure">{compactNumber(total)}</span> plays recorded
@@ -234,22 +395,67 @@ export function History() {
           servers: places.data?.servers ?? [],
         }}
         busy={isFetching && !isLoading}
+        // Both of these say how the plays are drawn rather than which plays
+        // they are, which is what this slot is for. The poster size only
+        // appears where there are posters to size.
+        actions={
+          <>
+            {view === 'grid' && <CardSizeControl value={cardSize} onChange={setCardSize} />}
+            <Segmented
+              label="How history is shown"
+              value={view}
+              onChange={setView}
+              options={VIEWS.map((option) => ({ ...option }))}
+            />
+          </>
+        }
       />
 
-      {isLoading ? (
-        // The same geometry as the rows they stand in for: `h-row` each, inside
-        // the same bordered list.
-        <ul className="card overflow-hidden">
-          {Array.from({ length: 12 }, (_, index) => (
-            <li
-              key={index}
-              className="flex h-row items-center gap-2 border-b border-line-soft px-2 last:border-b-0"
-            >
-              <span className="skeleton h-2.5 w-40 rounded-tight" />
-              <span className="skeleton ml-auto h-2.5 w-16 rounded-tight" />
-            </li>
-          ))}
-        </ul>
+      {view === 'calendar' ? (
+        <CalendarView
+          month={month}
+          day={day}
+          days={shownMonth?.days ?? []}
+          loading={!monthReady}
+          error={calendar.isError ? calendar.error : null}
+          onRetry={() => void calendar.refetch()}
+          onMonth={setMonth}
+          onSelectDay={(dateKey) =>
+            filters.updateMany({ day: dateKey === day ? null : dateKey })
+          }
+          dayEvents={events}
+          dayTotal={total}
+          dayLoading={listLoading}
+          dayError={isError ? error : null}
+          onRetryDay={() => void refetch()}
+          onRemove={removeRow}
+        />
+      ) : isLoading ? (
+        view === 'grid' ? (
+          <div className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
+            {Array.from({ length: 12 }, (_, index) => (
+              <PosterSkeleton key={index} />
+            ))}
+          </div>
+        ) : (
+          // The same geometry as the rows they stand in for: `h-row` each,
+          // inside the same bordered list.
+          <ul className="card overflow-hidden">
+            {Array.from({ length: 12 }, (_, index) => (
+              <li
+                key={index}
+                className="flex h-art-row items-center gap-2 border-b border-line-soft pr-2 last:border-b-0"
+              >
+                {/* The same geometry as the row it stands in for, picture and
+                    all: a skeleton a rung shorter than its row is a page that
+                    jumps when it loads. */}
+                <span className="skeleton h-full w-auto shrink-0 rounded-art aspect-art" />
+                <span className="skeleton h-2.5 w-40 rounded-tight" />
+                <span className="skeleton ml-auto h-2.5 w-16 rounded-tight" />
+              </li>
+            ))}
+          </ul>
+        )
       ) : isError ? (
         // Before the empty branch, always: a 500 and an empty diary need
         // different reactions, and the empty one tells the user to run a sync.
@@ -282,31 +488,37 @@ export function History() {
         </div>
       ) : byDay ? (
         <div className="flex flex-col gap-4">
-          {grouped.map(([day, plays]) => (
-            <section key={day}>
+          {grouped.map(([groupDay, plays]) => (
+            <section key={groupDay}>
               {/* A group header inside a list is an eyebrow (§7.16). It sticks
                   under the 34px top bar, which is what `top-menubar` is: at a
                   hard-coded 64px it hung a whole bar's height too low. */}
               <h2 className="sticky top-menubar z-10 flex items-baseline gap-2 bg-window py-1.5">
-                <span className="eyebrow">{dayLabel(day)}</span>
+                <span className="eyebrow">{dayLabel(groupDay)}</span>
                 <span className="text-tiny text-dim">
                   <span className="figure">{plays.length}</span>{' '}
                   {plays.length === 1 ? 'play' : 'plays'}
                 </span>
               </h2>
-              <ul className="card overflow-hidden">
-                {plays.map((event) => (
-                  <HistoryRow
-                    key={event.id}
-                    event={event}
-                    showDate={false}
-                    onRemove={() => remove.mutate(event.id)}
-                  />
-                ))}
-              </ul>
+              {view === 'grid' ? (
+                <PlayGrid plays={plays} size={cardSize} onRemove={removeRow} />
+              ) : (
+                <ul className="card overflow-hidden">
+                  {plays.map((event) => (
+                    <HistoryRow
+                      key={event.id}
+                      event={event}
+                      showDate={false}
+                      onRemove={() => removeRow(event)}
+                    />
+                  ))}
+                </ul>
+              )}
             </section>
           ))}
         </div>
+      ) : view === 'grid' ? (
+        <PlayGrid plays={events} size={cardSize} onRemove={removeRow} />
       ) : (
         <ul className="card overflow-hidden">
           {events.map((event) => (
@@ -314,18 +526,219 @@ export function History() {
               key={event.id}
               event={event}
               showDate
-              onRemove={() => remove.mutate(event.id)}
+              onRemove={() => removeRow(event)}
             />
           ))}
         </ul>
       )}
 
-      <Pagination
-        page={page}
-        pageCount={pageCount}
-        onPage={setPage}
-        ready={!isLoading}
+      {view !== 'calendar' && (
+        <Pagination
+          page={page}
+          pageCount={pageCount}
+          onPage={setPage}
+          ready={!isLoading}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * The month, and the day the reader has opened inside it.
+ *
+ * The day's plays land *under* the calendar rather than replacing it, and that
+ * is the whole reason a day is a parameter of this view instead of a jump into
+ * the list: the month stays on screen, so picking a second day is one click
+ * rather than a click and a Back.
+ */
+function CalendarView({
+  month,
+  day,
+  days,
+  loading,
+  error,
+  onRetry,
+  onMonth,
+  onSelectDay,
+  dayEvents,
+  dayTotal,
+  dayLoading,
+  dayError,
+  onRetryDay,
+  onRemove,
+}: {
+  month: string
+  day: string | null
+  /** Only the days that have plays. */
+  days: HistoryCalendarDay[]
+  loading: boolean
+  error: unknown
+  onRetry: () => void
+  onMonth: (month: string) => void
+  onSelectDay: (dateKey: string) => void
+  dayEvents: WatchEvent[]
+  dayTotal: number
+  dayLoading: boolean
+  dayError: unknown
+  onRetryDay: () => void
+  onRemove: (event: WatchEvent) => void
+}) {
+  // A failed request is not an empty month: falling through would draw a
+  // perfectly convincing calendar of nothing and hide a 500.
+  if (error) {
+    return (
+      <div className="card">
+        <ErrorState error={error} onRetry={onRetry} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <MonthCalendar
+        month={month}
+        days={days}
+        loading={loading}
+        selected={day}
+        onSelectDay={onSelectDay}
+        onMonth={onMonth}
       />
+
+      {!loading && days.length === 0 && (
+        <p className="text-control text-dim">Nothing watched in {monthLabel(month)}.</p>
+      )}
+
+      {day && (
+        <section>
+          <h2 className="mb-1 flex items-baseline gap-2">
+            <span className="eyebrow">
+              {parseLocalDateLabel(day).toLocaleDateString(undefined, {
+                weekday: 'long',
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric',
+              })}
+            </span>
+            <span className="text-tiny text-dim">
+              <span className="figure">{dayTotal}</span> {dayTotal === 1 ? 'play' : 'plays'}
+            </span>
+            <button
+              type="button"
+              onClick={() => onSelectDay(day)}
+              className="btn-ghost ml-auto px-1.5"
+              title="Close this day"
+              aria-label="Close this day"
+            >
+              <X className="size-icon" aria-hidden="true" />
+            </button>
+          </h2>
+
+          {dayError ? (
+            <div className="card">
+              <ErrorState error={dayError} onRetry={onRetryDay} />
+            </div>
+          ) : !dayLoading && dayEvents.length === 0 ? (
+            // Only a hand-edited `?day=` reaches this - a cell with no plays is
+            // not a button. Said in a sentence rather than left as an empty
+            // bordered box, which reads as a list that failed to load.
+            <p className="text-control text-dim">Nothing watched that day.</p>
+          ) : (
+            <ul className="card overflow-hidden">
+              {dayLoading
+                ? Array.from({ length: 3 }, (_, index) => (
+                    <li
+                      key={index}
+                      className="flex h-art-row items-center gap-2 border-b border-line-soft pr-2 last:border-b-0"
+                    >
+                      <span className="skeleton h-full w-auto shrink-0 rounded-art aspect-art" />
+                      <span className="skeleton h-2.5 w-40 rounded-tight" />
+                    </li>
+                  ))
+                : dayEvents.map((event) => (
+                    <HistoryRow
+                      key={event.id}
+                      event={event}
+                      showDate={false}
+                      onRemove={() => onRemove(event)}
+                    />
+                  ))}
+            </ul>
+          )}
+
+          {/* One page of a day, which is a great many plays. Said out loud
+              rather than silently truncated: a diary that drops rows is how a
+              user comes to believe Tally lost them. */}
+          {dayTotal > dayEvents.length && !dayLoading && (
+            <p className="mt-1 text-tiny text-dim">
+              Showing the first <span className="figure">{dayEvents.length}</span> of{' '}
+              <span className="figure">{dayTotal}</span>.
+            </p>
+          )}
+        </section>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A day's plays as art cards — the diary with the pictures in it.
+ *
+ * One card per *play*, not per title, because this is still a log: watching the
+ * same film twice in a day is two entries here and one row on any grid. The
+ * time it happened is a mark on the artwork rather than a caption underneath,
+ * for the reason `.art-card` has no caption strip at all (§7.21).
+ */
+function PlayGrid({
+  plays,
+  size,
+  onRemove,
+}: {
+  plays: WatchEvent[]
+  size: Parameters<typeof cardSizeStyle>[0]
+  onRemove: (event: WatchEvent) => void
+}) {
+  return (
+    <div className={POSTER_GRID} style={cardSizeStyle(size)}>
+      {plays.map((event) =>
+        event.item ? (
+          <div key={event.id} className="group/play relative">
+            <Poster
+              card={event.item}
+              // The bar is "how far through it you are", which is a fact about
+              // the title and not about this play. On a log of finished plays
+              // it would draw a progress bar under a film watched last March.
+              showProgress={false}
+              // Every card here is something you watched, so the tick says
+              // nothing - and it sits in the corner this page puts its own
+              // control in, which is how it was found: a green disc with a
+              // remove button landing on top of it.
+              showWatched={false}
+              marks={<ArtMark>{timeOfDay(event.watched_at)}</ArtMark>}
+            />
+            <button
+              type="button"
+              onClick={() => onRemove(event)}
+              // A mark over user content, so it takes the artwork inks on a
+              // scrim rather than a theme token. Always visible where there is
+              // no hover to reveal it with, and `pointer-events-none` beside
+              // the fade, because opacity is not a hit test.
+              className="absolute right-2 top-2 z-10 grid h-6 w-6 place-items-center rounded-full
+                         bg-scrim-flat text-art backdrop-blur-sm transition-opacity
+                         duration-open hover:bg-critical
+                         lg:pointer-events-none lg:opacity-0
+                         lg:group-hover/play:pointer-events-auto
+                         lg:group-hover/play:opacity-100
+                         lg:focus-visible:pointer-events-auto
+                         lg:focus-visible:opacity-100"
+              title="Remove from history"
+              aria-label={`Remove ${displayTitle(event.item)} from history`}
+            >
+              <X className="size-icon" aria-hidden="true" />
+            </button>
+          </div>
+        ) : null,
+      )}
     </div>
   )
 }
@@ -335,14 +748,25 @@ export function History() {
  * figures right-aligned and monospaced, hairlines in `line-soft` between rows,
  * no zebra striping and no vertical rules.
  *
- * **No thumbnail.** It carried a 14 x 20 poster, which is three rungs below
- * the bottom of the artwork ladder and, in §7.21's words about faces, a smudge
- * doing no work. The ladder's inline rung is `--art-row`, and it is landscape:
- * portrait art never goes in a text row, because a row that carries a picture
- * is sized *by* the picture, and a poster at a size worth showing would make
- * this diary four screens per page again. Tally holds no landscape still for a
- * card, so the honest answer is the row without one. The title is the content
- * here and it links to the item, where the artwork is.
+ * **The poster is at `--art-row`, and the row is sized by it.** This row used
+ * to carry a 14 x 20 poster, which is three rungs below the bottom of the
+ * ladder and, in §7.21's words about faces, a smudge doing no work — and the
+ * lesson taken from removing it was "no picture", which was only half of it.
+ * The rule is that a picture in a row gets the row's *rung*: `--art-row`, 48,
+ * the one width on the ladder meant to sit inline in a list. Tally has no
+ * landscape still to spend it on, so a portrait poster spends it on **height**
+ * instead and comes out 32 x 48 — small, but a poster somebody who owns the
+ * film recognises, which 14 x 20 never was.
+ *
+ * What it costs is honest and worth saying: the row goes from `h-row` (32) to
+ * 48, so a page of fifty plays is half again as tall. Denser still is the same
+ * list with `?view=…` on it — this is the middle of the three, not the
+ * smallest.
+ *
+ * The picture is flush to the row's top and bottom edges rather than inset,
+ * because an inset would need a vertical padding that is not on the fine grid
+ * at either scale. Consecutive posters therefore form one column of artwork
+ * with the hairlines crossing it.
  */
 function HistoryRow({
   event,
@@ -360,7 +784,24 @@ function HistoryRow({
   const to = card ? `/item/${card.id}` : '#'
 
   return (
-    <li className="group flex h-row items-center gap-2 border-b border-line-soft px-2 text-control transition-colors duration-hover ease-ease last:border-b-0 hover:bg-control-hover">
+    <li className="group flex h-art-row items-center gap-2 border-b border-line-soft pr-2 text-control transition-colors duration-hover ease-ease last:border-b-0 hover:bg-control-hover">
+      {/* Height off the ladder, width from `aspect-art` — never the other way
+          round, because a poster stretched into a box of the wrong shape is
+          the one thing 7.21 will not have. `shrink-0`, or a long title would
+          squeeze the picture into a stripe. */}
+      <Link to={to} className="h-full shrink-0" tabIndex={-1} aria-hidden="true">
+        <Artwork
+          src={card ? displayArtwork(card) : null}
+          title={title}
+          // The name is already in the row beside it, and at 32px wide the
+          // placeholder could only ever show a letter and a half. The gradient
+          // is still deterministic per title, so an artwork-less diary is a
+          // column of stable colours rather than a column of grey.
+          showTitle={false}
+          className="h-full w-auto aspect-art"
+        />
+      </Link>
+
       <Link to={to} className="min-w-0 shrink truncate text-fg hover:text-strong">
         {title}
       </Link>

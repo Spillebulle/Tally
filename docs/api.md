@@ -62,6 +62,7 @@ proxy. Grafana's own setup is in `integrations/grafana.md` and Prometheus is in
 | `GET /api/media/{item_id}` | One title, with its ratings, progress and metadata. |
 | `GET /api/watchlist` | Your watchlist, filterable and sortable. |
 | `GET /api/history` | Your watch history. |
+| `GET /api/history/calendar` | One month of it, bucketed by day. Takes the same filters, plus `month=YYYY-MM`, `tz` and `per_day`. Only days with plays come back, and the response names the time zone it used. |
 | `POST /api/history/{item_id}/watched` | Log a title as watched. |
 | `GET /api/stats` | Totals, genres, ratings and streaks over a date range. |
 | `GET /api/stats/series` | One metric over time, as flat rows for a dashboard. |

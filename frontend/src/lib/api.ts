@@ -5,6 +5,7 @@ import type {
   BrowsePlaces,
   ContinueWatchingItem,
   Coverage,
+  HistoryCalendar,
   HistoryPage,
   Library,
   MediaCard,
@@ -206,6 +207,24 @@ export interface MediaQuery extends Query {
 }
 
 /**
+ * `/api/history/calendar` - one month, and how many titles a cell may name.
+ *
+ * `sort`, `order`, `offset` and `limit` are inherited from `MediaQuery` and
+ * mean nothing here; a month is not a page and its days come back in date
+ * order. They are harmless rather than rejected, which is what lets the page
+ * hand over `filters.query` unchanged and keep one definition of "the filters
+ * in force".
+ */
+export interface HistoryCalendarQuery extends MediaQuery {
+  /** `YYYY-MM`. Omitted means the month the viewer is currently in. */
+  month?: string
+  /** The viewer's IANA zone. The server falls back to the stored preference. */
+  tz?: string
+  /** How many titles one day may name. 1-8, and the server caps it. */
+  per_day?: number
+}
+
+/**
  * The window `/api/stats` should cover.
  *
  * Three ways to ask and the server resolves whichever it was into one `range`
@@ -334,6 +353,17 @@ export const api = {
     // The same filter surface as /api/media, plus `since`/`until` over the
     // plays and its own `HistorySortField`.
     list: (query: MediaQuery = {}) => get<HistoryPage>('/api/history', query),
+    /**
+     * One month of plays, bucketed by the viewer's own day.
+     *
+     * The same filters as `list`, because a calendar that disagreed with the
+     * list under it would be worse than no calendar - so it takes a
+     * `MediaQuery` too, with `month` and the zone on top. `tz` is sent from the
+     * browser rather than left to the stored preference: the day a play landed
+     * on is a question about where the reader is *now*.
+     */
+    calendar: (query: HistoryCalendarQuery = {}) =>
+      get<HistoryCalendar>('/api/history/calendar', query),
     markWatched: (id: number) =>
       post<WatchEvent>(`/api/history/${id}/watched`, undefined),
     markSeasonWatched: (showId: number, season: number) =>
