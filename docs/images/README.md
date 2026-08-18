@@ -19,7 +19,7 @@ rest are missing and the README has a place waiting for each.
 | `stats.png` | The statistics page: the activity heatmap and a chart or two beneath it. | `<img align="right" width="300">` beside the Stats section. | Present |
 | `filters.png` | The filter bar with the disclosure open and two or three chips showing. | `<img align="right" width="300">` beside the Filters section. | Present |
 | `settings-themes.png` | The Appearance pane: the theme cards, one custom theme among them, and the swatch editor beneath. | `<img align="right" width="300">` beside the Themes section. | Present, without a custom theme: the instance they were taken from has none, and one cannot be invented for a picture |
-| `history-calendar.png` | The month calendar: a poster per day and the play counts on them. | `<img align="right" width="300">` beside the History section, which currently has none. | Missing |
+| `history-calendar.png` | The month calendar: a poster per day and the play counts on them. 864 x 976. | Its own width, `width="864"`, under the History section. Not floated at 300: the module is 864 wide because `.month-grid` caps itself at seven tile columns, which is almost exactly the README's own column, so it lands 1:1 with no upscaling and every day is legible. At 300 it is a mosaic of 40px smudges. | Present |
 
 Every one of them needs alt text that names what is in it ("The Continue
 watching shelf: four cards, each with a progress bar across the poster"), never
@@ -54,14 +54,21 @@ committed as documentation.
 So these files are taken from a **real instance with a real library**, and the
 harness stays what it is for.
 
-## Why `history-calendar.png` is still missing
+## A picture has to be of the version that has the feature
 
-The same rule, one step further on. The three History views arrived in 0.6.0 and
-the instance the other pictures came from was still running 0.5.0, so the
+`history-calendar.png` could not be taken with the others. The three History
+views arrived in 0.6.0 and the instance was still running 0.5.0, so the
 calendar's endpoint answered 404 and the poster grid drew episodes as their own
-stills rather than the series poster - which is the very thing 0.6.0 fixed. A
-picture of a feature has to be a picture of the version that has it. Take it
-once the instance is updated.
+stills rather than the series poster - which is the very thing 0.6.0 fixed. It
+was taken a release later, against 0.6.0, and that wait was the right call
+rather than a delay.
+
+Which month is a choice worth making rather than taking whatever today is in.
+April 2026 has 81 plays over 24 of its 30 days, so the wall of posters is full
+and the empty days still read as empty. August had eight plays and would have
+shown an empty grid with a poster in the corner. Ask the API before you shoot:
+`/api/history/calendar?month=…&per_day=1` gives the totals per month in one
+call each.
 
 ## Two things that spoil a crop
 
@@ -73,6 +80,12 @@ once the instance is updated.
   `magick in.png -strip -colors 256 -define png:compression-level=9 out.png`
   brought it to 310 KB with no banding a reader would see at 300px wide. Check
   the result rather than assuming; quantisation is visible on a gradient.
+* **Add `-dither None` when the picture has flat areas.** The calendar's empty
+  days are a flat near-black fill, and dithering scattered visible speckle
+  through every one of them - a texture on the one part of the picture that is
+  meant to be nothing at all. Without dithering the same file is *smaller*
+  (191 KB against 231) and the flat stays flat. This is why the rule above is
+  "check the result": both versions pass every numeric test.
 
 ## Taking them from a real instance
 
