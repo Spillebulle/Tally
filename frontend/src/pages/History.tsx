@@ -7,7 +7,6 @@ import type { HistoryPage, WatchEvent } from '@/lib/types'
 import { cn, compactNumber, displaySubtitle, formatDateTime } from '@/lib/utils'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
-import { Artwork } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented } from '@/components/ui'
 import { Clock, X } from 'lucide-react'
 
@@ -238,7 +237,7 @@ export function History() {
       />
 
       {isLoading ? (
-        // The same geometry as the rows they stand in for: 26px each, inside
+        // The same geometry as the rows they stand in for: `h-row` each, inside
         // the same bordered list.
         <ul className="card overflow-hidden">
           {Array.from({ length: 12 }, (_, index) => (
@@ -246,7 +245,6 @@ export function History() {
               key={index}
               className="flex h-row items-center gap-2 border-b border-line-soft px-2 last:border-b-0"
             >
-              <span className="skeleton h-5 w-[14px] rounded-tight" />
               <span className="skeleton h-2.5 w-40 rounded-tight" />
               <span className="skeleton ml-auto h-2.5 w-16 rounded-tight" />
             </li>
@@ -333,13 +331,18 @@ export function History() {
 }
 
 /**
- * One play, as a list row (§7.16): 26px, a thumbnail at the left, the name at
- * 11.5px, and the trailing figures right-aligned and monospaced. Hairlines in
- * `line-soft` between rows, no zebra striping and no vertical rules.
+ * One play, as a list row (§7.16): the name at control size, the trailing
+ * figures right-aligned and monospaced, hairlines in `line-soft` between rows,
+ * no zebra striping and no vertical rules.
  *
- * It used to be a card of its own with a 56px poster, which made the diary a
- * stack of tiles rather than a list, and a page of fifty plays four screens
- * long.
+ * **No thumbnail.** It carried a 14 x 20 poster, which is three rungs below
+ * the bottom of the artwork ladder and, in §7.21's words about faces, a smudge
+ * doing no work. The ladder's inline rung is `--art-row`, and it is landscape:
+ * portrait art never goes in a text row, because a row that carries a picture
+ * is sized *by* the picture, and a poster at a size worth showing would make
+ * this diary four screens per page again. Tally holds no landscape still for a
+ * card, so the honest answer is the row without one. The title is the content
+ * here and it links to the item, where the artwork is.
  */
 function HistoryRow({
   event,
@@ -358,15 +361,6 @@ function HistoryRow({
 
   return (
     <li className="group flex h-row items-center gap-2 border-b border-line-soft px-2 text-control transition-colors duration-hover ease-ease last:border-b-0 hover:bg-control-hover">
-      <Link to={to} tabIndex={-1} aria-hidden="true" className="shrink-0">
-        <Artwork
-          src={card?.poster_url ?? null}
-          title={title}
-          showTitle={false}
-          className="h-5 w-[14px] rounded-tight bg-control"
-        />
-      </Link>
-
       <Link to={to} className="min-w-0 shrink truncate text-fg hover:text-strong">
         {title}
       </Link>
@@ -418,7 +412,7 @@ function HistoryRow({
           title="Remove from history"
           aria-label={`Remove ${title} from history`}
         >
-          <X size={16} aria-hidden="true" />
+          <X className="size-icon" aria-hidden="true" />
         </button>
       </span>
     </li>

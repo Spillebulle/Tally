@@ -63,7 +63,7 @@ export const PlexIcon = (p: IconProps) => (
  * The old hand-drawn set, mapped onto Lucide so pages that still import
  * `HomeIcon` and friends keep working while they are rewritten. The old icons
  * were sized `1em` and coloured by the text around them, so the shim keeps
- * that default; pass `size={16}` explicitly in new code instead.
+ * that default; pass `className="size-icon"` explicitly in new code instead.
  *
  * This block is temporary: once every page imports from `lucide-react`
  * directly, delete everything below this line.

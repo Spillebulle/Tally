@@ -220,21 +220,41 @@ function ContinueRow({
   )
 
   return (
+    // `min-w-0` is load-bearing, not tidiness. A grid track of `1fr` is
+    // `minmax(auto, 1fr)`, and that `auto` floor is the item's *min-content* -
+    // which for the nowrap, truncating subtitle inside is the whole string. So
+    // the row grew past its column, and `.panel`'s `overflow-hidden` clipped
+    // the difference silently: at 390px the row measured 487 and the
+    // mark-as-watched button was cut off the end of it, with no scrollbar to
+    // say so. `min-width: 0` is what overrides a grid item's automatic
+    // minimum; `truncate` on the text cannot, because it only shrinks a *flex*
+    // item.
     <div
-      className="group/row flex items-center gap-3 rounded-ctl p-2 transition-colors
+      className="group/row flex min-w-0 items-center gap-3 rounded-ctl p-2 transition-colors
                  duration-hover ease-ease hover:bg-control-hover"
     >
       <Link to={`/item/${target.id}`} tabIndex={-1} aria-hidden="true" className="shrink-0">
+        {/* `--art-tile`: the rung for a picture that sits beside text (7.21),
+            and the row is sized by the picture rather than the picture
+            squeezed into `--h-row`. It used to be 40 x 60, three rungs under
+            the recently-added posters on the same page - which is the fault
+            the guide names by name in its section 14. */}
         <Artwork
           src={poster}
           title={heading}
           showTitle={false}
-          className="h-[60px] w-10 rounded-tight"
+          className="aspect-art w-art-tile"
         />
       </Link>
 
       <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
+        {/* Wraps, because the picture beside it is a ladder rung and does not
+            give way: on a phone the text column is about 150px, and a title, a
+            relative time and a mark-watched button cannot share that in one
+            line. The floor on the title is what makes the wrap happen at all -
+            a `flex-1` item with `min-w-0` shrinks to a few letters rather than
+            pushing its neighbour onto the next line. */}
+        <div className="flex flex-wrap items-baseline gap-x-2">
           {/* No hover colour of its own: the title is already `text-strong`, so
               there is nowhere for it to go, and the row's `control-hover` fill
               is the affordance. It must not be the accent - §2.4 keeps that for
@@ -242,7 +262,7 @@ function ContinueRow({
               rest colour is the convention everywhere else in the app. */}
           <Link
             to={`/item/${target.id}`}
-            className="flex min-w-0 flex-1 items-baseline gap-1.5 text-body font-semibold
+            className="flex min-w-[7rem] flex-1 items-baseline gap-1.5 text-body font-semibold
                        text-strong"
           >
             <span className="truncate">{heading}</span>
@@ -272,8 +292,11 @@ function ContinueRow({
         {/* The rail is a fixed 120px rather than the row's whole width: a rail
             that runs the length of the card reads as a slider, and it pushes
             the reading of it half a screen away from what it measures. */}
-        <div className="mt-1.5 flex items-center gap-2">
-          <ProgressBar className="w-[120px] shrink-0" fraction={entry.progress_percent / 100} />
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <ProgressBar
+            className="w-20 shrink-0 sm:w-[120px]"
+            fraction={entry.progress_percent / 100}
+          />
           <span className="truncate text-tiny text-dim">{progressLabel}</span>
         </div>
       </div>
@@ -288,7 +311,7 @@ function ContinueRow({
           marking ? `Marking ${target.title} as watched` : `Mark ${target.title} as watched`
         }
       >
-        {marking ? <Spinner className="text-body" /> : <Check size={16} />}
+        {marking ? <Spinner className="text-body" /> : <Check className="size-icon" />}
       </button>
     </div>
   )
@@ -367,15 +390,16 @@ function RailPanel({
       count={query.isLoading ? undefined : cards.length}
       commands={commands}
     >
-      {/* The padding is room for the keyboard focus ring, not spacing:
-          `scroll-x` clips on both axes (see index.css), and a ring on a flush
-          tile would be cut on every edge. Each padding is taken straight back
-          as a negative margin, so nothing moves. */}
-      <div className="scroll-x scrollbar-none -mx-1 -my-1 flex gap-3 px-1 py-1">
+      {/* The padding is room for the keyboard focus ring and for the art
+          card's 3px lift, not spacing: `scroll-x` clips on both axes (see
+          index.css), so a flush tile would be cut on every edge the moment it
+          rose. Each padding is taken straight back as a negative margin, so
+          nothing moves. */}
+      <div className="scroll-x scrollbar-none -mx-1 -my-2 flex gap-3 px-1 py-2">
         {(query.isLoading ? Array.from({ length: 8 }) : cards).map((card, index) => (
           <div
             key={query.isLoading ? index : (card as MediaCard).id}
-            className="w-[140px] shrink-0 sm:w-[150px]"
+            className="w-art-card shrink-0"
           >
             {query.isLoading ? (
               <PosterSkeleton />
@@ -398,7 +422,7 @@ function GoTo({ to, children }: { to: string; children: React.ReactNode }) {
   return (
     <Link to={to} className="btn-ghost px-2">
       {children}
-      <ChevronRight size={16} aria-hidden="true" />
+      <ChevronRight className="size-icon" aria-hidden="true" />
     </Link>
   )
 }
@@ -655,10 +679,17 @@ export function Dashboard() {
           }
           bodyClassName="p-1.5"
         >
-          <div className="grid gap-0.5 sm:grid-cols-2 xl:grid-cols-3">
+          {/* Two columns, not three. The picture went up to `--art-tile` with
+              the rest of the ladder (7.21), and at three columns a 1200px page
+              leaves the text beside it under 200px: every title truncated to
+              two words while two thirds of the row sat empty. */}
+          <div className="grid gap-0.5 sm:grid-cols-2">
             {continueWatching.isLoading
               ? Array.from({ length: 4 }, (_, index) => (
-                  <Skeleton key={index} className="h-[76px]" />
+                  // The height the row actually renders at: the picture plus
+                  // its 8px of padding, since a row with a picture is sized by
+                  // the picture.
+                  <Skeleton key={index} className="h-[196px] rounded-ctl" />
                 ))
               : visibleContinue.map((entry) => (
                   <ContinueRow

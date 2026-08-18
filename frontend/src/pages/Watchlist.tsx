@@ -5,9 +5,10 @@ import { api, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import type { MediaCard, PaginatedWatchlist } from '@/lib/types'
 import { namesOf, useBrowseFilters, WATCHLIST_SORTS } from '@/lib/browse-filters'
+import { cardSizeStyle, CardSizeControl, useCardSize } from '@/lib/card-size'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
-import { Artwork, Poster, PosterSkeleton } from '@/components/Poster'
+import { Artwork, ArtMark, POSTER_GRID, Poster, PosterSkeleton } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented, Spinner } from '@/components/ui'
 import { Bookmark, Plus, Search, X } from 'lucide-react'
 
@@ -23,10 +24,6 @@ const PAGE_SIZE = 60
  * Below `sm` the floor is 150px, which is two columns on the narrowest screen
  * Tally supports.
  */
-const GRID =
-  'grid gap-3 grid-cols-[repeat(auto-fill,minmax(150px,1fr))] ' +
-  'sm:grid-cols-[repeat(auto-fill,minmax(220px,1fr))]'
-
 /** The type split, as one control. "Anime" is a flag, the others are a type. */
 const KINDS = [
   { value: 'all', label: 'All' },
@@ -62,6 +59,15 @@ export function Watchlist() {
   const kind: Kind = KINDS.some((option) => option.value === requestedKind)
     ? (requestedKind as Kind)
     : 'all'
+  /*
+   * The same poster size the browse grids use, and the same stored preference:
+   * this is the same card, of the same thing, and a reader who asked for small
+   * posters on Movies did not ask for large ones here. The control is repeated
+   * rather than the setting being applied silently — a page that changes size
+   * with no way to change it back reads as a bug.
+   */
+  const { size: cardSize, setSize: setCardSize } = useCardSize()
+
   // In the URL beside the filters — see the note in BrowseFilters. Changing a
   // filter drops it, so nothing has to reset the offset here.
   const { page, setPage } = usePageParam()
@@ -161,7 +167,7 @@ export function Watchlist() {
               onClick={() => setSearchOpen((value) => !value)}
               className="btn-primary"
             >
-              <Plus size={16} aria-hidden="true" /> Add a title
+              <Plus className="size-icon" aria-hidden="true" /> Add a title
             </button>
           </>
         }
@@ -178,10 +184,11 @@ export function Watchlist() {
           servers: places.data?.servers ?? [],
         }}
         busy={isFetching && !isLoading}
+        actions={<CardSizeControl value={cardSize} onChange={setCardSize} />}
       />
 
       {isLoading ? (
-        <div className={GRID}>
+        <div className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
           {Array.from({ length: 12 }, (_, index) => (
             <PosterSkeleton key={index} />
           ))}
@@ -219,18 +226,26 @@ export function Watchlist() {
                   onClick={() => setSearchOpen(true)}
                   className="btn-secondary"
                 >
-                  <Plus size={16} aria-hidden="true" /> Find something to watch
+                  <Plus className="size-icon" aria-hidden="true" /> Find something to watch
                 </button>
               }
             />
           )}
         </div>
       ) : (
-        <div className={GRID}>
+        <div className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
           {entries.map((entry) =>
             entry.item ? (
               <div key={entry.id} className="group/entry relative">
-                <Poster card={entry.item} showProgress={false} />
+                <Poster
+                  card={entry.item}
+                  showProgress={false}
+                  marks={
+                    !entry.synced_with_plex ? (
+                      <ArtMark title="Not yet mirrored to Plex.">Pending sync</ArtMark>
+                    ) : null
+                  }
+                />
                 {/* A mark over user content, so it keeps the scrim-and-white
                     derived ink rather than a theme token (§2.6). Always
                     visible where there is no hover to reveal it with, and
@@ -240,7 +255,7 @@ export function Watchlist() {
                   type="button"
                   onClick={() => remove.mutate(entry.media_item_id)}
                   className="absolute right-2 top-2 z-10 grid h-6 w-6 place-items-center rounded-full
-                             bg-black/70 text-white backdrop-blur-sm transition-opacity
+                             bg-scrim-flat text-art backdrop-blur-sm transition-opacity
                              duration-open hover:bg-critical
                              lg:pointer-events-none lg:opacity-0
                              lg:group-hover/entry:pointer-events-auto
@@ -250,13 +265,8 @@ export function Watchlist() {
                   title="Remove from watchlist"
                   aria-label={`Remove ${entry.item.title} from watchlist`}
                 >
-                  <X size={16} aria-hidden="true" />
+                  <X className="size-icon" aria-hidden="true" />
                 </button>
-                {!entry.synced_with_plex && (
-                  <p className="mt-1 text-tiny text-dim" title="Not yet mirrored to Plex">
-                    Pending Plex sync
-                  </p>
-                )}
               </div>
             ) : null,
           )}
@@ -319,9 +329,8 @@ function DiscoverSearch({ onClose }: { onClose: () => void }) {
         >
           <div className="relative min-w-0 flex-1">
             <Search
-              size={16}
               aria-hidden="true"
-              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
+              className="pointer-events-none absolute left-2.5 top-1/2 size-icon -translate-y-1/2 text-dim"
             />
             <input
               autoFocus
@@ -351,12 +360,17 @@ function DiscoverSearch({ onClose }: { onClose: () => void }) {
         {data && data.length > 0 && (
           <ul className="mt-3 grid gap-1 sm:grid-cols-2">
             {data.map((card) => (
-              <li key={card.id} className="row h-auto gap-2 px-2 py-1.5">
+              // A picker: the poster is how you tell two films with the same
+              // name apart, so it is on the ladder at `--art-tile`, the rung
+              // for a picture beside text (7.21), and the row is sized by the
+              // picture. At 28 x 40 it was below the ladder entirely and
+              // recognised nothing.
+              <li key={card.id} className="row h-auto items-start gap-3 px-2 py-2">
                 <Artwork
                   src={card.poster_url}
                   title={card.title}
                   showTitle={false}
-                  className="h-10 w-7 shrink-0 rounded-tight bg-control"
+                  className="aspect-art w-art-tile shrink-0"
                 />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-control text-strong">{card.title}</p>

@@ -60,7 +60,7 @@ function allowancesFor(source) {
 }
 
 const TOKEN_COLOURS =
-  '(?:backdrop|window|dock|chrome|popover|line|control|rail|knob|field|strong|fg|muted|dim|placeholder|accent|caution|good|critical|plex|grid|series-[1-6]|heat-[1-5])'
+  '(?:backdrop|window|dock|chrome|popover|line|control|rail|knob|field|strong|fg|muted|dim|placeholder|accent|caution|good|critical|plex|grid|series-[1-6]|heat-[1-5]|art|ink-art|scrim-flat)'
 
 const RULES = [
   {
@@ -97,6 +97,19 @@ const RULES = [
     id: 'retired-colour',
     re: /\b(?:bg|text|border|from|via|to|ring|fill|stroke)-(?:surface|raised|canvas|ink|subtle|warn|danger|line-accent(?:-soft)?|accent-soft)\b/g,
     why: 'Old token names. Map to the house roles: surface->chrome, raised->control, canvas->backdrop, ink->strong, subtle->fg, warn->caution, danger->critical, accent-soft->accent-tint.',
+  },
+  {
+    id: 'retired-class',
+    // Classes that used to exist in index.css. A class naming nothing renders
+    // nothing, silently - the same failure as a retired utility.
+    re: /\b(?:hero-scrim)\b/g,
+    why: 'Retired component class. The backdrop ramp is `.fade-backdrop` now (7.22).',
+  },
+  {
+    id: 'off-ladder-art',
+    // Artwork is four widths and no fifth (7.21), and two shapes.
+    re: /\baspect-\[\s*(?:2\s*\/\s*3|16\s*\/\s*9)\s*\]/g,
+    why: 'Artwork shape is `aspect-art` (portrait 2/3) or `aspect-wide` (16/9), from --art-ratio.',
   },
   {
     id: 'grey-scale',

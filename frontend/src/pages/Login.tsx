@@ -344,7 +344,7 @@ function LocalForm({
 
       <div className="flex items-center justify-between gap-2">
         <button type="button" onClick={onBack} className="btn-ghost h-5 px-1 text-tiny">
-          <ChevronLeft size={16} aria-hidden="true" />
+          <ChevronLeft className="size-icon" aria-hidden="true" />
           Back
         </button>
         {!setupRequired && (

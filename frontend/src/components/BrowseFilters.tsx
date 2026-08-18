@@ -175,9 +175,8 @@ function SearchField({
     // scrolling strip that the controls after it have to share.
     <div className="relative w-[9.5rem] shrink-0 sm:w-[13rem]">
       <Search
-        size={16}
         aria-hidden="true"
-        className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-dim"
+        className="pointer-events-none absolute left-2.5 top-1/2 size-icon -translate-y-1/2 text-dim"
       />
       <DraftInput
         key={nonce}
@@ -202,7 +201,7 @@ function SearchField({
                      rounded-tight text-muted transition-colors duration-hover
                      ease-ease hover:text-strong"
         >
-          <X size={16} aria-hidden="true" />
+          <X className="size-icon" aria-hidden="true" />
         </button>
       )}
     </div>
@@ -367,7 +366,7 @@ function SavedViewsButton({
       title="Saved views"
       className={cn('btn-ghost shrink-0 gap-1.5 px-2', open && 'bg-control text-strong')}
     >
-      <Bookmark size={16} aria-hidden="true" />
+      <Bookmark className="size-icon" aria-hidden="true" />
       {/* The label goes on a phone and the icon carries it, which buys the
           scrolling strip beside it about 90px of the controls it holds. The
           `title` is what keeps an icon-only control from being a guess. */}
@@ -653,6 +652,7 @@ export function BrowseFilters({
   state,
   lists: provided,
   busy,
+  actions,
 }: {
   state: BrowseFilterState
   /**
@@ -663,6 +663,22 @@ export function BrowseFilters({
   lists?: Partial<FilterLists>
   /** Shows a quiet "Updating…" while a refetch is in flight. */
   busy?: boolean
+  /**
+   * Controls that sit on this strip but are **not filters**: how the results
+   * are drawn rather than which results they are. The poster size is the one
+   * so far.
+   *
+   * A slot rather than another entry in the filter table, and that is the whole
+   * point of it. Everything in that table is derived from — the chips, whether
+   * "Clear all" appears, what `clear()` removes, the disclosure's count badge —
+   * so a card size in there would put a chip reading "Large" in the filter row
+   * and claim the grid was narrowed. It also must not survive `clear()`, and it
+   * belongs to the reader rather than to the query.
+   *
+   * They sit with the view controls at the right, beside the Filters
+   * disclosure, not in the scrolling filter run at the left.
+   */
+  actions?: ReactNode
 }) {
   const [params] = useSearchParams()
   const ctx: FilterCtx = { params }
@@ -885,9 +901,9 @@ export function BrowseFilters({
             aria-label={ascending ? 'Sorted ascending' : 'Sorted descending'}
           >
             {ascending ? (
-              <ArrowUpNarrowWide size={16} aria-hidden="true" />
+              <ArrowUpNarrowWide className="size-icon" aria-hidden="true" />
             ) : (
-              <ArrowDownWideNarrow size={16} aria-hidden="true" />
+              <ArrowDownWideNarrow className="size-icon" aria-hidden="true" />
             )}
           </button>
         </div>
@@ -895,6 +911,8 @@ export function BrowseFilters({
         {busy && (
           <span className="hidden shrink-0 text-tiny text-dim sm:inline">Updating…</span>
         )}
+
+        {actions}
 
         <button
           type="button"
@@ -904,7 +922,7 @@ export function BrowseFilters({
           title="Filters"
           className={cn('btn-ghost shrink-0 gap-1.5 px-2', open && 'bg-control text-strong')}
         >
-          <SlidersHorizontal size={16} aria-hidden="true" />
+          <SlidersHorizontal className="size-icon" aria-hidden="true" />
           <span className="hidden sm:inline">Filters</span>
           {state.advancedCount > 0 && (
             <span className="figure text-strong">{state.advancedCount}</span>

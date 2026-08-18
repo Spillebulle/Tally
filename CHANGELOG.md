@@ -4,6 +4,50 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
+## 0.5.0
+
+**Tally is drawn a size up.** It is a web application read in a browser tab,
+not a desktop tool used at arm's length, and it was drawn at the desktop
+density. The top bar is 52 px with a 22 px mark, buttons and fields are 32,
+navigation rows 38, the sidebar 280, body text 14 px and icons 18. Nothing else
+changed: the same colours, the same hairlines, the same rules about where the
+accent goes.
+
+**Posters are the cards now.** A card in a grid or a rail is the artwork and
+nothing else, with no caption strip underneath making every card taller than
+the thing it exists to show. The title and one figure sit over the bottom of
+the picture, always visible on a touch screen and on a keyboard, and a title
+with no artwork still names itself. Cards lift slightly under the pointer.
+
+**You can choose how big the posters are.** Movies, Shows, Anime, Search and
+the Watchlist have a poster-size control on their filter strip: compact,
+standard or large, which on a full-width window is about eight, five and three
+columns. It is remembered for next time, per device, so a phone and a desktop
+can differ. It is not part of a shared link or a saved view, which stay about
+*which* titles you are looking at.
+
+**Artwork is one set of sizes across the app.** Continue watching used to show
+a 40 px thumbnail on the same page as 150 px posters. Everything is now on one
+ladder: 120 px where a picture sits beside text, 180 px for a browse card,
+320 px for the poster on a title's own page, and 36 px for a cast face, which
+was 20. The watchlist and the browse grids were two different grids and are now
+one.
+
+**Two lists lost their thumbnails.** History and the Stats leaderboards carried
+posters at 14 x 20 and 24 x 36 pixels, which recognise nothing and cost a row
+its height. Both read better as lists; the artwork is one click away, on the
+title.
+
+**A title's backdrop is a picture again.** The fade into the page was finished
+by the middle of the band, which paid the whole cost of loading the image for
+almost none of the effect. The top of the picture is now untouched and it
+reaches the page only at the bottom edge, over a taller band.
+
+**Fixed: the mark-as-watched button on Continue watching was missing on a
+phone.** The row was wider than its column and the panel quietly clipped the
+end of it, with no scrollbar to say so. The same fault hid the Include switch
+on each library row in Settings.
+
 ## 0.4.1
 
 **Tally is now under the GNU General Public License v3.0**, where releases up

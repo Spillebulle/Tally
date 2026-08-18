@@ -142,7 +142,7 @@ function NavRow({ item, onNavigate }: { item: NavItem; onNavigate?: () => void }
     >
       {/* The icon takes the row's own colour, so it is `text-muted` at rest and
           `text-strong` when the row is selected without being told twice. */}
-      <Icon size={16} aria-hidden="true" />
+      <Icon className="size-icon" aria-hidden="true" />
       {item.label}
     </NavLink>
   )
@@ -450,7 +450,7 @@ function SyncControl() {
         aria-haspopup="dialog"
         aria-expanded={open}
       >
-        <RefreshCw size={16} className={cn(busy && 'motion-safe:animate-spin')} />
+        <RefreshCw className={cn('size-icon', busy && 'motion-safe:animate-spin')} />
       </button>
 
       {open && (
@@ -549,7 +549,7 @@ function UserMenu() {
           </div>
           <div className="menu-separator" />
           <button type="button" role="menuitem" onClick={() => void logout()} className="menu-item">
-            <LogOut size={16} aria-hidden="true" /> Sign out
+            <LogOut className="size-icon" aria-hidden="true" /> Sign out
           </button>
         </div>
       )}
@@ -618,7 +618,7 @@ function Toasts() {
               title="Dismiss this notice."
               aria-label="Dismiss this notice."
             >
-              <X size={16} />
+              <X className="size-icon" />
             </button>
           </div>
         )
@@ -806,7 +806,7 @@ export function Layout() {
             aria-haspopup="dialog"
             aria-expanded={drawerOpen}
           >
-            <Menu size={16} />
+            <Menu className="size-icon" />
           </button>
           <Link to="/" title="Go to the Tally home page." className="rounded-ctl">
             <Logo />
@@ -856,7 +856,7 @@ export function Layout() {
                   title="Close navigation."
                   aria-label="Close navigation."
                 >
-                  <X size={16} />
+                  <X className="size-icon" />
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto p-1.5">

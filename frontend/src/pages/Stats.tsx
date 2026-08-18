@@ -353,7 +353,6 @@ function titleRow(item: RankedTitle, board: 'episodes' | 'plays' | 'minutes'): R
     key: item.media_item_id,
     title: item.title,
     subtitle: item.year ? String(item.year) : null,
-    posterUrl: item.poster_url,
     to: itemLink(item.media_item_id),
   }
   if (board === 'minutes') {
@@ -388,7 +387,6 @@ const contrarianRow = (item: ContrarianItem): RankedRow => ({
   key: item.media_item_id,
   title: item.title,
   subtitle: item.year ? String(item.year) : null,
-  posterUrl: item.poster_url,
   value: Math.abs(item.difference),
   valueLabel: signedRating(item.difference),
   meta: `you ${item.rating} · crowd ${item.community_rating}`,
@@ -487,7 +485,6 @@ const progressRow = (show: ShowProgress): RankedRow => ({
     if (!code) return show.year ? String(show.year) : null
     return show.last_episode_title ? `${code} · ${show.last_episode_title}` : code
   })(),
-  posterUrl: show.poster_url,
   value: show.episodes_watched,
   valueLabel:
     show.percent_complete != null
@@ -2506,7 +2503,6 @@ export function Stats() {
                 : item.year
                   ? String(item.year)
                   : null,
-              posterUrl: item.poster_url,
               value: item.plays,
               // A real instant off the wire, not a `YYYY-MM-DD` label, so
               // `new Date` is the right reader here — it converts the instant
@@ -2694,7 +2690,6 @@ export function Stats() {
                     key: entry.media_item_id,
                     title: entry.title,
                     subtitle: entry.year ? String(entry.year) : null,
-                    posterUrl: entry.poster_url,
                     value: entry.days_waiting,
                     valueLabel: plural(entry.days_waiting, 'day'),
                     // A real instant off the wire, so `new Date` is the right
@@ -2715,7 +2710,7 @@ export function Stats() {
                     className="inline-flex items-center gap-1.5 text-control text-accent hover:underline"
                   >
                     See the whole watchlist
-                    <ArrowRight size={16} aria-hidden="true" />
+                    <ArrowRight className="size-icon" aria-hidden="true" />
                   </Link>
                 </div>
               </ChartCard>

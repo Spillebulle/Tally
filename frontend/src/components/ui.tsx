@@ -155,9 +155,8 @@ export function ErrorState({
     return (
       <div className={cn('flex items-start gap-2 py-1 text-left', className)}>
         <TriangleAlert
-          size={16}
           aria-hidden="true"
-          className="mt-px shrink-0 text-critical"
+          className="mt-px size-icon shrink-0 text-critical"
         />
         <p className="min-w-0 flex-1 text-body text-dim">
           <span className="text-fg">{sentence(title)}</span> {sentence(message)}
@@ -328,7 +327,14 @@ export function StarRating({ rating, onChange, size = 'md', readOnly }: StarRati
 
 /**
  * Two to five exclusive short options in a `line` bordered box. The selected
- * segment is `control` and `text-strong`, never the accent (§7.9).
+ * segment is `control` and `text-strong`, never the accent (§7.6, §7.9).
+ *
+ * A segment may be an `icon` instead of its words, and then the words become
+ * its tooltip and its accessible name rather than being thrown away: §11 asks
+ * every icon-only control for a tooltip, and a radio announced as nothing at
+ * all is unusable to anyone not looking at it. Write the label as the whole
+ * sentence the tooltip should say ("Compact posters"), not as a word that only
+ * makes sense beside the other two.
  */
 export function Segmented<T extends string>({
   options,
@@ -336,7 +342,7 @@ export function Segmented<T extends string>({
   onChange,
   label,
 }: {
-  options: Array<{ value: T; label: string }>
+  options: ReadonlyArray<{ value: T; label: string; icon?: ReactNode }>
   value: T
   onChange: (value: T) => void
   label?: string
@@ -360,14 +366,17 @@ export function Segmented<T extends string>({
           role="radio"
           aria-checked={value === option.value}
           onClick={() => onChange(option.value)}
+          title={option.icon ? option.label : undefined}
+          aria-label={option.icon ? option.label : undefined}
           className={cn(
-            'rounded-[4px] px-2.5 py-1 text-small transition-colors duration-hover ease-ease',
+            'rounded-[4px] transition-colors duration-hover ease-ease',
+            option.icon ? 'grid h-6 w-7 place-items-center' : 'px-2.5 py-1 text-small',
             value === option.value
               ? 'bg-control text-strong'
               : 'text-muted hover:text-fg',
           )}
         >
-          {option.label}
+          {option.icon ?? option.label}
         </button>
       ))}
     </div>
@@ -382,10 +391,16 @@ export function Segmented<T extends string>({
  * Sized in pixels rather than `1em`, which inherited whatever font-size it
  * landed in — 12px inside a poster's caption, 10.5px in a chip.
  */
-export function Spinner({ className, size = 16 }: { className?: string; size?: number }) {
+/**
+ * A spinner stands in for an icon inside a button, so by default it is the
+ * size of one: `--icon`, through the class rather than a literal, so it takes
+ * the web scale's step with everything around it (STYLE-GUIDE 6.5). Pass
+ * `size` only where it is standing in for something that is not an icon.
+ */
+export function Spinner({ className, size }: { className?: string; size?: number }) {
   return (
     <svg
-      className={cn('animate-spin', className)}
+      className={cn('animate-spin', size == null && 'size-icon', className)}
       viewBox="0 0 24 24"
       width={size}
       height={size}
@@ -941,7 +956,7 @@ export function Dialog({
             aria-label="Close"
             className="btn-icon -mr-2 -mt-1 text-dim"
           >
-            <X size={16} />
+            <X className="size-icon" />
           </button>
         </header>
         <div
