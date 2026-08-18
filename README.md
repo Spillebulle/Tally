@@ -6,144 +6,67 @@
   <img src="docs/images/banner.png" alt="Tally: the mark, a blue rounded square with four tally strokes crossed by a fifth, beside the word TALLY" width="560">
 </picture>
 
-**Track every film, series and anime you watch, kept in step with Plex.**
+**A self-hosted watch tracker that keeps your films, series and anime in step
+with Plex, in both directions.**
 
-A self-hosted watch tracker that imports your Plex history, follows what you are
-watching now, and syncs ratings and your watchlist in *both* directions.
+Reads your Plex history · talks to plex.tv, TMDB, TheTVDB and MyAnimeList ·
+saves everything in one SQLite file you own
 
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/github/license/Spillebulle/Tally?style=flat-square" alt="License">
-  <img src="https://github.com/Spillebulle/Tally/actions/workflows/docker.yml/badge.svg" alt="Build">
-  <img src="https://img.shields.io/docker/pulls/spillebulle/tally?style=flat-square" alt="Docker pulls">
+  <img src="https://img.shields.io/github/license/Spillebulle/Tally?style=flat-square" alt="Licence">
+  <img src="https://img.shields.io/github/actions/workflow/status/Spillebulle/Tally/docker.yml?style=flat-square" alt="Build">
   <img src="https://img.shields.io/github/v/release/Spillebulle/Tally?style=flat-square" alt="Release">
+  <img src="https://img.shields.io/docker/pulls/spillebulle/tally?style=flat-square" alt="Docker pulls">
 </p>
 
----
-
-## What it does
-
-| | |
-|---|---|
-| **Sign in with Plex** | OAuth through plex.tv. Tally never sees your password. |
-| **Imports everything** | Your full watch history, libraries, ratings and watchlist. |
-| **Two-way ratings** | Rate here, it appears in Plex. Rate in Plex, it appears here. |
-| **Two-way watchlist** | Add or remove in either place; the other follows. Filter and sort it like any other page, including by when you watchlisted something. |
-| **Live "continue watching"** | Picks up mid-episode playback, and the next unwatched episode of anything you have started. |
-| **Anime, separated** | Anime gets its own section, detected from your library layout, metadata agent, genres and MyAnimeList — not just "is it a cartoon". |
-| **Multi-user** | Each account links its own Plex identity and sees its own history and ratings. |
-| **Rich metadata** | Posters and descriptions from TMDB, TheTVDB and MyAnimeList. |
-| **Stats worth reading** | Activity heatmap, weekday and hour patterns, sessions and binges, rewatches, show completion and drop-off, watchlist conversion, library coverage, how your ratings compare to the crowd, and ranked lists of everything. Any custom date range, compared against the period before it or the same period last year. |
-| **Click any chart** | A bar, a heatmap day, a decade, a studio — it takes you to the plays or the titles behind it, with the filters already applied. |
-| **Filters that go deep** | Multi-select and exclusion on genres, ranges for year, runtime, rating and dates, cast and crew, library and server — on the grid, the watchlist and your history alike. Save a view and it comes back. |
-| **Dashboards** | A JSON and CSV time-series API for Grafana, and a `/metrics` endpoint for Prometheus. See [Dashboards](#dashboards). |
-
----
+> Tally runs a real household library every day, and the sync, the stats and the
+> API are stable. It is still a young project, so read
+> [what is not there yet](#what-is-not-there-yet) before you rely on it.
 
 ## Install
 
-> **Set `PUBLIC_URL` to the address you actually type in the browser.** Plex sends
-> your browser back to this URL after sign-in, so a wrong value breaks the login
-> flow — e.g. `http://192.168.1.50:8080` or `https://tally.example.com`.
-
-### Option 1 — docker compose (recommended)
+```yaml
+# docker-compose.yml
+services:
+  tally:
+    image: ghcr.io/spillebulle/tally:latest
+    ports: ["8080:8080"]
+    volumes: ["./data:/data"]
+    environment:
+      PUBLIC_URL: http://192.168.1.50:8080
+    restart: unless-stopped
+```
 
 ```bash
-git clone https://github.com/Spillebulle/Tally.git
-cd Tally
-cp .env.example .env      # optional, but read it
 docker compose up -d
 ```
 
-### Option 2 — GitHub Container Registry (GHCR)
+Then open the address you set as `PUBLIC_URL` and press **Continue with Plex**.
+The first account to sign in becomes the administrator.
 
-```bash
-docker run -d --name tally \
-  -p 8080:8080 \
-  -v tally-data:/data \
-  -e PUBLIC_URL=http://localhost:8080 \
-  -e TMDB_API_KEY=your_key_here \
-  --restart unless-stopped \
-  ghcr.io/spillebulle/tally:latest
-```
+| Where | Image |
+|---|---|
+| GitHub Container Registry | `ghcr.io/spillebulle/tally:0.3.0` |
+| Docker Hub | `spillebulle/tally:0.3.0` |
+| Build it yourself | `docker build -t tally .` |
 
-### Option 3 — Docker Hub
+Both registries serve the same image for `linux/amd64` and `linux/arm64`.
+`:latest` moves with every release, so pin a version in production. You need
+Docker, a Plex account, and about 200 MB of disk for a large library. No API
+keys are required to start.
 
-```bash
-docker run -d --name tally \
-  -p 8080:8080 \
-  -v tally-data:/data \
-  -e PUBLIC_URL=http://localhost:8080 \
-  -e TMDB_API_KEY=your_key_here \
-  --restart unless-stopped \
-  spillebulle/tally:latest
-```
+**`PUBLIC_URL` must be the address you actually type in the browser.** Plex
+sends you back to it after sign-in, so a wrong value is the one setting that
+breaks the login flow.
 
-> Both registries serve the same image, built for `linux/amd64` and `linux/arm64`.
-> Pin a version (e.g. `:0.0.1`) in production instead of `:latest`.
+## Two-way sync
 
-### Option 4 — build the image locally
-
-```bash
-git clone https://github.com/Spillebulle/Tally.git
-cd Tally
-docker build -t tally .
-docker run -d --name tally -p 8080:8080 -v tally-data:/data \
-  -e PUBLIC_URL=http://localhost:8080 tally
-```
-
-Then open <http://localhost:8080> and press **Continue with Plex**. The first
-account to sign in becomes the administrator.
-
----
-
-## First run
-
-1. **Sign in with Plex.** A Plex window opens; approve the request.
-2. Tally asks plex.tv which servers you can reach and imports their libraries.
-   The first sync of a large library takes a few minutes — it runs in the
-   background, so you can browse while it works.
-3. Check **Settings → Plex servers** to confirm your libraries were found, and to
-   mark which ones hold anime.
-4. Optionally add a **TMDB key** (below) and press **Re-detect** under Settings →
-   Anime so artwork and classification improve.
-
----
-
-## Configuration
-
-Everything is environment variables. Only `PUBLIC_URL` really matters.
-
-| Variable | Default | What it does |
-|---|---|---|
-| `PUBLIC_URL` | `http://localhost:8080` | The URL you reach Tally on. Used for the Plex sign-in redirect and the webhook URL. |
-| `TMDB_API_KEY` | — | Posters, backdrops and descriptions. [Free key](https://www.themoviedb.org/settings/api); accepts a v3 key or a v4 bearer token. |
-| `TVDB_API_KEY` | — | Extra series data, and the explicit *Anime* genre TMDB lacks. [Free key](https://thetvdb.com/api-information). |
-| `MAL_CLIENT_ID` | — | Official MyAnimeList API. Leave blank to use Jikan, the free MAL mirror, which needs no credentials. |
-| `SYNC_INTERVAL_MINUTES` | `30` | How often to run a full sync against Plex. |
-| `SESSIONS_POLL_SECONDS` | `30` | How often to check for in-progress playback. Values below `5` are raised to `5`; a poll takes about a second per server, so anything shorter just produces skipped runs. |
-| `SECRET_KEY` | generated | Signs sessions and encrypts stored Plex tokens. Written to `/data/.secret_key` on first boot. Set it explicitly if you rebuild from scratch and want sessions to survive. |
-| `PUID` / `PGID` | `1000` | User and group the app runs as. Set these to the owner of your `./data` directory (`id -u`, `id -g`). |
-| `LOG_LEVEL` | `INFO` | `DEBUG` when something is not syncing and you want to see why. |
-| `TZ` | `UTC` | Timezone for logs and daily stats grouping. |
-
-**Tally works with no API keys at all** — it falls back to whatever artwork and
-descriptions your Plex server already has, and uses Jikan for anime. Adding a
-TMDB key is the single biggest visual improvement.
-
----
-
-## How syncing works
-
-Tally runs a full sync every `SYNC_INTERVAL_MINUTES` and polls for active
-playback every `SESSIONS_POLL_SECONDS`. You can also press the sync button in the
-header at any time.
-
-### Which side wins
-
-For every syncable field Tally stores both your local value and the last value it
-saw on Plex. That is what lets it tell *which side changed*:
+Tally imports your whole Plex history, then keeps ratings, watch state and your
+watchlist matching in both directions. It stores the last value it saw on Plex
+beside your own, which is what lets it tell which side changed rather than
+guessing:
 
 | Local | Plex | Result |
 |---|---|---|
@@ -152,434 +75,116 @@ saw on Plex. That is what lets it tell *which side changed*:
 | unchanged | changed | pulled into Tally |
 | changed | changed | the more recent change wins |
 
-Watchlist removals are **tombstoned** rather than deleted, so something you remove
-stays removed instead of being re-added by the next pull from Plex.
+Removing something from your watchlist is remembered as a removal, so the next
+pull from Plex does not put it back. How the engine decides is in
+[`docs/sync.md`](docs/sync.md).
 
-### Continue Watching
+## Continue watching
 
-Plex drops an item off On Deck once you have not touched it for a while —
-**Settings → Library → "Weeks to consider for On Deck and Continue Watching"**,
-16 weeks by default. Tally reads that setting from your server and applies the
-same window, so a show you stopped watching three years ago does not sit at the
-top of the dashboard forever.
+The dashboard picks up mid-episode playback and the next unwatched episode of
+anything you have started. Plex drops an item off On Deck after a while, and
+Tally reads that window from your server so a show you abandoned three years ago
+does not sit at the top forever. You can set your own window instead, or turn
+the cut-off off entirely, and nothing is ever deleted either way.
 
-**Settings → Continue Watching** lets you pick your own window instead, or turn
-the cut-off off entirely. Nothing is deleted either way: an item that drops off
-the shelf keeps its progress, and stays in your library, history and stats.
+## Anime, separated
 
-Only the server owner's token may read the setting from Plex, so on a server
-shared with you Tally falls back to Plex's own default of 16 weeks until the
-owner syncs.
+Anime gets its own section, and "is it animated?" is not the question. Tally
+scores your library layout, the metadata agent on the item, its genres, its
+country of origin and a MyAnimeList lookup, so a Western animated film is not
+filed as anime for being a cartoon. Your per-library override always wins.
+The signals and their weights are in [`docs/anime.md`](docs/anime.md).
 
-### Live updates (optional, needs Plex Pass)
+## Stats you can click
 
-Plex can notify Tally the instant something is played instead of waiting for the
-next sync:
+Activity by day and hour, streaks and binges, rewatches, show completion and
+drop-off, watchlist conversion, and how your ratings compare with the crowd,
+over any date range and against the period before it. Every bar, heatmap day,
+decade and studio is a link into the plays behind it with the filters already
+applied.
 
-1. Copy the webhook URL from **Settings → Live updates**.
-2. Paste it into Plex → **Settings → Webhooks → Add Webhook**.
+## Filters, and views worth keeping
 
-This is purely an optimisation — everything a webhook delivers is also picked up
-by the periodic sync, so a missed webhook loses nothing.
+Multi-select and exclusion on genres, ranges for year, runtime, rating and
+dates, cast and crew, library and server, on the grid, the watchlist and your
+history alike. The whole query lives in the URL, so a narrowed page is a link
+you can send. Save a view and it comes back.
 
----
+## Themes
 
-## How anime is detected
-
-There is no single reliable "is this anime?" flag across Plex, TMDB and TVDB, so
-Tally combines signals and scores them. It is deliberately conservative: an
-animated Western film must not be filed as anime just because it is animated.
-
-| Signal | Weight |
-|---|---|
-| You set the library override in Settings | decisive |
-| HAMA / AniDB / MAL metadata agent on the item | decisive |
-| Library is named something like "Anime" | decisive |
-| Explicit `Anime` genre tag | strong |
-| Animation **and** Japanese origin | strong |
-| Anime-ish TMDB keywords (`shounen`, `based on manga`, …) | moderate |
-| A confident MyAnimeList title match | corroborating |
-
-If it gets something wrong, open **Settings → Plex servers** and cycle the
-library's *Anime* chip between `auto`, `yes` and `no`. Your override always wins.
-
----
+Two themes ship, dark and light, and the interface can also follow the device.
+Beyond that you can make your own: Tally reads and writes `.umbertheme` files,
+the same flat table of colours my other applications use, so a theme made in one
+opens in the others unchanged. Import, export and a swatch editor are under
+**Settings → Appearance**, and the format is in [`docs/themes.md`](docs/themes.md).
 
 ## Multi-user
 
-Each person signs in with their own Plex account and gets their own history,
-ratings, watchlist and stats. Ratings and watch state are per-user in Plex too, so
-Tally stores a separate Plex token per user rather than reading everything through
-the server owner's account.
+Each person signs in with their own Plex account and sees their own history,
+ratings, watchlist and stats. Ratings and watch state are per-user in Plex too,
+so Tally holds a token per person rather than reading everyone's data through
+the server owner's account. The first account created is the administrator.
 
-The first account created is the administrator. Admins can manage users under
-Settings; everyone else only ever sees their own data.
+## What is not there yet
 
----
+- **No mobile app.** The interface works on a phone, but it is a web page.
+- **One Plex household.** Trakt, Jellyfin, Emby and Letterboxd are not imported
+  or exported.
+- **No editing of metadata.** Titles, artwork and genres come from Plex and the
+  metadata providers; Tally does not let you correct them.
+- **Continue watching can list one show more than once** when several episodes
+  of it are part-watched.
+- **No notifications.** Nothing emails, pushes or posts to Discord.
+- **The database is SQLite**, so Tally expects one instance at a time. There is
+  no clustering and no Postgres option.
 
-## API
+## Configuration
 
-Everything the web UI does is a normal HTTP API, and you can use it from scripts
-or other apps. Create a key under **Settings → API keys** and send it as a
-header:
+These are the ones that matter on day one. Every setting is an environment
+variable, and the full list is in
+[`docs/configuration.md`](docs/configuration.md).
 
-```bash
-curl -H "X-API-Key: tally_…" https://tally.example.com/api/stats/summary
-curl -H "Authorization: Bearer tally_…" https://tally.example.com/api/media?limit=5
-```
-
-Either header works. Interactive docs, generated from the code and always
-current, are at **`/api/docs`** — that is the authoritative endpoint list.
-
-A few useful ones:
-
-| | |
-|---|---|
-| `GET /api/media?q=&media_type=&sort=` | Browse and search, same filters as the UI |
-| `GET /api/media/continue-watching` | What you are part-way through |
-| `GET /api/watchlist` | Your watchlist, filterable and sortable |
-| `GET /api/history` | Watch history |
-| `GET /api/stats` | Totals, genres, ratings, streaks |
-| `POST /api/history/{id}/watched` | Log something as watched |
-| `POST /api/sync` | Trigger a sync |
-| `GET /api/sync/status` | Progress of the running sync |
-| `GET /api/health` | Version and liveness — needs no credentials |
-
-For Grafana and Prometheus, see [Dashboards](#dashboards) below.
-
-Three endpoints take no credentials: `GET /api/health`, `GET /api/version`, and
-`POST /api/webhooks/plex`. The webhook has to be open because Plex cannot send
-credentials with it — it only ever matches events to accounts and servers that
-are already linked, and never creates either.
-
-**Keys are shown once.** Only a fingerprint is stored, so Tally cannot show a
-key to you again — losing it means issuing a new one. A key acts as the account
-that created it, with exactly that account's access, so treat it like a
-password. Revoking takes effect immediately.
-
----
-
-## Dashboards
-
-Tally exposes two endpoints built for something other than its own UI:
-
-| | |
-|---|---|
-| `GET /api/stats/series` | One metric over time, as flat rows — for Grafana |
-| `GET /metrics` | Live gauges in the Prometheus text format |
-
-### Issue the key with the `stats` scope
-
-Under **Settings → API keys**, choose **Statistics** rather than Full access. A
-`stats` key is read-only *and* limited to `/api/stats*`, `/metrics`,
-`/api/health` and `/api/version` — it cannot list your library, your users or
-your other keys.
-
-That narrowing is the whole point: **anyone who can edit a Grafana panel can
-make any request the stored key can make.** A dashboard is not a viewer, it is a
-proxy. Give it the smallest scope that draws the graph.
-
-Send the key as a header — `X-API-Key` or `Authorization: Bearer` — and **never
-as a URL parameter**. Tally does not accept one there, deliberately: uvicorn's
-access log prints the query string at INFO, and `docker logs tally` is what
-people paste into bug reports.
-
-### `GET /api/stats/series`
-
-| Parameter | Values | |
+| Variable | Default | What it does |
 |---|---|---|
-| `metric` | `plays`, `minutes`, `distinct_titles`, `distinct_shows`, `ratings_given`, `avg_rating` | default `plays` |
-| `from`, `to` | ISO 8601 | Grafana writes these with `${__from:date:iso}` and `${__to:date:iso}` |
-| `preset` / `days` | `7d`, `30d`, `90d`, `ytd`, `12m`, `last_year`, `all` / a number | instead of `from`/`to` |
-| `interval` | `hour`, `day`, `week`, `month` | default `day` |
-| `group_by` | `none`, `media_type`, `genre`, `anime`, `source`, `device`, `user` | default `none` |
-| `tz` | an IANA name, e.g. `Europe/Oslo` | falls back to your saved timezone, then UTC |
-| `format` | `json`, `csv` | default `json` |
-| `user_id` | an account id | administrators only |
+| `PUBLIC_URL` | `http://localhost:8080` | The address you reach Tally on. Used for the Plex sign-in redirect and the webhook URL. |
+| `TMDB_API_KEY` | none | Posters, backdrops and descriptions. A [free key](https://www.themoviedb.org/settings/api) is the single biggest visual improvement. |
+| `PUID` / `PGID` | `1000` | The user and group to run as. Set them to whoever owns your `./data` directory. |
+| `TZ` | `UTC` | Which day a late-night play belongs to. |
 
-Every filter the browse pages take also narrows a series — `?genre=Horror`,
-`?min_rating=8`, `?library_id=3`, `?anime=only`. See `/api/docs` for the set.
+Tally works with no API keys at all, falling back to whatever artwork your Plex
+server already has.
 
-The answer is a **bare JSON array** with three fixed columns, so one datasource
-query works for every metric:
+## Documentation
 
-```json
-[
-  {"ts": "2026-08-14T00:00:00+02:00", "series": "movie", "value": 2},
-  {"ts": "2026-08-15T00:00:00+02:00", "series": "episode", "value": 6}
-]
-```
+| Subject | Page |
+|---|---|
+| Every setting, with defaults | [`docs/configuration.md`](docs/configuration.md) |
+| The HTTP API, and API keys | [`docs/api.md`](docs/api.md) |
+| Grafana and Prometheus dashboards | [`docs/integrations/grafana.md`](docs/integrations/grafana.md), [`docs/integrations/prometheus.md`](docs/integrations/prometheus.md) |
+| Live updates through a Plex webhook | [`docs/integrations/plex.md`](docs/integrations/plex.md) |
+| How the sync decides who wins | [`docs/sync.md`](docs/sync.md) |
+| How anime is detected | [`docs/anime.md`](docs/anime.md) |
+| Theme files, and making your own | [`docs/themes.md`](docs/themes.md) |
+| Backing up and restoring | [`docs/backups.md`](docs/backups.md) |
+| When something is wrong | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
 
-* `ts` always carries its UTC offset. Buckets are local days, so a film started
-  at 23:30 belongs to that evening.
-* With `group_by=none`, `series` is the metric's own name — the shape never
-  varies.
-* **Empty buckets are filled only when `group_by=none`.** With a group-by, only
-  the buckets that hold something are emitted, because filling every series ×
-  bucket is a cross-product. In the panel, turn on **Connect null values**, or
-  use a bar chart.
-* `avg_rating` fills empty buckets with `null`, not `0` — nobody rated is not a
-  rating of zero.
-* The genre series count a play once per genre, so they do not sum to `plays`.
-* `distinct_*` counts are distinct *within a bucket*, so daily figures do not
-  sum to the monthly one.
-* `ratings_given` and `avg_rating` are timestamped by when the rating was
-  recorded, which for ratings pulled from Plex is the day Tally first saw them.
-  They cannot be grouped by `source` or `device` — those describe a play.
-* More than 5000 buckets is a `422`. Ask for a coarser `interval`.
+Interactive API documentation, generated from the code and always current, is at
+`/api/docs` on your own instance.
 
-`format=csv` returns the same rows as RFC 4180 CSV with a header line.
-
-### Grafana, with the Infinity datasource
-
-Install **Infinity** (`yesoreyeram-infinity-datasource`), then provision it:
-
-```yaml
-# /etc/grafana/provisioning/datasources/tally.yaml
-apiVersion: 1
-datasources:
-  - name: Tally
-    type: yesoreyeram-infinity-datasource
-    uid: tally
-    jsonData:
-      auth_method: apiKey
-      apiKeyKey: X-API-Key
-      apiKeyType: header
-      # Infinity refuses any URL not listed here. See the warning below.
-      allowedHosts:
-        - https://tally.example.com
-    secureJsonData:
-      apiKeyValue: tally_your_key_here
-```
-
-> **If you configure authentication without an Allowed Hosts entry, Infinity
-> silently refuses to run the query.** No error, no data — just an empty panel.
-> This is the single most common reason a Tally dashboard looks broken.
-
-One worked panel query — plays per day, split by media type:
-
-* **Type** `JSON`, **Parser** `Backend`, **Source** `URL`, **Format** `Table`
-* **URL** `https://tally.example.com/api/stats/series?metric=plays&interval=day&group_by=media_type&from=${__from:date:iso}&to=${__to:date:iso}&tz=Europe/Oslo`
-* **Columns** — the three mappings, and they never change with the metric:
-
-  | Selector | Title | Format |
-  |---|---|---|
-  | `ts` | Time | Timestamp |
-  | `series` | Series | String |
-  | `value` | Value | Number |
-
-Leave the root selector **empty** — the response is already an array at the
-root. In the panel's *Transform* tab, add **Partition by values** on `series`
-to get one line per media type.
-
-A starting dashboard lives at
-[`docs/grafana/tally-overview.json`](docs/grafana/tally-overview.json). Import
-it, pick your Tally datasource when prompted, and edit freely — it is an example
-to take apart, not a supported artifact, and it will not be kept in step with
-future releases.
-
-### Prometheus
-
-```yaml
-# prometheus.yml
-scrape_configs:
-  - job_name: tally
-    scrape_interval: 60s
-    metrics_path: /metrics
-    scheme: https
-    authorization:
-      type: Bearer
-      credentials: tally_your_key_here
-      # or, to keep the key out of this file:
-      # credentials_file: /etc/prometheus/tally.key
-    static_configs:
-      - targets: ["tally.example.com"]
-```
-
-What it exports: `tally_build_info`, `tally_library_items`,
-`tally_watch_events_total`, `tally_watch_events_by_type_total`,
-`tally_watch_minutes_total`, `tally_watchlist_items`,
-`tally_current_streak_days`, `tally_longest_streak_days`, `tally_sync_running`
-and `tally_last_sync_timestamp_seconds`.
-
-**Everything is a gauge, including the names ending in `_total`.** Deleting a
-history row lowers a total, and Prometheus reads any fall in a counter as a
-process restart — which makes `rate()` over-report rather than merely lag. Use
-`delta()` or `deriv()` if you want a rate.
-
-Per-account metrics carry a `user` label with the display name or username on
-it, never the email address. A `stats` key belonging to an ordinary account sees
-only that account's series; one belonging to an administrator sees the whole
-household. Nothing is labelled by title — that would be one time series per
-film, and it is what `/api/stats/series` is for.
-
-The response is cached for about ten seconds, so a fast scrape interval does not
-re-aggregate the history every time.
-
-### Not supported
-
-* **The SimpleJSON datasource** (`/search`, `/query`, `/annotations`). That
-  plugin reached end of life in June 2024 and Grafana points people at Infinity.
-* **Pointing a SQLite datasource straight at `/data/tally.db`.** It works, and
-  it bypasses authentication, scopes and the per-user boundary entirely — every
-  account's ratings, notes and history, to anyone who can edit a panel.
-
----
-
-## Backups
-
-Everything lives in `/data`:
-
-```
-data/
-├── tally.db          your history, ratings, watchlist
-├── .secret_key       signs sessions, encrypts stored Plex tokens
-└── .plex_client_id   this install's identity to Plex
-```
-
-Copy that directory and you have a complete backup. Keep `.secret_key` with it —
-without it, stored Plex tokens cannot be decrypted and every user has to re-link
-Plex (no history is lost).
-
----
-
-## Troubleshooting
-
-**Plex sign-in opens, but nothing happens after approving**
-`PUBLIC_URL` does not match the address you are using. Fix it and restart.
-
-**"Permission denied: /data"**
-The mounted directory is owned by a different user than the container. Either set
-`PUID`/`PGID` to the owner's ids (`id -u` / `id -g`), or
-`sudo chown -R 1000:1000 ./data`.
-
-**"Could not reach plex.tv" — or nothing syncs and the logs mention name resolution**
-
-The container cannot resolve DNS. Check it directly:
+## Building from source
 
 ```bash
-docker exec tally getent hosts plex.tv
+cd backend && python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+DATA_DIR=./data .venv/bin/uvicorn app.main:app --reload --port 8080   # API
+cd frontend && npm install && npm run dev                             # UI on :5173
+cd backend && .venv/bin/python -m pytest -q                           # tests
+cd frontend && npm run check:design && npx tsc --noEmit && npm run build
 ```
 
-Empty output confirms it. `cat /etc/resolv.conf` inside the container shows which
-resolver it is using.
+## Licence
 
-If that resolver is a Pi-hole or AdGuard Home, this is the usual cause: every
-container on the host shares one apparent source address (the Docker bridge
-gateway, typically `172.17.0.1`), so they all count against a single client's
-query budget. Pi-hole's default is 1000 queries per minute, and once tripped it
-drops *every* query from that address until the window resets. Its log shows
-`RATE_LIMIT  Client 172.17.0.1 has been rate-limited`.
-
-Raise the limit in `/etc/pihole/pihole-FTL.conf` (`RATE_LIMIT=0/0` disables it),
-then `pihole restartdns`. Ad-blocking DNS can also filter Plex domains outright —
-check its query log for `plex.tv` and allow it if so.
-
-Failing that, point the container at a public resolver, which skips your local
-DNS for Tally only:
-
-```yaml
-services:
-  tally:
-    dns:
-      - 1.1.1.1
-```
-
-**No servers found in Settings**
-Press **Refresh**. If it still finds nothing, your Plex token may have expired —
-sign out and back in. Check that the container can reach your Plex server; a
-container on a custom bridge network cannot always reach a `localhost` address on
-the host.
-
-**Posters are missing or low quality**
-Add a `TMDB_API_KEY` and restart, then run a full re-import from Settings.
-
-Artwork from Plex is fetched through Tally rather than linked to directly, so it
-works from anywhere Tally itself is reachable — a poster no longer breaks because
-it was saved with a LAN address. Images are cached by your browser for a week.
-
-Note that the Movies and Shows grids sort by **Added, newest first** by default,
-so anything imported in one early batch sits together on the last pages — which
-is why missing artwork tends to look like "one whole page is blank". Titles that
-are on no Plex server (watchlist entries, things you watched before the file was
-removed) have no artwork on your server to borrow, so they lean on Plex Discover
-and TMDB. Tally retries the metadata providers once a week for anything still
-without a poster.
-
-**A show is in the wrong section**
-Cycle the library's *Anime* override in Settings, or press **Re-detect** under
-Settings → Anime to re-run classification over everything.
-
----
-
-## Development
-
-```bash
-# Backend — http://localhost:8080
-cd backend
-python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-DATA_DIR=./data .venv/bin/uvicorn app.main:app --reload --port 8080
-
-# Frontend — http://localhost:5173, proxies /api to :8080
-cd frontend
-npm install && npm run dev
-```
-
-```bash
-cd backend && .venv/bin/python -m pytest      # tests
-cd frontend && npm run lint                   # typecheck
-```
-
-Interactive API docs are at `/api/docs` while the backend is running.
-
-### Releasing
-
-Images are published only from `v*` tags — pushing `main` does not build. The
-tag's annotation becomes the GitHub Release body, so write the notes there.
-
-```bash
-# 1. Bump the version in backend/app/__init__.py to match the tag
-# 2. Commit, then tag with the release notes as the annotation
-git tag -a v0.1.0 -m "Tally v0.1.0
-
-- What changed
-- And what else"
-git push --follow-tags
-```
-
-That publishes to `ghcr.io/spillebulle/tally` and `docker.io/spillebulle/tally`
-for amd64 and arm64, tagged `0.1.0`, `0.1`, the short SHA, and `latest`, then
-opens a GitHub Release. Use **Actions → Build and publish container image → Run
-workflow** to rebuild without cutting a new version.
-
-Docker Hub publishing needs two repository secrets: `DOCKERHUB_USERNAME` and
-`DOCKERHUB_TOKEN` (a Docker Hub access token). GHCR uses the built-in
-`GITHUB_TOKEN` and needs no setup.
-
-### Layout
-
-```
-backend/app/
-├── main.py            FastAPI app, serves the built frontend
-├── models.py          SQLAlchemy schema
-├── routers/           HTTP endpoints
-└── services/
-    ├── plex_tv.py     plex.tv: OAuth, server discovery, watchlist
-    ├── plex_server.py a Plex Media Server: libraries, history, scrobble
-    ├── guids.py       Plex GUID parsing → external ids
-    ├── media_repo.py  Plex metadata → canonical media items
-    ├── sync_service.py the two-way sync engine
-    └── metadata/      TMDB, TVDB, MAL + anime classification
-frontend/src/
-├── pages/             one file per screen
-├── components/        posters, charts, layout, shared UI
-└── lib/               API client, types, contexts
-```
-
----
-
-## License
-
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache 2.0, in [LICENSE](LICENSE). Tally bundles the
+[Archivo](https://github.com/Omnibus-Type/Archivo) typeface under the SIL Open
+Font Licence and [Lucide](https://lucide.dev) icons under the ISC licence.
 
 Tally is not affiliated with Plex, TMDB, TheTVDB or MyAnimeList.
