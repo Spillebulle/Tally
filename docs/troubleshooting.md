@@ -128,8 +128,13 @@ starts, so a container killed mid-sync does not leave the button dead.
 Which day a play belongs to is decided by a timezone, not by the container's
 clock. The interface sends your browser's zone with every statistics request, so
 it is normally right without you doing anything. The API takes a `tz` parameter
-(an IANA name such as `Europe/Oslo`), falling back to the `timezone` value in
-your account preferences, and then to UTC.
+(an IANA name such as `Europe/Oslo`), falling back to the zone set under
+**Settings → Appearance → Time zone**, and then to UTC.
+
+So a Grafana panel or a script that does not send `tz` is answered in whatever
+that setting says, and in UTC while it is left on **Follow this device**. Set it
+to your own zone to move those. Every response names the zone it used in an
+`X-Tally-Timezone` header.
 
 `TZ` on the container sets the clock zone the log is written in and nothing
 else. Setting it does not move a day boundary.

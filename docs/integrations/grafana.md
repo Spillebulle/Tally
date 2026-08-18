@@ -31,7 +31,7 @@ One metric over time, as flat rows.
 | `days` | 1 to 3650 | instead of `from`/`to` |
 | `interval` | `hour`, `day`, `week`, `month` | default `day` |
 | `group_by` | `none`, `media_type`, `genre`, `anime`, `source`, `device`, `user` | default `none` |
-| `tz` | an IANA name, for example `Europe/Oslo` | falls back to your saved timezone, then UTC |
+| `tz` | an IANA name, for example `Europe/Oslo` | falls back to the zone under **Settings → Appearance → Time zone**, then UTC |
 | `format` | `json`, `csv` | default `json` |
 | `user_id` | an account id | administrators only |
 

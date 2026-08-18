@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -28,6 +28,7 @@ import {
   type Theme,
 } from '@/lib/app-context'
 import { THEME_KEYS, baseLightness, findTheme, type ThemeKeyRow } from '@/lib/theme'
+import { FOLLOW_DEVICE, deviceTimezone, timezoneOptions } from '@/lib/timezones'
 import type { ApiKeyCreated, ApiKeyScope, Library, Server } from '@/lib/types'
 import { cn, copyText, formatDateTime, relativeTime } from '@/lib/utils'
 import { Select } from '@/components/Dropdown'
@@ -106,7 +107,7 @@ const TABS: Tab[] = [
     id: 'appearance',
     label: 'Appearance',
     icon: Sun,
-    description: 'The interface should disappear behind your work. Pick a theme.',
+    description: 'The interface should disappear behind your work. Pick a theme and a time zone.',
   },
   {
     id: 'metadata',
@@ -1213,6 +1214,76 @@ function LibraryPane() {
 
 /* ── Appearance ──────────────────────────────────────────────────────────── */
 
+/**
+ * The zone days are counted in, and the one setting on this page that is not
+ * about what Tally looks like to *you*.
+ *
+ * It lives in Appearance all the same, because it is a question about how
+ * things are presented rather than about Plex: a play is stored in UTC and
+ * always will be, and this only decides which day that instant is shown under.
+ * See the backend's `app/timezones.py` and CLAUDE.md, "A day belongs to the
+ * viewer, not to the database".
+ *
+ * ## Why the control is worth having at all
+ *
+ * Nothing in the interface needs it. Every statistics request the app makes
+ * carries `?tz=` with the browser's own zone, so a person clicking around Tally
+ * is already answered in their own days. The stored preference is what
+ * `resolve()` falls back to when a request arrives *without* that parameter,
+ * which is every Grafana panel, every script and every API consumer. Left
+ * unset, all of those get UTC, and until now the only way to change that was a
+ * hand-written PUT. That asymmetry is what the note under the row has to say
+ * out loud, because the setting appears to do nothing when you are the one
+ * looking at the page.
+ */
+function TimeZoneGroup() {
+  const { prefs, update } = usePreferences()
+
+  /* Read once: the browser's zone cannot change while the page is open. */
+  const device = useMemo(() => deviceTimezone(), [])
+  const stored = typeof prefs.timezone === 'string' && prefs.timezone ? prefs.timezone : null
+
+  const options = useMemo(() => {
+    const list = timezoneOptions(device)
+    // A zone set through the API that this browser's list does not carry would
+    // otherwise show as "nothing chosen", which is a lie about a stored value.
+    if (stored && !list.some((option) => option.value === stored)) {
+      return [...list, { value: stored, label: stored.replace(/_/g, ' ') }]
+    }
+    return list
+  }, [device, stored])
+
+  const onDevice = device ? `, which is ${device.replace(/_/g, ' ')} just now` : ''
+
+  return (
+    <Group title="Time zone">
+      <Row
+        label="Count days in"
+        hint="Where midnight falls, so a film started at 23:30 is counted on the evening you watched it and not the next morning."
+      >
+        <Select
+          label="Time zone"
+          /* Fixed rather than sized to the label, for two reasons: the trigger
+             must not resize under the pointer as the chosen zone changes, and
+             a bordered list is *exactly* the trigger's width (§7.7), so this is
+             also how much room four hundred zone names get to be read in. */
+          className="w-[13rem]"
+          value={stored ?? FOLLOW_DEVICE}
+          options={options}
+          onChange={(next) =>
+            update.mutate({ timezone: next === FOLLOW_DEVICE ? null : next })
+          }
+        />
+      </Row>
+      <Note>
+        {stored === null
+          ? `Statistics you open here always use this device's zone${onDevice}. Nothing is stored, so a Grafana panel or a script that asks the API without naming a zone is answered in UTC.`
+          : `Statistics you open here still use this device's zone${onDevice}. A Grafana panel or a script that asks the API without naming a zone is answered in ${stored.replace(/_/g, ' ')}.`}
+      </Note>
+    </Group>
+  )
+}
+
 /*
  * The theme library (STYLE-GUIDE §3.1, §3.2, §9).
  *
@@ -1993,6 +2064,8 @@ function AppearancePane() {
           ))}
         </>
       )}
+
+      <TimeZoneGroup />
 
       {inUse && !readOnly && (
         <Group title="Danger">
