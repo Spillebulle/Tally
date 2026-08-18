@@ -12,8 +12,7 @@ data/
 ├── tally.db-shm        SQLite's shared-memory index for the file above
 ├── .secret_key         signs sessions, encrypts stored Plex tokens
 ├── .plex_client_id     this install's identity to Plex
-├── themes/<user_id>/   each account's own .umbertheme files
-└── images/             created at startup, currently unused
+└── themes/<user_id>/   each account's own .umbertheme files
 ```
 
 Copy that directory and you have a complete backup. There is nothing outside it:

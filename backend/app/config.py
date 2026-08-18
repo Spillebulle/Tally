@@ -48,8 +48,6 @@ class Settings(BaseSettings):
     # --- Sync -------------------------------------------------------------
     sync_interval_minutes: int = 30
     sessions_poll_seconds: int = 30
-    # Guard against a misconfigured server nuking history on both sides.
-    sync_deletion_safety_limit: int = 200
 
     # --- Server -----------------------------------------------------------
     host: str = "0.0.0.0"
@@ -70,10 +68,6 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         return f"sqlite+aiosqlite:///{self.db_path}"
-
-    @property
-    def images_dir(self) -> Path:
-        return self.data_dir / "images"
 
 
 def _persisted(path: Path, generate) -> str:
@@ -102,7 +96,6 @@ def _prepare_data_dir(settings: Settings) -> None:
     """
     try:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        settings.images_dir.mkdir(parents=True, exist_ok=True)
     except PermissionError as exc:
         raise DataDirectoryError(
             f"Cannot write to the data directory {settings.data_dir}.\n"

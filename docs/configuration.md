@@ -35,7 +35,7 @@ breaks the login flow rather than something you notice later.
 | `PUBLIC_URL` | `http://localhost:8080` | The address you actually type in the browser. Used for the Plex sign-in redirect and for the webhook address Tally hands you. Set it to something like `http://192.168.1.50:8080` or `https://tally.example.com`. |
 | `DATA_DIR` | `/data` | Where the database, the secret key and the client id live. The image sets it, and there is no reason to move it inside a container. |
 | `LOG_LEVEL` | `INFO` | `DEBUG` when something is not syncing and you want to see why. At `DEBUG` the HTTP client also logs full request URLs, which for TMDB and Plex artwork means keys and tokens in your logs, so turn it back down before pasting anything into an issue. |
-| `TZ` | `UTC` | The container's clock zone, which is what timestamps in the log are written in. It does **not** decide which day a play is filed under: the interface sends your browser's zone with every statistics request, and the API takes a `tz` parameter. |
+| `TZ` | `UTC` | The container's clock zone, which is what timestamps in the log are written in. It does **not** decide which day a play is filed under: the interface sends your browser's zone with every statistics request, the API takes a `tz` parameter, and **Settings → Appearance → Time zone** sets the fallback for requests that carry neither. |
 | `HOST` | `0.0.0.0` | The network address uvicorn binds to. The image sets it. |
 | `PORT` | `8080` | Port uvicorn listens on. Map it with Docker rather than changing this. |
 | `APP_NAME` | `Tally` | The name in the log line at startup and in `/api/health`. |
@@ -68,6 +68,27 @@ Neither can be set per account. What each account syncs can be: the three
 switches under **Settings → Syncing → What syncs** turn ratings, the
 watchlist and writing watch state back to Plex on and off for you alone. What
 they do is in `sync.md`.
+
+## Which day a play is counted on
+
+This is a per-account setting, not an environment variable, and it lives under
+**Settings → Appearance → Time zone**.
+
+Every timestamp is stored in UTC. Which *day* an instant belongs to is a
+question about the person watching, so it is answered by a zone:
+
+1. the `tz` parameter on the request, if it carries one;
+2. otherwise the zone saved under **Settings → Appearance → Time zone**;
+3. otherwise UTC.
+
+The interface sends your browser's zone with every statistics request, so what
+you see in Tally is already in your own days whatever the setting says. The
+setting is what everything *else* gets: a Grafana panel, a `curl`, anything
+reading `/api/stats` or `/api/stats/series` without naming a zone. Left on
+**Follow this device**, all of those are answered in UTC.
+
+Every response says which zone it used in an `X-Tally-Timezone` header, so a
+dashboard that looks a day out can be checked rather than guessed at.
 
 ## Security
 
