@@ -2456,7 +2456,7 @@ function AboutPane() {
           {reported ? <Fact figure>{reported}</Fact> : <Fact>Unknown</Fact>}
         </Row>
         <Row label="Licence">
-          <Fact>Apache-2.0</Fact>
+          <Fact>GPL-3.0</Fact>
         </Row>
         {settings.isError ? (
           <QueryError

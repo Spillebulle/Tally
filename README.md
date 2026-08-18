@@ -21,9 +21,9 @@ saves everything in one SQLite file you own
   <img src="https://img.shields.io/docker/pulls/spillebulle/tally?style=flat-square" alt="Docker pulls">
 </p>
 
-> Tally is at 0.4.0 and is a young project. The sync engine, the API and the
+> Tally is at 0.4.1 and is a young project. The sync engine, the API and the
 > metadata handling carry 573 tests and are the parts least likely to surprise
-> you; the interface was rebuilt in this release and is the newest thing here.
+> you; the interface was rebuilt in 0.4.0 and is the newest thing here.
 > Read [what is not there yet](#what-is-not-there-yet) before you depend on it.
 
 ## Install
@@ -49,8 +49,8 @@ The first account to sign in becomes the administrator.
 
 | Where | Image |
 |---|---|
-| GitHub Container Registry | `ghcr.io/spillebulle/tally:0.4.0` |
-| Docker Hub | `spillebulle/tally:0.4.0` |
+| GitHub Container Registry | `ghcr.io/spillebulle/tally:0.4.1` |
+| Docker Hub | `spillebulle/tally:0.4.1` |
 | Build it yourself | `docker build -t tally .` |
 
 Both registries serve the same image for `linux/amd64` and `linux/arm64`.
@@ -182,8 +182,10 @@ cd frontend && npm run check:design && npx tsc --noEmit && npm run build
 
 ## Licence
 
-Apache 2.0, in [LICENSE](LICENSE). Tally bundles the
+GNU General Public License v3.0, in [LICENSE](LICENSE). Releases up to and
+including 0.4.0 were published under Apache 2.0. Tally bundles the
 [Archivo](https://github.com/Omnibus-Type/Archivo) typeface under the SIL Open
-Font Licence and [Lucide](https://lucide.dev) icons under the ISC licence.
+Font Licence and [Lucide](https://lucide.dev) icons under the ISC licence, both
+of which the GPL permits.
 
 Tally is not affiliated with Plex, TMDB, TheTVDB or MyAnimeList.

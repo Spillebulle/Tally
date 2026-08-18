@@ -4,6 +4,19 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
+## 0.4.1
+
+**Tally is now under the GNU General Public License v3.0**, where releases up
+to and including 0.4.0 were Apache 2.0. The bundled Archivo typeface and Lucide
+icons keep their own licences, both of which the GPL permits.
+
+**The Docker Hub listing shows its banner again.** The description is pushed
+from the README, and the README's banner is a `<picture>` element so that
+GitHub can swap it between dark and light. Docker Hub renders Markdown and not
+raw HTML, and the URL completion that turns relative paths into absolute ones
+only rewrites Markdown, so the paths arrived pointing at nothing. Docker Hub
+now gets its own short description with absolute image URLs.
+
 ## 0.4.0
 
 **The interface has been rebuilt.** Tally now follows one design language from
