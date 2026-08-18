@@ -1367,17 +1367,31 @@ export function MatrixChart({
             gap: `${gap}px`,
           }}
         >
-          {/* Corner, then the column headers. */}
-          <div aria-hidden="true" />
-          {columns.map((name, index) => (
-            <div
-              key={name}
-              role="columnheader"
-              className="figure overflow-hidden text-center text-tiny leading-none text-dim"
-            >
-              {index % columnLabelEvery === 0 ? name : ''}
-            </div>
-          ))}
+          {/*
+            Corner, then the column headers, and the whole lot inside a row.
+            A `columnheader` has to have a `role="row"` for a parent or the
+            accessibility tree drops it: the cells become presentational
+            children of the grid, so the columns lose their names and the grid
+            reports one row fewer than it draws. `contents` is what lets that
+            row exist in the tree without existing in the grid layout, exactly
+            as the data rows below already do.
+          */}
+          <div role="row" className="contents">
+            {/* The corner. A real, empty `columnheader` rather than an
+                `aria-hidden` spacer, so this row has one cell per column of
+                the rows below it — a header row one cell short leaves every
+                column reported under its neighbour's name. */}
+            <div role="columnheader" />
+            {columns.map((name, index) => (
+              <div
+                key={name}
+                role="columnheader"
+                className="figure overflow-hidden text-center text-tiny leading-none text-dim"
+              >
+                {index % columnLabelEvery === 0 ? name : ''}
+              </div>
+            ))}
+          </div>
 
           {rows.map((name, rowIndex) => (
             <div key={name} role="row" className="contents">

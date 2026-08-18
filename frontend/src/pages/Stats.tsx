@@ -1301,6 +1301,20 @@ export function Stats() {
   const axisLabels = chunkAxisLabels(currentBuckets)
   const comparisonReady = compare !== 'off' && earlierBuckets.length > 0
 
+  /**
+   * The earlier window is a second request and it can fail on its own, so it
+   * gets its own error branch — a failed request is not an empty list, here as
+   * everywhere else on this page.
+   *
+   * Unsaid, that failure is invisible rather than loud: the two-series chart
+   * quietly becomes a one-series chart and every tile delta is simply absent,
+   * which reads as "nothing moved" over a 500. The primary series is still
+   * drawn either way; what is missing is only the half that could not be
+   * fetched, and that is what gets said.
+   */
+  const comparisonFailed = compare !== 'off' && earlier.isError
+  const retryComparison = () => void earlier.refetch()
+
   // Enough points to show a shape, few enough that a 72px sparkline is not
   // mush. Chunked with the same rule as the charts, so the tile and the figure
   // beside it describe the same window in the same divisions.
@@ -1479,6 +1493,23 @@ export function Stats() {
         />
       </div>
 
+      {/*
+        Directly under the tiles, because that is the first place the loss
+        shows: the deltas these tiles carry come from the earlier window, and
+        an absent delta looks like a figure that did not move. One line rather
+        than a panel — `compact` is for a failure standing in for a row, and
+        this stands in for nine short ones.
+      */}
+      {comparisonFailed && (
+        <ErrorState
+          compact
+          className="card p-3"
+          error={earlier.error}
+          title={`The comparison with ${COMPARISON_PHRASES[compare]} could not be loaded, so the deltas and the second series are missing`}
+          onRetry={retryComparison}
+        />
+      )}
+
       <Section
         id="activity"
         title="Activity"
@@ -1527,7 +1558,47 @@ export function Stats() {
           )}
         </ChartCard>
 
-        {comparisonReady ? (
+        {comparisonFailed ? (
+          /*
+            The comparison failed, so the frame keeps the series it does have.
+            Falling through to the "Plays by month" card below would have drawn
+            a *different* chart in this slot and said nothing, which is the
+            silent version of the same failure. One series, so no legend, and
+            the description says what is missing rather than leaving a reader
+            to notice that the card they were looking at has changed subject.
+          */
+          <ChartCard
+            headingLevel={3}
+            title="Plays per period"
+            description={`Plays per period in this window. The comparison with ${COMPARISON_PHRASES[compare]} could not be loaded, so only this window is drawn. Pick a column to list those plays.`}
+            table={
+              <DataTable
+                caption="Plays per period"
+                rows={currentBuckets.map((bucket) => ({
+                  label: spanLabel(bucket),
+                  value: bucket.value,
+                }))}
+                valueHeader="This window"
+              />
+            }
+          >
+            <ColumnChart
+              data={currentBuckets}
+              seriesLabel="This window"
+              formatLabel={(label) => axisLabels.get(label) ?? label}
+              describe={describeBucket}
+              emptyMessage="Nothing watched in this window."
+              onSelect={(entry) =>
+                navigate(
+                  historyLink({
+                    since: startOfDay(parseLocalDateLabel(entry.from)),
+                    until: endOfDay(parseLocalDateLabel(entry.to)),
+                  }),
+                )
+              }
+            />
+          </ChartCard>
+        ) : comparisonReady ? (
           /*
             Two series in one frame, and therefore a legend: a heading can name
             a single series but it cannot tell two apart. The columns align by
