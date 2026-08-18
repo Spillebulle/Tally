@@ -35,6 +35,12 @@ black in the light theme. Charts that are not links now brighten on hover like
 the ones that are, and a failed comparison request says so instead of quietly
 dropping a series and every tile delta.
 
+**You can say which zone counts your days.** Settings, Appearance now has a
+timezone picker. The interface always used your device's zone, but anything
+asking the API without naming one, a Grafana panel or a script, was answered in
+UTC with no way to change that. The row says so plainly, because the two
+answers differing is the reason the setting exists.
+
 **Fixes you may feel rather than see.** A disabled control can finally show the
 tooltip explaining why it is disabled, which it structurally could not before. A
 tap in the corner of a poster no longer marks it watched on a touch screen. The
