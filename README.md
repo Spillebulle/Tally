@@ -21,9 +21,10 @@ saves everything in one SQLite file you own
   <img src="https://img.shields.io/docker/pulls/spillebulle/tally?style=flat-square" alt="Docker pulls">
 </p>
 
-> Tally runs a real household library every day, and the sync, the stats and the
-> API are stable. It is still a young project, so read
-> [what is not there yet](#what-is-not-there-yet) before you rely on it.
+> Tally is at 0.4.0 and is a young project. The sync engine, the API and the
+> metadata handling carry 573 tests and are the parts least likely to surprise
+> you; the interface was rebuilt in this release and is the newest thing here.
+> Read [what is not there yet](#what-is-not-there-yet) before you depend on it.
 
 ## Install
 
@@ -48,8 +49,8 @@ The first account to sign in becomes the administrator.
 
 | Where | Image |
 |---|---|
-| GitHub Container Registry | `ghcr.io/spillebulle/tally:0.3.0` |
-| Docker Hub | `spillebulle/tally:0.3.0` |
+| GitHub Container Registry | `ghcr.io/spillebulle/tally:0.4.0` |
+| Docker Hub | `spillebulle/tally:0.4.0` |
 | Build it yourself | `docker build -t tally .` |
 
 Both registries serve the same image for `linux/amd64` and `linux/arm64`.
@@ -147,7 +148,7 @@ variable, and the full list is in
 | `PUBLIC_URL` | `http://localhost:8080` | The address you reach Tally on. Used for the Plex sign-in redirect and the webhook URL. |
 | `TMDB_API_KEY` | none | Posters, backdrops and descriptions. A [free key](https://www.themoviedb.org/settings/api) is the single biggest visual improvement. |
 | `PUID` / `PGID` | `1000` | The user and group to run as. Set them to whoever owns your `./data` directory. |
-| `TZ` | `UTC` | Which day a late-night play belongs to. |
+| `TZ` | `UTC` | The zone the log is written in. It does not decide which day a play is filed under: the interface sends your own zone with every request. |
 
 Tally works with no API keys at all, falling back to whatever artwork your Plex
 server already has.
