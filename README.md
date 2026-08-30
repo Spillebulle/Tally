@@ -14,13 +14,6 @@ saves everything in one SQLite file you own
 
 </div>
 
-<p align="center">
-  <img src="https://img.shields.io/github/license/Spillebulle/Tally?style=flat-square" alt="Licence">
-  <img src="https://img.shields.io/github/actions/workflow/status/Spillebulle/Tally/docker.yml?style=flat-square" alt="Build">
-  <img src="https://img.shields.io/github/v/release/Spillebulle/Tally?style=flat-square" alt="Release">
-  <img src="https://img.shields.io/docker/pulls/spillebulle/tally?style=flat-square" alt="Docker pulls">
-</p>
-
 > Tally is at 0.6.0 and is a young project. The sync engine, the API and the
 > metadata handling carry 586 tests and are the parts least likely to surprise
 > you; the interface was rebuilt in 0.4.0 and is the newest thing here.
