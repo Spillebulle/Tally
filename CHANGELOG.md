@@ -4,6 +4,15 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
+## 0.6.1
+
+**Sync works again when one film lives in two libraries.** A title held twice,
+for example once in a 4K library and once in the main one or on two servers,
+made every sync stop at the watchlist step with "Multiple rows were found when
+one or none was required". Libraries, history and ratings still synced, but the
+watchlist, missing artwork and cast and crew had not been updated since. The
+first sync after upgrading catches all three up.
+
 ## 0.6.0
 
 **History is drawn three ways.** The diary list is still there and still the

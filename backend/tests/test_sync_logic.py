@@ -1901,3 +1901,41 @@ async def test_a_webhook_and_the_history_import_do_not_double_count(db, monkeypa
         )
     ).scalar_one()
     assert state.view_count == 1, "the same play was counted twice"
+
+
+async def test_remembering_a_guid_tolerates_the_same_film_held_twice(db):
+    """One film in two libraries is two mappings carrying the same plex:// guid.
+
+    That is ordinary data — a 4K library beside the main one, or the same film
+    on two servers — and `_remember_plex_guid` asked for "one or none" of it.
+    The second copy raised `MultipleResultsFound` inside `sync_watchlist`, and
+    because the watchlist runs inside `full_sync`'s try, every scheduled sync
+    after it failed: no watchlist, no artwork backfill, no credits.
+    """
+    from sqlalchemy import select
+
+    user, server, item, _ = await _fixture_world(db)
+    guid = "plex://movie/5d7768ba96b655001fdc0408"
+    first = await db.scalar(select(PlexMapping).where(PlexMapping.rating_key == "42"))
+    first.plex_guid = guid
+    second_library = PlexLibrary(
+        server_id=server.id,
+        section_key="2",
+        title="Movies 4K",
+        section_type="movie",
+        enabled=True,
+    )
+    db.add(second_library)
+    await db.flush()
+    db.add(
+        PlexMapping(
+            media_item_id=item.id,
+            server_id=server.id,
+            library_id=second_library.id,
+            rating_key="4242",
+            plex_guid=guid,
+        )
+    )
+    await db.commit()
+
+    await SyncService(db)._remember_plex_guid(item, guid)

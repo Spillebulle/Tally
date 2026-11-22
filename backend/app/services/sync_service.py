@@ -1403,13 +1403,18 @@ class SyncService:
         """Stash a Discover guid so we can later add/remove this item remotely."""
         if not plex_guid or not plex_guid.startswith("plex://"):
             return
-        result = await self.db.execute(
-            select(PlexMapping).where(
+        # Several mappings may already carry this guid — one film in two
+        # libraries, or on two servers — so ask whether any does, not for
+        # "one or none": that raised and failed every sync after it.
+        already = await self.db.scalar(
+            select(PlexMapping.id)
+            .where(
                 PlexMapping.media_item_id == item.id,
                 PlexMapping.plex_guid == plex_guid,
             )
+            .limit(1)
         )
-        if result.scalar_one_or_none() is not None:
+        if already is not None:
             return
         result = await self.db.execute(
             select(PlexMapping).where(PlexMapping.media_item_id == item.id)
