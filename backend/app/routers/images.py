@@ -106,7 +106,7 @@ async def _from_plex_servers(
     tried = False
     repaired = False
     for mapping, server in rows.all():
-        client = await service.client_for(user, server)
+        client = await service.client_for(user, server, include_removed=True)
         if client is None:
             continue
         tried = True

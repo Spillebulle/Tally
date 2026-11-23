@@ -2018,3 +2018,27 @@ async def test_full_sync_skips_a_server_the_account_removed(db):
 
     assert scanned == []
     assert run.stats["servers"] == 0
+
+
+async def test_discovery_does_not_contact_a_removed_server(db, monkeypatch):
+    """A friend's server refuses /accounts, so the id never resolves and every
+    sync would ask again — paying the timeout whenever that server is down."""
+    user, server, access = await _removed_server_world(db, owned=False)
+    access.plex_account_id = None
+    await db.commit()
+    service = SyncService(db)
+
+    async def resources(_token):
+        return [_resource_for(server, owned=False)]
+
+    asked: list[int] = []
+
+    async def resolve(_user, srv, _token):
+        asked.append(srv.id)
+        return None
+
+    service.plex_tv.get_resources = resources
+    monkeypatch.setattr(service, "_resolve_account_id", resolve)
+    await service.discover_servers(user)
+
+    assert asked == []

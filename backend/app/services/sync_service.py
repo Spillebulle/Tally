@@ -167,7 +167,7 @@ class SyncService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.plex_tv = PlexTVClient()
-        self._clients: dict[tuple[int, int], PlexServerClient] = {}
+        self._clients: dict[tuple[int, ...], PlexServerClient] = {}
         # The server's device table, per (user, server), fetched at most once
         # per SyncService — which is once per sync run. See `_device_directory`.
         self._devices: dict[tuple[int, int], dict[str, tuple[str | None, str | None]]] = {}
@@ -301,7 +301,10 @@ class SyncService:
         access.owned = owned
         await self.db.flush()
 
-        if access.plex_account_id is None:
+        # A removed server is not contacted. The token refresh above is local
+        # and harmless; this is a request to the server, and for a friend's
+        # server that refuses /accounts it would be repeated on every sync.
+        if access.plex_account_id is None and access.enabled:
             access.plex_account_id = await self._resolve_account_id(user, server, token)
         return access
 
@@ -345,19 +348,30 @@ class SyncService:
         return None
 
     async def client_for(
-        self, user: User, server: PlexServer
+        self, user: User, server: PlexServer, *, include_removed: bool = False
     ) -> PlexServerClient | None:
-        cache_key = (user.id, server.id)
+        """A client for this server with this user's own token.
+
+        `include_removed` is for the artwork proxy alone. Removing a server stops
+        it being *synced* for this account, not what was already imported from
+        it being shown — and without it a non-owner lost every picture only that
+        server held, while an owner (via the fallback below) kept theirs.
+        """
+        # Kept apart so a client built from a removed row is never handed to
+        # the sync, which asks without `include_removed`.
+        cache_key: tuple[int, ...] = (
+            (user.id, server.id, 1) if include_removed else (user.id, server.id)
+        )
         if cached := self._clients.get(cache_key):
             return cached
 
-        result = await self.db.execute(
-            select(UserServerAccess).where(
-                UserServerAccess.user_id == user.id,
-                UserServerAccess.server_id == server.id,
-                UserServerAccess.enabled.is_(True),
-            )
-        )
+        conditions = [
+            UserServerAccess.user_id == user.id,
+            UserServerAccess.server_id == server.id,
+        ]
+        if not include_removed:
+            conditions.append(UserServerAccess.enabled.is_(True))
+        result = await self.db.execute(select(UserServerAccess).where(*conditions))
         access = result.scalar_one_or_none()
         token = decrypt_secret(access.access_token_encrypted) if access else None
         if not token and server.owner_user_id == user.id:

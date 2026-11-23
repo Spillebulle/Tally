@@ -149,6 +149,17 @@ async def handle_webhook(db: AsyncSession, payload: dict[str, Any]) -> dict[str,
     if server is None:
         return {"status": "ignored", "reason": "no known server"}
 
+    # A server this account removed is not imported from, by any path.
+    removed = await db.scalar(
+        select(UserServerAccess.id).where(
+            UserServerAccess.user_id == user.id,
+            UserServerAccess.server_id == server.id,
+            UserServerAccess.enabled.is_(False),
+        )
+    )
+    if removed is not None:
+        return {"status": "ignored", "reason": "server removed for this account"}
+
     service = SyncService(db)
     client = await service.client_for(user, server)
     repo = MediaRepository(db, enrich=False)

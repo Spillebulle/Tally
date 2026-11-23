@@ -655,6 +655,27 @@ artwork transcode puts in the query string. Writing a global row takes
 `owner_user_id == user.id or is_admin`; per-user preferences belong on
 `UserServerAccess`.
 
+### Removing a server is per account, and means "not synced", not "hidden"
+
+`UserServerAccess.enabled` is the account's own switch; `PlexServer.enabled` is
+the global, owner-only one, and the two mean different things. The per-account
+switch has to hold against three things that used to ignore it:
+
+* **Discovery.** plex.tv keeps listing a server the account removed, so
+  `full_sync` syncs `servers_for(user)` *after* `discover_servers`, never
+  discovery's own result. Discovery never writes `enabled`, and does not call
+  `/accounts` on a removed server — a friend's server refuses it, so it would
+  be asked again on every sync.
+* **The owner-token fallback.** `client_for` falls back to the owner's token
+  when the access row is filtered out, so an owner's removed server is skipped
+  at the server list, before any client exists.
+* **Webhooks**, which are an import path of their own.
+
+Artwork is the deliberate exception: the images proxy asks
+`client_for(..., include_removed=True)`. Removal stops syncing; it does not
+hide what was imported, and without it a non-owner lost every picture only
+that server held while an owner kept theirs.
+
 ### Anything anonymous must fail closed, on identity and on scope
 
 Two endpoints take no credentials by necessity, and both used to guess:

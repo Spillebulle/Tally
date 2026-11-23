@@ -2343,3 +2343,62 @@ async def test_removing_a_server_without_access_is_404(authed_client, db):
     )
     assert response.status_code == 404
     assert await _access(db, tester_id, server_id) is None
+
+
+async def test_artwork_still_shows_after_removing_a_friends_server(authed_client, db):
+    """Removing a server stops syncing it; it does not hide what was imported.
+
+    For a non-owner, `client_for` has no owner-token fallback, so filtering the
+    artwork client on the access switch blanked every picture that only that
+    server held — while an owner who removed their own server kept theirs.
+    """
+    from app.models import PlexMapping
+    from app.services import plex_server as plex_server_module
+
+    user = (await db.execute(select(User))).scalars().first()
+    server = PlexServer(
+        machine_identifier="friend-art",
+        name="Friend",
+        base_url="https://friend.example:32400",
+        access_token_encrypted="encrypted",
+        owner_user_id=None,
+    )
+    item = MediaItem(guid_key="tmdb:movie:2", media_type=MediaType.MOVIE, title="Arrival")
+    db.add_all([server, item])
+    await db.flush()
+    db.add_all(
+        [
+            UserServerAccess(
+                user_id=user.id,
+                server_id=server.id,
+                access_token_encrypted=encrypt_secret("user-token"),
+                enabled=False,
+            ),
+            PlexMapping(
+                media_item_id=item.id,
+                server_id=server.id,
+                rating_key="77",
+                thumb_path="/library/metadata/77/thumb/1",
+            ),
+        ]
+    )
+    await db.commit()
+    item_id = item.id
+
+    async def fake_request(self, method, path, *, params=None, retries=1, record_failures=True):
+        class Resp:
+            status_code = 200
+            content = b"jpeg-bytes"
+            headers = {"content-type": "image/jpeg"}
+
+        return Resp()
+
+    original = plex_server_module.PlexServerClient._request
+    plex_server_module.PlexServerClient._request = fake_request  # type: ignore[assignment]
+    try:
+        response = await authed_client.get(f"/api/images/{item_id}/poster")
+    finally:
+        plex_server_module.PlexServerClient._request = original  # type: ignore[assignment]
+
+    assert response.status_code == 200
+    assert response.content == b"jpeg-bytes"

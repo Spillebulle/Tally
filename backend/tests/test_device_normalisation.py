@@ -440,3 +440,20 @@ async def test_stored_device_ids_survive_a_server_that_will_not_answer(
         select(WatchEvent).where(WatchEvent.dedupe_key == "plex:abc123:old")
     )
     assert stored.device == "7"
+
+
+async def test_a_webhook_from_a_server_the_account_removed_is_ignored(db):
+    """Removed means not imported from — the webhook is an import path too."""
+    user, server, _item, _library = await _world(db)
+    access = await db.scalar(
+        select(UserServerAccess).where(
+            UserServerAccess.user_id == user.id, UserServerAccess.server_id == server.id
+        )
+    )
+    access.enabled = False
+    await db.commit()
+
+    result = await handle_webhook(db, _webhook_payload({"title": "Living Room TV"}))
+
+    assert result["status"] == "ignored"
+    assert await _events(db, user) == []
