@@ -481,6 +481,9 @@ export const api = {
       post<{ reachable: boolean; url: string | null }>(`/api/servers/${id}/test`),
     update: (id: number, body: { manual_url?: string | null; enabled?: boolean }) =>
       patch<Server>(`/api/servers/${id}`, body),
+    /** Stop using a server for this account only, or start again. */
+    setAccess: (id: number, enabled: boolean) =>
+      patch<Server>(`/api/servers/${id}/access`, { enabled }),
     updateLibrary: (
       id: number,
       body: { enabled?: boolean; anime_override?: boolean | null },

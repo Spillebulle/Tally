@@ -695,6 +695,8 @@ export interface Server {
   version: string | null
   platform: string | null
   enabled: boolean
+  /** False once this account removed the server; it stays listed so it can be added back. */
+  access_enabled: boolean
   last_seen_at: string | null
   libraries: Library[]
 }

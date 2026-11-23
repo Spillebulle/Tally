@@ -643,12 +643,75 @@ function ServerPanel({ server }: { server: Server }) {
     onError: (error: Error) => notify(error.message, 'error'),
   })
 
+  // Per account: removing a server stops it syncing for you and nobody else,
+  // and keeps everything already imported. It stays on this page so it can be
+  // added back; a removed server that vanished could never be restored.
+  const setAccess = useMutation({
+    mutationFn: (enabled: boolean) => api.servers.setAccess(server.id, enabled),
+    onSuccess: (updated) => {
+      notify(
+        updated.access_enabled
+          ? `${server.name} is back. It syncs on the next run.`
+          : `Removed ${server.name}. Nothing already imported was deleted.`,
+        'success',
+      )
+      queryClient.invalidateQueries({ queryKey: ['servers'] })
+      queryClient.invalidateQueries({ queryKey: ['places'] })
+    },
+    onError: (error: Error) => notify(error.message, 'error'),
+  })
+
+  if (!server.access_enabled) {
+    return (
+      <Panel
+        title={server.name}
+        commands={
+          <>
+            <span className="badge">Removed</span>
+            <button
+              type="button"
+              onClick={() => setAccess.mutate(true)}
+              disabled={setAccess.isPending}
+              title={
+                setAccess.isPending
+                  ? `Adding ${server.name} back.`
+                  : `Sync ${server.name} for your account again.`
+              }
+              className="btn-outline"
+            >
+              {setAccess.isPending ? <Spinner /> : null}
+              Add back
+            </button>
+          </>
+        }
+      >
+        <p className="text-small text-dim">
+          Not synced for your account. Everything already imported from it stays.
+        </p>
+      </Panel>
+    )
+  }
+
   return (
     <Panel
       title={server.name}
       commands={
         <>
           {server.owned && <span className="badge">Owner</span>}
+          <button
+            type="button"
+            onClick={() => setAccess.mutate(false)}
+            disabled={setAccess.isPending}
+            title={
+              setAccess.isPending
+                ? `Removing ${server.name}.`
+                : `Stop syncing ${server.name} for your account. Other accounts and everything already imported are untouched.`
+            }
+            className="btn-ghost"
+          >
+            {setAccess.isPending ? <Spinner /> : null}
+            Remove
+          </button>
           <button
             type="button"
             onClick={() => test.mutate()}

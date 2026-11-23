@@ -4,6 +4,14 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
+## Unreleased
+
+**Remove a Plex server you do not want synced.** Every server your Plex account
+can reach used to be synced whether you wanted it or not, including a friend's
+shared server. Each server in Settings now has a **Remove** button. It applies
+to your account only, it survives every later sync, and nothing already imported
+is deleted. A removed server stays listed with **Add back**.
+
 ## 0.6.1
 
 **Sync works again when one film lives in two libraries.** A title held twice,
