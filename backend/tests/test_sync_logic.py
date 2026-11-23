@@ -1113,9 +1113,16 @@ class FakePlexTV:
         self._fetch = WatchlistFetch(items=list(items or []), complete=complete)
         self.removed: list[str] = []
         self.added: list[str] = []
+        # Per-title watchlist dates, keyed by plex:// guid, and which were asked.
+        self.dates: dict = {}
+        self.asked_dates: list[str] = []
 
     async def get_watchlist(self, token: str):
         return self._fetch
+
+    async def watchlisted_at_for(self, token: str, guid: str):
+        self.asked_dates.append(guid)
+        return self.dates.get(guid)
 
     async def remove_from_watchlist(self, token: str, guid: str) -> bool:
         self.removed.append(guid)
@@ -2042,3 +2049,121 @@ async def test_discovery_does_not_contact_a_removed_server(db, monkeypatch):
     await service.discover_servers(user)
 
     assert asked == []
+
+
+def _discover_meta(key: str, tmdb: int, title: str) -> dict:
+    """A Discover watchlist row as Plex really sends it: no watchlistedAt."""
+    return {
+        "ratingKey": key,
+        "guid": f"plex://movie/{key}",
+        "type": "movie",
+        "title": title,
+        "year": 2021,
+        "Guid": [{"id": f"tmdb://{tmdb}"}],
+        "userState": False,
+    }
+
+
+async def test_watchlist_sync_asks_plex_for_the_dates_discover_leaves_out(db):
+    """Discover's list carries no watchlistedAt, so every entry fell back to the
+    day Tally first saw it — 419 of 456 on a live instance dated by the first
+    sync, and "recently watchlisted" sorted by nothing. The per-title userState
+    endpoint has the date; ask it for any entry that has none."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    user, item = await _watchlisted_user(db)
+    db.add(WatchlistEntry(user_id=user.id, media_item_id=item.id, active=True, plex_active=True))
+    await db.commit()
+
+    old = datetime(2025, 3, 1, 12, 0, tzinfo=UTC)
+    new = datetime(2026, 11, 19, 20, 34, tzinfo=UTC)
+    service = SyncService(db)
+    service.plex_tv = FakePlexTV(
+        items=[_discover_meta("aaa", 1, "Dune"), _discover_meta("bbb", 2, "Arrival")]
+    )
+    service.plex_tv.dates = {"plex://movie/aaa": old, "plex://movie/bbb": new}
+    await service.sync_watchlist(user, SyncStats())
+
+    dates = {
+        e.media_item_id: e.plex_added_at
+        for e in (await db.execute(select(WatchlistEntry))).scalars()
+    }
+    assert dates[item.id] == old
+    assert sorted(dates.values()) == [old, new]
+
+
+async def test_a_watchlist_entry_with_a_date_is_not_asked_again(db):
+    """The date you watchlisted something does not change; ask once, ever."""
+    from datetime import UTC, datetime
+
+    user, item = await _watchlisted_user(db)
+    db.add(
+        WatchlistEntry(
+            user_id=user.id,
+            media_item_id=item.id,
+            active=True,
+            plex_active=True,
+            plex_added_at=datetime(2025, 3, 1, tzinfo=UTC),
+        )
+    )
+    await db.commit()
+
+    service = SyncService(db)
+    service.plex_tv = FakePlexTV(items=[_discover_meta("aaa", 1, "Dune")])
+    await service.sync_watchlist(user, SyncStats())
+
+    assert service.plex_tv.asked_dates == []
+
+
+async def test_watchlist_date_lookups_are_capped_per_sync(db, monkeypatch):
+    """Hundreds of lookups in one burst is what once took out a homelab's DNS
+    (see "Connections to Plex are pooled"); the backlog drains over syncs."""
+    from app.services import sync_service as sync_module
+
+    user, _item = await _watchlisted_user(db)
+    await db.commit()
+    monkeypatch.setattr(sync_module, "WATCHLIST_DATE_BATCH", 1)
+
+    service = SyncService(db)
+    service.plex_tv = FakePlexTV(
+        items=[_discover_meta("aaa", 1, "Dune"), _discover_meta("bbb", 2, "Arrival")]
+    )
+    await service.sync_watchlist(user, SyncStats())
+
+    assert len(service.plex_tv.asked_dates) == 1
+
+
+async def test_watchlisted_at_for_reads_the_user_state_endpoint(monkeypatch):
+    """The response shape Discover really returns: UserState is a *list*."""
+    from datetime import UTC, datetime
+
+    import httpx
+
+    from app.services import plex_tv
+
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "MediaContainer": {
+                    "size": 1,
+                    "UserState": [
+                        {"ratingKey": "678e", "type": "movie", "watchlistedAt": 1795120486}
+                    ],
+                }
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(plex_tv, "_pool", lambda _timeout: client)
+
+    moment = await plex_tv.PlexTVClient().watchlisted_at_for("tok", "plex://movie/678e")
+
+    assert seen["url"].startswith(f"{plex_tv.DISCOVER}/library/metadata/678e/userState")
+    assert moment == datetime(2026, 11, 19, 20, 34, 46, tzinfo=UTC)
+    await client.aclose()

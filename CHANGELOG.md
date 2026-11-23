@@ -4,6 +4,15 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
+## 0.7.1
+
+**"Recently watchlisted" sorts by when you watchlisted it.** Plex's watchlist
+listing leaves that date out, so every entry was dated by the sync that first
+saw it: on an instance synced since August, almost the whole watchlist shared
+one date and the sort meant nothing. Tally now asks Plex for each entry's date
+separately, a hundred per sync, so an existing watchlist gets its real order
+over the first few syncs after upgrading, and a new entry is dated straight away.
+
 ## 0.7.0
 
 **Remove a Plex server you do not want synced.** Every server your Plex account

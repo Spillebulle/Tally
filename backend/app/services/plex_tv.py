@@ -409,6 +409,32 @@ class PlexTVClient:
                     break
         return WatchlistFetch(items=items, complete=complete)
 
+    async def watchlisted_at_for(self, token: str, plex_guid: str) -> datetime | None:
+        """When this account watchlisted one title, from Discover's userState.
+
+        The watchlist listing does not carry `watchlistedAt` even with
+        `includeUserState=1` — every row comes back `userState: false` — so this
+        per-title endpoint is the only place the date exists. Its `UserState` is
+        a *list* of one. None on any refusal: the caller keeps Tally's own date.
+        """
+        rating_key = plex_guid.rsplit("/", 1)[-1] if plex_guid.startswith("plex://") else ""
+        if not rating_key:
+            return None
+        async with self._http() as client:
+            resp = await client.get(
+                f"{DISCOVER}/library/metadata/{rating_key}/userState",
+                headers=plex_headers(token),
+            )
+        if resp.status_code >= 400:
+            return None
+        states = resp.json().get("MediaContainer", {}).get("UserState") or []
+        if isinstance(states, dict):
+            states = [states]
+        for state in states:
+            if isinstance(state, dict) and (moment := watchlisted_at(state)):
+                return moment
+        return None
+
     async def add_to_watchlist(self, token: str, plex_guid: str) -> bool:
         return await self._watchlist_action(token, plex_guid, "addToWatchlist")
 

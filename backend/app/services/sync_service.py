@@ -77,6 +77,8 @@ COMPLETION_THRESHOLD = 0.9
 # call behind a rate limit, so a backlog drains over several syncs rather
 # than turning a single one into an hour of TMDB traffic.
 METADATA_BACKFILL_BATCH = 100
+# Per-title watchlist date lookups per sync; see `_fill_watchlist_dates`.
+WATCHLIST_DATE_BATCH = 100
 
 # How many titles one run fetches cast and crew for. Same shape and same reason
 # as the constant above — one TMDB call each, behind the same rate limiter —
@@ -1378,6 +1380,8 @@ class SyncService:
                 # one pass must not throw away a date it gave on an earlier one.
                 entry.plex_added_at = plex_moment or entry.plex_added_at
 
+        await self._fill_watchlist_dates(user, token, remote_by_item)
+
         # --- push: active here, absent on Plex ---------------------------
         # "Absent on Plex" is only meaningful if the whole watchlist arrived.
         # On a partial fetch every entry past the failing page looks absent,
@@ -1413,6 +1417,49 @@ class SyncService:
                 entry.plex_synced_at = utcnow()
 
         await self.db.commit()
+
+    async def _fill_watchlist_dates(
+        self, user: User, token: str, remote_by_item: dict[int, str]
+    ) -> None:
+        """Ask Plex when each undated entry was watchlisted, a batch per sync.
+
+        Discover's listing leaves the date out, so without this every entry is
+        dated by the sync that first saw it. Bounded by `WATCHLIST_DATE_BATCH`:
+        hundreds of lookups in one burst is the DNS incident all over again, and
+        a dated entry is never asked twice, so the backlog drains and stays gone.
+        Best effort — a failure leaves Tally's own date and stops the batch.
+        """
+        if not remote_by_item:
+            return
+        # Entries created earlier in this pass are only pending in the session.
+        await self.db.flush()
+        pending = (
+            await self.db.execute(
+                select(WatchlistEntry)
+                .where(
+                    WatchlistEntry.user_id == user.id,
+                    WatchlistEntry.media_item_id.in_(list(remote_by_item)),
+                    WatchlistEntry.active.is_(True),
+                    WatchlistEntry.plex_added_at.is_(None),
+                )
+                # Random, not by id: an entry Plex has no date for stays undated
+                # and is asked again, and a fixed order would let a batch's
+                # worth of those starve every entry behind them.
+                .order_by(func.random())
+                .limit(WATCHLIST_DATE_BATCH)
+            )
+        ).scalars().all()
+        for entry in pending:
+            guid = remote_by_item.get(entry.media_item_id) or ""
+            if not guid.startswith("plex://"):
+                continue
+            try:
+                moment = await self.plex_tv.watchlisted_at_for(token, guid)
+            except PlexTVError as exc:
+                log.info("Stopped asking Plex for watchlist dates: %s", exc)
+                break
+            if moment is not None:
+                entry.plex_added_at = moment
 
     async def _remember_plex_guid(self, item: MediaItem, plex_guid: str | None) -> None:
         """Stash a Discover guid so we can later add/remove this item remotely."""
