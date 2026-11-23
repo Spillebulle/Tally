@@ -1814,9 +1814,11 @@ class SyncService:
         stats = SyncStats()
         try:
             await self._set_phase("Looking for Plex servers")
-            servers = await self.discover_servers(user)
-            if not servers:
-                servers = await self.servers_for(user)
+            # Discovery only refreshes what plex.tv knows; what to sync is the
+            # account's own list. plex.tv keeps listing a server the account
+            # removed, so iterating discovery's result would sync it anyway.
+            await self.discover_servers(user)
+            servers = await self.servers_for(user)
             stats.servers = len(servers)
 
             for index, server in enumerate(servers, start=1):

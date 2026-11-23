@@ -1939,3 +1939,82 @@ async def test_remembering_a_guid_tolerates_the_same_film_held_twice(db):
     await db.commit()
 
     await SyncService(db)._remember_plex_guid(item, guid)
+
+
+async def _removed_server_world(db, *, owned: bool):
+    """A server this account has access to but removed for itself."""
+    user = User(username="sam", plex_token_encrypted=encrypt_secret("plex-tv-token"))
+    db.add(user)
+    await db.flush()
+    server = PlexServer(
+        machine_identifier="friend-1",
+        name="Friend",
+        base_url="http://friend:32400",
+        access_token_encrypted=encrypt_secret("token") or "",
+        owned=owned,
+        owner_user_id=user.id if owned else None,
+    )
+    db.add(server)
+    await db.flush()
+    access = UserServerAccess(
+        user_id=user.id,
+        server_id=server.id,
+        access_token_encrypted=encrypt_secret("token") or "",
+        plex_account_id=1,
+        enabled=False,
+    )
+    db.add(access)
+    await db.commit()
+    return user, server, access
+
+
+def _resource_for(server: PlexServer, *, owned: bool):
+    from app.services.plex_tv import PlexConnection, PlexResource
+
+    return PlexResource(
+        name=server.name,
+        client_identifier=server.machine_identifier,
+        access_token="token",
+        owned=owned,
+        product="Plex Media Server",
+        provides="server",
+        connections=[PlexConnection(uri=server.base_url, local=True, relay=False, protocol="http")],
+    )
+
+
+async def test_discovery_does_not_re_add_a_removed_server(db):
+    """plex.tv still lists a server the account removed; discovery must not undo it."""
+    user, server, access = await _removed_server_world(db, owned=False)
+    service = SyncService(db)
+
+    async def resources(_token):
+        return [_resource_for(server, owned=False)]
+
+    service.plex_tv.get_resources = resources
+    await service.discover_servers(user)
+
+    await db.refresh(access)
+    assert access.enabled is False
+
+
+async def test_full_sync_skips_a_server_the_account_removed(db):
+    """Even one the account owns, where client_for would fall back to the owner token."""
+    user, server, _ = await _removed_server_world(db, owned=True)
+    service = SyncService(db)
+
+    async def discover(_user):
+        return [server]
+
+    scanned: list[int] = []
+
+    async def sync_libraries(_user, srv, _stats):
+        scanned.append(srv.id)
+        return []
+
+    service.discover_servers = discover
+    service.sync_libraries = sync_libraries
+
+    run = await service.full_sync(user)
+
+    assert scanned == []
+    assert run.stats["servers"] == 0
