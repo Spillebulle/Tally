@@ -2260,3 +2260,86 @@ async def test_recommendations_without_genres_are_empty_not_an_error(authed_clie
     response = await authed_client.get(f"/api/media/{item.id}/recommendations")
     assert response.status_code == 200, response.text
     assert response.json() == []
+
+
+async def _shared_server(db, *, owner_user_id=None, with_tester_access=True):
+    """A server the tester can reach, plus a second account that reaches it too."""
+    tester = (
+        await db.execute(select(User).where(User.username == "tester"))
+    ).scalar_one()
+    housemate = User(username="housemate")
+    server = PlexServer(
+        machine_identifier="shared-1",
+        name="Friend's Plex",
+        base_url="https://friend.example:32400",
+        access_token_encrypted="encrypted",
+        owner_user_id=owner_user_id,
+    )
+    db.add_all([housemate, server])
+    await db.flush()
+    db.add(PlexLibrary(server_id=server.id, section_key="1", title="Movies", section_type="movie"))
+    db.add(UserServerAccess(user_id=housemate.id, server_id=server.id, access_token_encrypted="e"))
+    if with_tester_access:
+        db.add(UserServerAccess(user_id=tester.id, server_id=server.id, access_token_encrypted="e"))
+    await db.commit()
+    return tester, housemate, server
+
+
+async def _access(db, user_id, server_id):
+    db.expire_all()
+    return (
+        await db.execute(
+            select(UserServerAccess).where(
+                UserServerAccess.user_id == user_id, UserServerAccess.server_id == server_id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def test_removing_a_server_is_per_account(authed_client, db):
+    """Removing a server stops this account using it, and nobody else.
+
+    The global `PlexServer.enabled` switch is owner-only and hides the server
+    from every account; a friend's shared server has no owner in Tally at all.
+    """
+    tester, housemate, server = await _shared_server(db)
+    tester_id, housemate_id, server_id = tester.id, housemate.id, server.id
+
+    response = await authed_client.patch(
+        f"/api/servers/{server_id}/access", json={"enabled": False}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["access_enabled"] is False
+
+    assert (await _access(db, tester_id, server_id)).enabled is False
+    assert (await _access(db, housemate_id, server_id)).enabled is True
+
+    listed = (await authed_client.get("/api/servers")).json()
+    assert [(s["id"], s["access_enabled"]) for s in listed] == [(server_id, False)]
+
+    places = (await authed_client.get("/api/media/places")).json()
+    assert server_id not in [s["id"] for s in places["servers"]]
+
+
+async def test_adding_a_server_back(authed_client, db):
+    _, _, server = await _shared_server(db)
+    await authed_client.patch(f"/api/servers/{server.id}/access", json={"enabled": False})
+
+    response = await authed_client.patch(
+        f"/api/servers/{server.id}/access", json={"enabled": True}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["access_enabled"] is True
+    places = (await authed_client.get("/api/media/places")).json()
+    assert server.id in [s["id"] for s in places["servers"]]
+
+
+async def test_removing_a_server_without_access_is_404(authed_client, db):
+    tester, _, server = await _shared_server(db, with_tester_access=False)
+    tester_id, server_id = tester.id, server.id
+
+    response = await authed_client.patch(
+        f"/api/servers/{server_id}/access", json={"enabled": False}
+    )
+    assert response.status_code == 404
+    assert await _access(db, tester_id, server_id) is None

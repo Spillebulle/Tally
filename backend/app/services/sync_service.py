@@ -380,7 +380,7 @@ class SyncService:
         return client
 
     async def servers_for(
-        self, user: User, *, with_libraries: bool = False
+        self, user: User, *, with_libraries: bool = False, include_removed: bool = False
     ) -> list[PlexServer]:
         """Servers this user can reach.
 
@@ -390,14 +390,15 @@ class SyncService:
         attribute access — so anything that touches the relationship has to say
         so up front. The sync engine does not, and stays on the cheaper query.
         """
+        conditions = [UserServerAccess.user_id == user.id, PlexServer.enabled.is_(True)]
+        # `include_removed` is for Settings, which has to offer "Add back" for a
+        # server this account removed. Everything that syncs leaves it False.
+        if not include_removed:
+            conditions.append(UserServerAccess.enabled.is_(True))
         stmt = (
             select(PlexServer)
             .join(UserServerAccess, UserServerAccess.server_id == PlexServer.id)
-            .where(
-                UserServerAccess.user_id == user.id,
-                UserServerAccess.enabled.is_(True),
-                PlexServer.enabled.is_(True),
-            )
+            .where(*conditions)
         )
         if with_libraries:
             stmt = stmt.options(selectinload(PlexServer.libraries))

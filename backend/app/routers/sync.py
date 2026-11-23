@@ -24,6 +24,7 @@ from ..schemas import (
     LibraryOut,
     LibraryUpdate,
     ProvidersStatus,
+    ServerAccessUpdate,
     ServerOut,
     ServerUpdate,
     SettingsOut,
@@ -177,8 +178,27 @@ async def list_servers(db: DbSession, user: CurrentUser) -> list[ServerOut]:
     # validating. It has to be eager-loaded: a lazy load here raises
     # MissingGreenlet under asyncio, which is what made server discovery return
     # a 500. Loading it up front also replaces the previous query-per-server.
-    servers = await SyncService(db).servers_for(user, with_libraries=True)
-    return [ServerOut.model_validate(server) for server in servers]
+    # Removed servers are listed too, last, so Settings can offer "Add back":
+    # a removed server that vanished from the page could never be restored.
+    servers = await SyncService(db).servers_for(
+        user, with_libraries=True, include_removed=True
+    )
+    enabled_by_server = dict(
+        (
+            await db.execute(
+                select(UserServerAccess.server_id, UserServerAccess.enabled).where(
+                    UserServerAccess.user_id == user.id
+                )
+            )
+        ).all()
+    )
+    out = [
+        ServerOut.model_validate(server).model_copy(
+            update={"access_enabled": enabled_by_server.get(server.id, True)}
+        )
+        for server in servers
+    ]
+    return sorted(out, key=lambda server: not server.access_enabled)
 
 
 @router.post("/servers/discover", response_model=list[ServerOut])
@@ -206,6 +226,37 @@ async def _require_server_access(
     )
     if access.scalar_one_or_none() is None and not user.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this server")
+
+
+@router.patch("/servers/{server_id}/access", response_model=ServerOut)
+async def set_server_access(
+    server_id: int, payload: ServerAccessUpdate, db: DbSession, user: CurrentUser
+) -> ServerOut:
+    """Stop using a server for this account, or start again.
+
+    Only the caller's own `UserServerAccess` row changes, so this needs access
+    rather than ownership — unlike `update_server`, which rewrites a global
+    row. Discovery never writes this flag, so a removal survives every sync.
+    Nothing already imported is touched.
+    """
+    access = (
+        await db.execute(
+            select(UserServerAccess).where(
+                UserServerAccess.user_id == user.id,
+                UserServerAccess.server_id == server_id,
+            )
+        )
+    ).scalar_one_or_none()
+    server = await db.get(PlexServer, server_id)
+    if access is None or server is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Server not found")
+
+    access.enabled = payload.enabled
+    await db.commit()
+    await db.refresh(server, ["libraries"])
+    return ServerOut.model_validate(server).model_copy(
+        update={"access_enabled": access.enabled}
+    )
 
 
 @router.patch("/servers/{server_id}", response_model=ServerOut)

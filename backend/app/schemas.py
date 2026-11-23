@@ -393,6 +393,12 @@ class LibraryOut(ORMModel):
     last_synced_at: datetime | None
 
 
+class ServerAccessUpdate(BaseModel):
+    """Stop using a server for this account only, or start again."""
+
+    enabled: bool
+
+
 class ServerUpdate(BaseModel):
     """Pin a connection address, or clear it to go back to auto-detection.
 
@@ -417,6 +423,9 @@ class ServerOut(ORMModel):
     last_seen_at: datetime | None
     reachable: bool | None = None
     on_deck_window_weeks: int | None = None
+    # Per account, from UserServerAccess: False once this account removed the
+    # server. `enabled` above is the global switch and means something else.
+    access_enabled: bool = True
     libraries: list[LibraryOut] = []
 
 
