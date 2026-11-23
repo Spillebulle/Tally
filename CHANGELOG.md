@@ -4,7 +4,7 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
-## Unreleased
+## 0.7.0
 
 **Remove a Plex server you do not want synced.** Every server your Plex account
 can reach used to be synced whether you wanted it or not, including a friend's
