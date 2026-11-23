@@ -4,6 +4,7 @@ import { api, type HistoryCalendarQuery, type MediaQuery } from '@/lib/api'
 import { useToast } from '@/lib/app-context'
 import { dayWindow, HISTORY_SORTS, useBrowseFilters } from '@/lib/browse-filters'
 import { CardSizeControl, cardSizeStyle, useCardSize } from '@/lib/card-size'
+import { useGridFill } from '@/lib/grid-fill'
 import type { HistoryCalendarDay, HistoryPage, WatchEvent } from '@/lib/types'
 import {
   cn,
@@ -233,6 +234,18 @@ export function History() {
   const setMonth = (next: string) =>
     filters.updateMany({ month: next === thisMonth() ? null : next, day: null })
 
+  // The day headings are only true while the list is in time order. Sorted by
+  // title, consecutive rows come from unrelated dates, and grouping them would
+  // print a heading per row and call each one a day's viewing.
+  const byDay = filters.values.sort === 'watched_at'
+  // Only an ungrouped poster grid is filled to whole rows. The list has no
+  // rows to fill, and under day headings every day ends its own row wherever
+  // its plays run out, so rounding the page would change nothing visible.
+  const fillGrid = view === 'grid' && !byDay
+  const grid = useGridFill(PAGE_SIZE)
+  const pageSize = fillGrid ? (grid.pageSize ?? PAGE_SIZE) : PAGE_SIZE
+  const waitingForGrid = fillGrid && grid.pageSize === null
+
   const query: MediaQuery = {
     ...filters.query,
     media_type: filter === 'movie' || filter === 'episode' ? filter : undefined,
@@ -241,8 +254,8 @@ export function History() {
     // it is the one spelling that is right both before and after the API grows
     // the full filter set.
     anime_only: filter === 'anime' || undefined,
-    offset: page * PAGE_SIZE,
-    limit: PAGE_SIZE,
+    offset: page * pageSize,
+    limit: pageSize,
   }
 
   // The calendar's day panel is the same list endpoint, narrowed to one date.
@@ -252,6 +265,7 @@ export function History() {
 
   const {
     data,
+    isPending: listPending,
     isLoading: listLoading,
     isFetching: listFetching,
     isError,
@@ -262,7 +276,8 @@ export function History() {
     queryFn: () => api.history.list(listQuery),
     placeholderData: keepPreviousData,
     // Under the calendar there is nothing to list until a day is picked.
-    enabled: view !== 'calendar' || day !== null,
+    // The poster grid also waits until it has been measured - see `useGridFill`.
+    enabled: (view !== 'calendar' || day !== null) && !waitingForGrid,
   })
 
   const calendarQuery: HistoryCalendarQuery = {
@@ -343,14 +358,12 @@ export function History() {
   const shownMonth = calendar.data?.month === month ? calendar.data : null
   const monthReady = shownMonth !== null
   const total = data?.total ?? 0
-  const pageCount = Math.ceil(total / PAGE_SIZE)
+  const pageCount = Math.ceil(total / pageSize)
   const events = data?.events ?? []
-  const isLoading = view === 'calendar' ? !monthReady : listLoading
+  // `listPending` rather than `listLoading`: a request held back for the grid
+  // measurement has not started, and must still draw the skeleton.
+  const isLoading = view === 'calendar' ? !monthReady : listPending
   const isFetching = view === 'calendar' ? calendar.isFetching : listFetching
-  // The day headings are only true while the list is in time order. Sorted by
-  // title, consecutive rows come from unrelated dates, and grouping them would
-  // print a heading per row and call each one a day's viewing.
-  const byDay = filters.values.sort === 'watched_at'
   const grouped = byDay ? groupByDay(events) : []
   // `filter` is this page's own parameter rather than one of the shared ones,
   // so it is the one thing `filters.active` cannot know about.
@@ -432,7 +445,11 @@ export function History() {
         />
       ) : isLoading ? (
         view === 'grid' ? (
-          <div className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
+          <div
+            ref={fillGrid ? grid.ref : undefined}
+            className={POSTER_GRID}
+            style={cardSizeStyle(cardSize)}
+          >
             {Array.from({ length: 12 }, (_, index) => (
               <PosterSkeleton key={index} />
             ))}
@@ -518,7 +535,7 @@ export function History() {
           ))}
         </div>
       ) : view === 'grid' ? (
-        <PlayGrid plays={events} size={cardSize} onRemove={removeRow} />
+        <PlayGrid plays={events} size={cardSize} onRemove={removeRow} gridRef={grid.ref} />
       ) : (
         <ul className="card overflow-hidden">
           {events.map((event) => (
@@ -693,13 +710,16 @@ function PlayGrid({
   plays,
   size,
   onRemove,
+  gridRef,
 }: {
   plays: WatchEvent[]
   size: Parameters<typeof cardSizeStyle>[0]
   onRemove: (event: WatchEvent) => void
+  /** Measures the columns for `useGridFill`; only the ungrouped grid has one. */
+  gridRef?: (element: HTMLElement | null) => void
 }) {
   return (
-    <div className={POSTER_GRID} style={cardSizeStyle(size)}>
+    <div ref={gridRef} className={POSTER_GRID} style={cardSizeStyle(size)}>
       {plays.map((event) =>
         event.item ? (
           <div key={event.id} className="group/play relative">

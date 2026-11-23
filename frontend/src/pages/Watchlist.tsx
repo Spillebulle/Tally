@@ -6,12 +6,14 @@ import { useToast } from '@/lib/app-context'
 import type { MediaCard, PaginatedWatchlist } from '@/lib/types'
 import { namesOf, useBrowseFilters, WATCHLIST_SORTS } from '@/lib/browse-filters'
 import { cardSizeStyle, CardSizeControl, useCardSize } from '@/lib/card-size'
+import { useGridFill } from '@/lib/grid-fill'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { Artwork, ArtMark, POSTER_GRID, Poster, PosterSkeleton } from '@/components/Poster'
 import { EmptyState, ErrorState, PageHeader, Segmented, Spinner } from '@/components/ui'
 import { Bookmark, Plus, Search, X } from 'lucide-react'
 
+/** Roughly how many cards a page holds; rounded to whole rows by `useGridFill`. */
 const PAGE_SIZE = 60
 
 /**
@@ -72,18 +74,32 @@ export function Watchlist() {
   // filter drops it, so nothing has to reset the offset here.
   const { page, setPage } = usePageParam()
 
+  // Whole rows of the grid as drawn - see Browse.
+  const grid = useGridFill(PAGE_SIZE)
+  const pageSize = grid.pageSize ?? PAGE_SIZE
+
   const query: MediaQuery = {
     ...filters.query,
     media_type: kind === 'movie' || kind === 'show' ? kind : undefined,
     anime: kind === 'anime' ? 'only' : undefined,
-    offset: page * PAGE_SIZE,
-    limit: PAGE_SIZE,
+    offset: page * pageSize,
+    limit: pageSize,
   }
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
+  // `isPending`: the request waits for the grid to be measured, and that wait
+  // must show the skeleton, not "Your watchlist is empty".
+  const {
+    data,
+    isPending: isLoading,
+    isFetching,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ['watchlist', query],
     queryFn: () => api.watchlist.list(query),
     placeholderData: keepPreviousData,
+    enabled: grid.pageSize !== null,
   })
 
   const genres = useQuery({
@@ -132,7 +148,7 @@ export function Watchlist() {
   // Several genres read as "in Crime, Drama" — the same phrasing one does.
   const genre = namesOf(filters.values.genre)
   const total = data?.total ?? 0
-  const pageCount = Math.ceil(total / PAGE_SIZE)
+  const pageCount = Math.ceil(total / pageSize)
   // `kind` is this page's own parameter rather than one of the shared filters,
   // so it is the one thing `filters.active` cannot know about.
   const narrowed = filters.active || kind !== 'all' || Boolean(filters.values.q)
@@ -188,7 +204,7 @@ export function Watchlist() {
       />
 
       {isLoading ? (
-        <div className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
+        <div ref={grid.ref} className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
           {Array.from({ length: 12 }, (_, index) => (
             <PosterSkeleton key={index} />
           ))}
@@ -233,7 +249,7 @@ export function Watchlist() {
           )}
         </div>
       ) : (
-        <div className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
+        <div ref={grid.ref} className={POSTER_GRID} style={cardSizeStyle(cardSize)}>
           {entries.map((entry) =>
             entry.item ? (
               <div key={entry.id} className="group/entry relative">

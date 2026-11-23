@@ -8,6 +8,7 @@ import { compactNumber } from '@/lib/utils'
 import { certificateLabel } from '@/lib/certificates'
 import { namesOf, SORTS, useBrowseFilters } from '@/lib/browse-filters'
 import { CardSizeControl, useCardSize } from '@/lib/card-size'
+import { useGridFill } from '@/lib/grid-fill'
 import { BrowseFilters } from '@/components/BrowseFilters'
 import { Pagination, usePageParam } from '@/components/Pagination'
 import { PosterGrid } from '@/components/Poster'
@@ -22,6 +23,7 @@ import { Film, Search } from 'lucide-react'
  */
 export type BrowseMode = 'movies' | 'shows' | 'anime' | 'search' | 'browse'
 
+/** Roughly how many cards a page holds; rounded to whole rows by `useGridFill`. */
 const PAGE_SIZE = 60
 
 interface BrowseProps {
@@ -101,18 +103,33 @@ export function Browse({ mode }: BrowseProps) {
     return undefined
   }, [mode, animeKind])
 
+  // Whole rows of the grid as drawn, so a page never ends on a ragged row.
+  const grid = useGridFill(PAGE_SIZE)
+  const pageSize = grid.pageSize ?? PAGE_SIZE
+
   const query: MediaQuery = {
     ...filters.query,
     media_type: mediaType,
     anime: animeFilter,
-    offset: page * PAGE_SIZE,
-    limit: PAGE_SIZE,
+    offset: page * pageSize,
+    limit: pageSize,
   }
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
+  // `isPending`, not `isLoading`: the request waits for the grid to be
+  // measured, and a query that has not started is not "loading" to TanStack -
+  // read that way, the wait would render as an empty library.
+  const {
+    data,
+    isPending: isLoading,
+    isFetching,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ['media', query],
     queryFn: () => api.media.list(query),
     placeholderData: keepPreviousData,
+    enabled: grid.pageSize !== null,
   })
 
   const genres = useQuery({
@@ -172,7 +189,7 @@ export function Browse({ mode }: BrowseProps) {
   }
 
   const total = data?.total ?? 0
-  const pageCount = Math.ceil(total / PAGE_SIZE)
+  const pageCount = Math.ceil(total / pageSize)
 
   return (
     <div>
@@ -254,6 +271,7 @@ export function Browse({ mode }: BrowseProps) {
           cards={data?.items ?? []}
           loading={isLoading}
           size={cardSize}
+          gridRef={grid.ref}
           skeletonCount={PAGE_SIZE / 3}
           onQuickWatch={(card) => markWatched.mutate(card)}
           quickWatchPendingId={markWatched.isPending ? markWatched.variables.id : null}

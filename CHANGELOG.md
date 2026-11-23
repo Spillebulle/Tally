@@ -4,6 +4,15 @@ What changed in each release, newest first, in terms of what you would notice.
 Releases before 0.4.0 kept their notes on the
 [releases page](https://github.com/Spillebulle/Tally/releases) only.
 
+## 0.7.2
+
+**Poster grids end on a full row.** A page held a fixed 60 posters, so unless
+the number of columns divided 60, the last row of every page had empty slots.
+A page now holds about 60 rounded to whole rows of the grid as it is drawn, on
+Movies, Shows, Anime, Search, the Watchlist and the History poster grid (when it
+is not grouped by day). Resizing the window or changing the poster size
+re-rounds it.
+
 ## 0.7.1
 
 **"Recently watchlisted" sorts by when you watchlisted it.** Plex's watchlist

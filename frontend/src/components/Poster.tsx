@@ -1,3 +1,4 @@
+import type { Ref } from 'react'
 import { Link } from 'react-router-dom'
 import { Check, Sparkles } from 'lucide-react'
 import type { MediaCard } from '@/lib/types'
@@ -329,6 +330,8 @@ interface PosterGridProps {
   quickWatchPendingId?: number | null
   /** The reader's chosen rung. Omitted leaves the grid at `--art-card`. */
   size?: CardSize
+  /** For measuring the column count - see `lib/grid-fill.ts`. */
+  gridRef?: Ref<HTMLDivElement>
 }
 
 export function PosterGrid({
@@ -338,9 +341,10 @@ export function PosterGrid({
   onQuickWatch,
   quickWatchPendingId = null,
   size,
+  gridRef,
 }: PosterGridProps) {
   return (
-    <div className={POSTER_GRID} style={size ? cardSizeStyle(size) : undefined}>
+    <div ref={gridRef} className={POSTER_GRID} style={size ? cardSizeStyle(size) : undefined}>
       {loading
         ? Array.from({ length: skeletonCount }, (_, index) => <PosterSkeleton key={index} />)
         : cards.map((card) => (
